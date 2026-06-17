@@ -2,7 +2,7 @@
 
 > Snapshot of the approved build plan (canonical copy lives in the Claude Code plans dir). This in-repo copy exists so cloud plan-refinement has it as repo context.
 
-> Working name `cordon` ("a cordon around your sensitive data") — matches the warden/keeper/canon security family. Renameable in one constant (`config.brand`); the build won't hardcode it like deja does. Tagline candidate: **"own your prompts — PII never leaves your perimeter."**
+> Name: **`cordon`** (locked) — "a cordon around your sensitive data," matching the warden/keeper/canon security family. Still kept in one constant (`config.brand`) rather than hardcoded like deja does. Tagline: **"own your prompts — PII never leaves your perimeter."**
 
 ## Context
 
@@ -97,5 +97,5 @@ Mirror deja's harness: `_run_tests.mjs` spawns a **stub upstream that echoes the
 4. `docker compose up -d --build` → `curl :8080/healthz` ok; `/dashboard` shows redaction counts.
 
 ## Open (non-blocking)
-- **Name** — `cordon` is the working name; alternates: `veil`, `chaff`, `scrub`. Centralized in `config.brand`, trivial to change before first commit.
+- **Name** — locked: **cordon**. Kept centralized in `config.brand` regardless.
 - Publishing (PUBLIC repo / npm / OYS profile listing) follows the deja playbook **after** local build + tests pass.
