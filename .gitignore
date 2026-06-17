@@ -17,6 +17,8 @@ secrets/
 *.log
 audit.jsonl
 *.audit.jsonl
+# test/smoke audit artifacts (_audit_test.jsonl, …)
+_*.jsonl
 coverage/
 
 # os cruft
