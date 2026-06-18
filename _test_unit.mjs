@@ -125,5 +125,59 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   ok("stream: literal '<' does not stall", out === "5 < 10 and more", out);
 }
 
+// ---------------- Class 1: model-visible structured fields are redacted ----------------
+const noRaw = (body, raw) => !JSON.stringify(body).includes(raw);
+{
+  const v = new Vault("reversible");
+  const body = { messages: [{ role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "send", arguments: '{"to":"jane@acme.com","card":"4012888888881881"}' } }] }] };
+  const { deidBody } = applyRedaction(body, "openai", v, ALL, detector);
+  ok("Class1: openai tool_calls.arguments redacted", noRaw(deidBody, "jane@acme.com") && noRaw(deidBody, "4012888888881881"));
+}
+{
+  const v = new Vault("reversible");
+  const body = { messages: [{ role: "user", name: "bob@corp.io", content: "hi" }] };
+  const { deidBody } = applyRedaction(body, "openai", v, ALL, detector);
+  ok("Class1: openai message.name redacted", noRaw(deidBody, "bob@corp.io"));
+}
+{
+  const v = new Vault("reversible");
+  const body = { messages: [{ role: "user", content: "x" }], tools: [{ type: "function", function: { name: "f", description: "e.g. john@acme.com", parameters: { type: "object", properties: { note: { type: "string", description: "card 4012888888881881" } } } } }] };
+  const { deidBody } = applyRedaction(body, "openai", v, ALL, detector);
+  ok("Class1: openai tool description+params redacted", noRaw(deidBody, "john@acme.com") && noRaw(deidBody, "4012888888881881"));
+}
+{
+  const v = new Vault("reversible");
+  const body = { messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input: { phone: "555-123-4567", email: "deep@x.com" } }] }] };
+  const { deidBody } = applyRedaction(body, "anthropic", v, ALL, detector);
+  ok("Class1: anthropic tool_use.input redacted", noRaw(deidBody, "555-123-4567") && noRaw(deidBody, "deep@x.com"));
+}
+
+// ---------------- Class 2: unicode / zero-width / full-width evasion ----------------
+ok("Class2: zero-width email detected", types(runAll("mail john​@acme.com now", ["pii"])).includes("EMAIL"));
+ok("Class2: full-width card detected", types(runAll("card ４０１２８８８８８８８８１８８１", ["pci"])).includes("CREDIT_CARD"));
+{
+  const v = new Vault("reversible");
+  const body = { messages: [{ role: "user", content: "reach john​@acme.com" }] };
+  const { deidBody } = applyRedaction(body, "openai", v, ALL, detector);
+  const sent = deidBody.messages[0].content;
+  ok("Class2: zero-width email redacted in body", !sent.includes("acme.com") && sent.includes("<EMAIL_1>"), sent);
+  ok("Class2: re-id restores original zero-width value", v.lookup("<EMAIL_1>") === "john​@acme.com");
+}
+
+// ---------------- Class 3: format / secret-key coverage ----------------
+ok("Class3: intl phone (+44)", types(runAll("ring +44 20 7946 0958 please", ["pii"])).includes("PHONE"));
+ok("Class3: dot-separated card", types(runAll("card 4012.8888.8888.1881", ["pci"])).includes("CREDIT_CARD"));
+ok("Class3: compressed IPv6", types(runAll("addr 2001:db8::1 up", ["pii"])).includes("IPV6"));
+ok("Class3: Stripe key", types(runAll("k sk_live_abcdefghijklmnopqrstuvwx", ["secrets"])).includes("STRIPE_KEY"));
+ok("Class3: npm token", types(runAll("t npm_abcdefghijklmnopqrstuvwxyz0123456789", ["secrets"])).includes("NPM_TOKEN"));
+ok("Class3: Slack webhook", types(runAll("h https://hooks.slack.com/services/T00/B11/abcdefghijklmnopqrstuvwx", ["secrets"])).includes("SLACK_WEBHOOK"));
+ok("Class3: SendGrid key", types(runAll("sg SG.abcdefghijklmnopqrstuv.abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", ["secrets"])).includes("SENDGRID_KEY"));
+ok("Class3: GitHub fine-grained PAT", types(runAll("p github_pat_" + "A".repeat(82), ["secrets"])).includes("GITHUB_FINEGRAINED_PAT"));
+
+// ---------------- FP guards: the new coverage must not over-redact ----------------
+ok("FP: plain ASCII email unaffected", types(runAll("a@b.com", ["pii"])).join() === "EMAIL");
+ok("FP: version string is not a card", !types(runAll("v1.2.3.4.5.6.7", ["pci"])).includes("CREDIT_CARD"));
+ok("FP: a normal sentence has no spans", runAll("the quick brown fox jumps", ALL).length === 0);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

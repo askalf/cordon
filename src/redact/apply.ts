@@ -10,10 +10,29 @@ const slot = (obj: any, key: string | number): Slot => ({
   set: (v) => (obj[key] = v),
 });
 
+// Recursively push a slot for EVERY string leaf of an object/array. Used for
+// model-visible structured fields that carry user data (tool_use inputs, tool
+// schemas, tool_call arguments) — a raw email/card hiding in any of them would
+// otherwise reach the model. Depth-capped so a pathological schema can't blow
+// the stack (a redaction crash would fail the request closed, but cheap to avoid).
+const MAX_LEAF_DEPTH = 16;
+function pushStringLeaves(node: any, slots: Slot[], depth = 0): void {
+  if (depth > MAX_LEAF_DEPTH || !node || typeof node !== "object") return;
+  const keys = Array.isArray(node) ? node.map((_: any, i: number) => i) : Object.keys(node);
+  for (const k of keys) {
+    const v = (node as any)[k];
+    if (typeof v === "string") slots.push(slot(node, k));
+    else if (v && typeof v === "object") pushStringLeaves(v, slots, depth + 1);
+  }
+}
+
 /**
- * Collect every REDACTABLE assistant/user text field in a provider REQUEST body.
- * Walks message content (string or content-part array) and Anthropic system blocks
- * and tool_result content. Images, tool schemas, and tool_use inputs are left alone.
+ * Collect every REDACTABLE text field in a provider REQUEST body. Walks message
+ * content (string or content-part array), Anthropic system blocks + tool_result
+ * content, AND every model-visible structured field that can carry user data:
+ * OpenAI message `name` + assistant `tool_calls[].function.arguments`, tool
+ * definitions (descriptions + parameter schemas), and Anthropic `tool_use` inputs.
+ * Only image parts and raw provider-auth headers are intentionally left untouched.
  */
 function requestTextSlots(body: any, provider: Provider): Slot[] {
   const slots: Slot[] = [];
@@ -32,6 +51,9 @@ function requestTextSlots(body: any, provider: Provider): Slot[] {
           // Anthropic tool_result content can itself be a string or block array.
           if (typeof part.content === "string") slots.push(slot(part, "content"));
           else if (Array.isArray(part.content)) pushContent(part, "content");
+        } else if (part.type === "tool_use" && part.input && typeof part.input === "object") {
+          // Anthropic tool_use args are user-supplied data, not a fixed schema.
+          pushStringLeaves(part.input, slots);
         }
       }
     }
@@ -42,11 +64,31 @@ function requestTextSlots(body: any, provider: Provider): Slot[] {
     else if (Array.isArray(body.system))
       for (const b of body.system)
         if (b?.type === "text" && typeof b.text === "string") slots.push(slot(b, "text"));
+    if (Array.isArray(body.tools))
+      for (const t of body.tools) {
+        if (t && typeof t.description === "string") slots.push(slot(t, "description"));
+        if (t && t.input_schema && typeof t.input_schema === "object") pushStringLeaves(t.input_schema, slots);
+      }
+  } else {
+    // OpenAI tool definitions: description + parameter schema string leaves.
+    if (Array.isArray(body.tools))
+      for (const t of body.tools) {
+        const fn = t?.function;
+        if (fn && typeof fn.description === "string") slots.push(slot(fn, "description"));
+        if (fn && fn.parameters && typeof fn.parameters === "object") pushStringLeaves(fn.parameters, slots);
+      }
   }
 
   for (const msg of body.messages ?? []) {
-    if (msg && (typeof msg.content === "string" || Array.isArray(msg.content)))
-      pushContent(msg, "content");
+    if (!msg || typeof msg !== "object") continue;
+    if (typeof msg.content === "string" || Array.isArray(msg.content)) pushContent(msg, "content");
+    // OpenAI: participant `name` and assistant `tool_calls` arguments are model-visible.
+    if (typeof msg.name === "string") slots.push(slot(msg, "name"));
+    if (Array.isArray(msg.tool_calls))
+      for (const tc of msg.tool_calls)
+        // arguments is a JSON STRING; redacting it as text keeps it valid JSON
+        // (placeholders are <TYPE_N>) and re-identification restores it on return.
+        if (tc?.function && typeof tc.function.arguments === "string") slots.push(slot(tc.function, "arguments"));
   }
 
   return slots;

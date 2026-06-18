@@ -21,7 +21,7 @@ export const patterns: PatternDef[] = [
   {
     type: "CREDIT_CARD",
     sets: ["pci"],
-    regex: /\b\d(?:[ -]?\d){12,18}\b/g,
+    regex: /\b\d(?:[ .-]?\d){12,18}\b/g,
     validate: luhn,
     priority: 7,
   },
@@ -59,6 +59,14 @@ export const patterns: PatternDef[] = [
     regex: /\b(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}\b/g,
     priority: 4,
   },
+  {
+    // Compressed form (one `::`). Requires a hex group before and after the `::`,
+    // so it can't match a single-colon MAC or a stray `a::b` scope operator.
+    type: "IPV6",
+    sets: ["pii"],
+    regex: /\b(?:[0-9A-Fa-f]{1,4}:){1,6}:(?:[0-9A-Fa-f]{1,4}:?){0,5}[0-9A-Fa-f]{1,4}\b/g,
+    priority: 4,
+  },
 
   // ---- government / financial identifiers ----
   {
@@ -80,6 +88,19 @@ export const patterns: PatternDef[] = [
     type: "PHONE",
     sets: ["pii"],
     regex: /(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}\b/g,
+    priority: 2,
+  },
+  {
+    // International / E.164 form: an explicit `+<country code>` then 7–14 more
+    // digits with arbitrary grouping. The required leading `+` keeps FP low; the
+    // validator pins the total digit count to a real phone-number length.
+    type: "PHONE",
+    sets: ["pii"],
+    regex: /\+\d[\d\s().-]{6,16}\d/g,
+    validate: (s) => {
+      const d = s.replace(/\D/g, "");
+      return d.length >= 8 && d.length <= 15;
+    },
     priority: 2,
   },
 

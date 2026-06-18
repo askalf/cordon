@@ -66,4 +66,44 @@ export const secretPatterns: PatternDef[] = [
     regex: /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]+?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/g,
     priority: 10,
   },
+  {
+    // Stripe secret / restricted keys (underscore form — distinct from OpenAI sk-).
+    type: "STRIPE_KEY",
+    sets: ["secrets"],
+    regex: /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b/g,
+    priority: 9,
+  },
+  {
+    // GitHub fine-grained PAT (the gh*_ rule above doesn't cover this prefix).
+    type: "GITHUB_FINEGRAINED_PAT",
+    sets: ["secrets"],
+    regex: /\bgithub_pat_[A-Za-z0-9_]{40,}\b/g,
+    priority: 9,
+  },
+  {
+    type: "SENDGRID_KEY",
+    sets: ["secrets"],
+    regex: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g,
+    priority: 9,
+  },
+  {
+    type: "NPM_TOKEN",
+    sets: ["secrets"],
+    regex: /\bnpm_[A-Za-z0-9]{36}\b/g,
+    priority: 9,
+  },
+  {
+    // Google OAuth refresh token (starts 1// — rare prefix, low FP).
+    type: "GOOGLE_OAUTH_REFRESH",
+    sets: ["secrets"],
+    regex: /\b1\/\/[0-9A-Za-z_-]{20,}\b/g,
+    priority: 8,
+  },
+  {
+    // Slack incoming-webhook URL — the path segment is the secret.
+    type: "SLACK_WEBHOOK",
+    sets: ["secrets"],
+    regex: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]{20,}/g,
+    priority: 9,
+  },
 ];
