@@ -135,4 +135,9 @@ A stub upstream **echoes the body it received**, so the suites assert the model 
 
 cordon currently redacts the two generation endpoints (`/v1/chat/completions`, `/v1/messages`); other `/v1/*` paths (e.g. `count_tokens`, `embeddings`) pass through verbatim. Streaming token/usage counts are the upstream's (computed on the de-identified text).
 
+## The agent-security stack
+
+One spine across every surface an agent touches: **[warden](https://github.com/askalf/warden)** (own your agent security) contains the call · **[canon](https://github.com/askalf/canon)** (own your agent skills) vets the tool · **[keeper](https://github.com/askalf/keeper)** (own your agent secrets) holds the keys · **[picket](https://github.com/askalf/picket)** (own your agent browser) governs the page · **cordon** (own your prompts) strips the PII *(you are here)*. Run them together → **[agent-security-stack](https://github.com/askalf/agent-security-stack)**.
+
+---
 Part of the [Own Your Stack](https://sprayberrylabs.com/own-your-stack) portfolio.
