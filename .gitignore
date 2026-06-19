@@ -1,0 +1,26 @@
+# deps / build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# secrets & local env — never commit (and never let a cloud handoff carry these)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+secrets/
+
+# runtime artifacts
+*.log
+audit.jsonl
+*.audit.jsonl
+# test/smoke audit artifacts (_audit_test.jsonl, …)
+_*.jsonl
+coverage/
+
+# os cruft
+.DS_Store
+Thumbs.db

@@ -1,0 +1,33 @@
+name: cordon
+
+# cordon keeps no cache and no shared state — the redaction vault is per-request and
+# ephemeral, policy is in-memory, the audit log is a local file — so it runs as a
+# single self-contained service (no Redis/DB sidecar needed).
+services:
+  cordon:
+    build: .
+    image: cordon:latest
+    container_name: cordon
+    restart: unless-stopped
+    init: true
+    # Bound to localhost — front with a Cloudflare Tunnel / reverse proxy to expose,
+    # or join another compose network so sibling services can reach it by name.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      PORT: "8080"
+      FAIL_MODE: "${CORDON_FAIL_MODE:-closed}"
+      DEFAULT_MODE: "${CORDON_DEFAULT_MODE:-reversible}"
+      ACTIVE_SETS: "${CORDON_ACTIVE_SETS:-pii,phi,pci,secrets}"
+      CONSISTENT_PSEUDONYMS: "${CORDON_CONSISTENT_PSEUDONYMS:-false}"
+      TENANT_SECRET: "${CORDON_TENANT_SECRET:-}"
+      AUDIT_LOG: "/app/data/audit.jsonl"
+      ADMIN_TOKEN: "${CORDON_ADMIN_TOKEN:-}"
+      TENANT_FROM_AUTH: "${CORDON_TENANT_FROM_AUTH:-true}"
+      OPENAI_BASE: "${CORDON_OPENAI_BASE:-https://api.openai.com}"
+      ANTHROPIC_BASE: "${CORDON_ANTHROPIC_BASE:-https://api.anthropic.com}"
+    volumes:
+      - cordon-data:/app/data # persist the hash-chained audit log across rebuilds
+
+volumes:
+  cordon-data:
