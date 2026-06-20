@@ -151,6 +151,16 @@ const noRaw = (body, raw) => !JSON.stringify(body).includes(raw);
   const { deidBody } = applyRedaction(body, "anthropic", v, ALL, detector);
   ok("Class1: anthropic tool_use.input redacted", noRaw(deidBody, "555-123-4567") && noRaw(deidBody, "deep@x.com"));
 }
+{
+  // Class1b: a card / routing number sent as a JSON NUMBER (not a string) must be
+  // redacted, while benign numeric ids/quantities must NOT be over-redacted.
+  const v = new Vault("reversible");
+  const body = { messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "pay", input: { amount: 1299, card: 4012888888881881, order_id: 7350112233 } }] }] };
+  const { deidBody } = applyRedaction(body, "anthropic", v, ALL, detector);
+  ok("Class1b: numeric card in tool_use.input redacted", noRaw(deidBody, "4012888888881881"), JSON.stringify(deidBody));
+  ok("Class1b: benign numeric id/amount NOT over-redacted",
+    JSON.stringify(deidBody).includes("7350112233") && JSON.stringify(deidBody).includes("1299"), JSON.stringify(deidBody));
+}
 
 // ---------------- Class 2: unicode / zero-width / full-width evasion ----------------
 ok("Class2: zero-width email detected", types(runAll("mail john​@acme.com now", ["pii"])).includes("EMAIL"));

@@ -2,7 +2,7 @@ import { clone } from "../util";
 import type { Detector, Provider, RedactSet, Span } from "../types";
 import type { Vault } from "./vault";
 
-type Slot = { get(): string; set(v: string): void };
+type Slot = { get(): string; set(v: string): void; numeric?: boolean };
 
 /** A closure over (parent object, key) that reads/writes one string field in place. */
 const slot = (obj: any, key: string | number): Slot => ({
@@ -10,11 +10,22 @@ const slot = (obj: any, key: string | number): Slot => ({
   set: (v) => (obj[key] = v),
 });
 
-// Recursively push a slot for EVERY string leaf of an object/array. Used for
-// model-visible structured fields that carry user data (tool_use inputs, tool
-// schemas, tool_call arguments) — a raw email/card hiding in any of them would
-// otherwise reach the model. Depth-capped so a pathological schema can't blow
-// the stack (a redaction crash would fail the request closed, but cheap to avoid).
+// A numeric/bigint leaf, coerced to text for detection and marked `numeric` so the
+// redaction pass only treats it as PII when its ENTIRE value is a checksum-validated
+// financial identifier (see applyRedaction). A 16-digit card or 9-digit routing
+// number sent as a JSON NUMBER would otherwise skip detection and reach the model.
+const numSlot = (obj: any, key: string | number): Slot => ({
+  get: () => String(obj[key]),
+  set: (v) => (obj[key] = v),
+  numeric: true,
+});
+
+// Recursively push a slot for every string leaf — and every numeric leaf — of an
+// object/array. Used for model-visible structured fields that carry user data
+// (tool_use inputs, tool schemas, tool_call arguments) — a raw email/card hiding
+// in any of them would otherwise reach the model. Depth-capped so a pathological
+// schema can't blow the stack (a redaction crash would fail the request closed,
+// but cheap to avoid).
 const MAX_LEAF_DEPTH = 16;
 function pushStringLeaves(node: any, slots: Slot[], depth = 0): void {
   if (depth > MAX_LEAF_DEPTH || !node || typeof node !== "object") return;
@@ -22,6 +33,7 @@ function pushStringLeaves(node: any, slots: Slot[], depth = 0): void {
   for (const k of keys) {
     const v = (node as any)[k];
     if (typeof v === "string") slots.push(slot(node, k));
+    else if (typeof v === "number" || typeof v === "bigint") slots.push(numSlot(node, k));
     else if (v && typeof v === "object") pushStringLeaves(v, slots, depth + 1);
   }
 }
@@ -131,7 +143,13 @@ export function applyRedaction(
   for (const sl of slots) {
     const text = sl.get();
     if (!text) continue;
-    const spans = detector.detect(text, activeSets);
+    let spans = detector.detect(text, activeSets);
+    if (sl.numeric)
+      // A bare number is PII only when its WHOLE value is a checksum-validated
+      // financial identifier. The format-only patterns (PHONE, SSN, DATE) would
+      // false-positive on benign numeric ids / quantities / timestamps, so they
+      // are not applied to numeric leaves.
+      spans = spans.filter((s) => NUMERIC_PII.has(s.type) && s.start === 0 && s.end === text.length);
     if (!spans.length) continue;
     sl.set(replaceSpans(text, spans, vault));
     all.push(...spans);
@@ -139,6 +157,10 @@ export function applyRedaction(
 
   return { deidBody, spans: all };
 }
+
+// Entity types safe to redact from a bare numeric leaf — each has a checksum
+// validator, so a whole-value match is high-confidence rather than format noise.
+const NUMERIC_PII = new Set(["CREDIT_CARD", "IBAN", "US_ROUTING"]);
 
 /** Tally spans into { TYPE: count } for the audit record and X-Redacted-Types header. */
 export function tally(spans: Span[]): Record<string, number> {
