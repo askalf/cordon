@@ -161,6 +161,34 @@ const noRaw = (body, raw) => !JSON.stringify(body).includes(raw);
   ok("Class1b: benign numeric id/amount NOT over-redacted",
     JSON.stringify(deidBody).includes("7350112233") && JSON.stringify(deidBody).includes("1299"), JSON.stringify(deidBody));
 }
+{
+  // Class1c: a numeric card inside tool_calls.arguments (a JSON STRING) is redacted
+  // AND the arguments stay valid JSON (a quoted placeholder, not a bare token).
+  const v = new Vault("reversible");
+  const body = { messages: [{ role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "pay", arguments: '{"card":4012888888881881,"qty":3}' } }] }] };
+  const { deidBody } = applyRedaction(body, "openai", v, ALL, detector);
+  const args = deidBody.messages[0].tool_calls[0].function.arguments;
+  ok("Class1c: numeric card in tool_calls.arguments redacted", noRaw(deidBody, "4012888888881881"), args);
+  let valid = false; try { const o = JSON.parse(args); valid = typeof o.card === "string" && o.qty === 3; } catch {}
+  ok("Class1c: redacted arguments remain valid JSON", valid, args);
+}
+{
+  // Class1d: a bare-STRING element in a content array must be redacted (was skipped).
+  const v = new Vault("reversible");
+  const body = { messages: [{ role: "user", content: ["email john@acme.com please"] }] };
+  const { deidBody } = applyRedaction(body, "openai", v, ALL, detector);
+  ok("Class1d: bare-string content-array element redacted", noRaw(deidBody, "john@acme.com"), JSON.stringify(deidBody));
+}
+{
+  // Finding 3: a stream that ends mid-placeholder ("<EMAIL_1", no closing '>') must
+  // restore by unique prefix, not emit the partial placeholder to the client.
+  const v = new Vault("reversible");
+  v.placeholderFor("john@acme.com", "EMAIL"); // → <EMAIL_1>
+  const sr = new StreamReidentifier(v);
+  let out = sr.push("see <EMAIL_1"); // ends mid-token; the forming tail is held
+  out += sr.end();                   // stream ends — must resolve, not leak the partial
+  ok("stream: truncated trailing placeholder restored (not leaked)", out === "see john@acme.com", out);
+}
 
 // ---------------- Class 2: unicode / zero-width / full-width evasion ----------------
 ok("Class2: zero-width email detected", types(runAll("mail john​@acme.com now", ["pii"])).includes("EMAIL"));

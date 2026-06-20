@@ -47,10 +47,18 @@ export class StreamReidentifier {
     return restore(flush, this.vault);
   }
 
-  /** Flush the remainder at end-of-stream (restore complete placeholders; keep stray partials). */
+  /** Flush the remainder at end-of-stream. A stream that ended mid-placeholder
+   *  leaves a forming token like "<EMAIL_1" that restore() can't match — emitting
+   *  it verbatim would leak a partial placeholder to the client instead of the
+   *  real value. Resolve such a truncated tail by unique prefix first. */
   end(): string {
-    const out = restore(this.buf, this.vault);
+    let tail = this.buf;
     this.buf = "";
-    return out;
+    const lastOpen = tail.lastIndexOf("<");
+    if (lastOpen !== -1 && isFormingPlaceholder(tail.slice(lastOpen))) {
+      const real = this.vault.resolvePartial(tail.slice(lastOpen));
+      if (real !== undefined) tail = tail.slice(0, lastOpen) + real;
+    }
+    return restore(tail, this.vault);
   }
 }

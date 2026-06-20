@@ -51,6 +51,22 @@ export class Vault {
     return this.rev.get(placeholder);
   }
 
+  /** Resolve a TRUNCATED placeholder (a stream that ended mid-token, e.g. "<EMAIL_1"
+   *  with no closing ">") by UNIQUE prefix match — so the real value is restored
+   *  rather than the partial placeholder being emitted to the client. Ambiguous or
+   *  no match → undefined (emit as-is). Reversible mode only. */
+  resolvePartial(partial: string): string | undefined {
+    if (this.mode !== "reversible" || !partial.startsWith("<")) return undefined;
+    let found: string | undefined;
+    for (const [token, value] of this.rev) {
+      if (token.startsWith(partial)) {
+        if (found !== undefined) return undefined; // ambiguous — don't guess
+        found = value;
+      }
+    }
+    return found;
+  }
+
   /** Whether any reverse mappings exist (i.e. there is anything to re-identify). */
   get hasReverse(): boolean {
     return this.rev.size > 0;

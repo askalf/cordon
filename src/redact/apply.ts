@@ -46,8 +46,9 @@ function pushStringLeaves(node: any, slots: Slot[], depth = 0): void {
  * definitions (descriptions + parameter schemas), and Anthropic `tool_use` inputs.
  * Only image parts and raw provider-auth headers are intentionally left untouched.
  */
-function requestTextSlots(body: any, provider: Provider): Slot[] {
+function requestTextSlots(body: any, provider: Provider): { slots: Slot[]; finalizers: (() => void)[] } {
   const slots: Slot[] = [];
+  const finalizers: (() => void)[] = []; // run after redaction (re-serialize parsed JSON-string fields)
 
   const pushContent = (container: any, key: string | number) => {
     const c = container[key];
@@ -56,6 +57,7 @@ function requestTextSlots(body: any, provider: Provider): Slot[] {
     } else if (Array.isArray(c)) {
       for (let i = 0; i < c.length; i++) {
         const part = c[i];
+        if (typeof part === "string") { slots.push(slot(c, i)); continue; } // a bare-string content element
         if (!part || typeof part !== "object") continue;
         if (part.type === "text" && typeof part.text === "string") {
           slots.push(slot(part, "text"));
@@ -97,13 +99,25 @@ function requestTextSlots(body: any, provider: Provider): Slot[] {
     // OpenAI: participant `name` and assistant `tool_calls` arguments are model-visible.
     if (typeof msg.name === "string") slots.push(slot(msg, "name"));
     if (Array.isArray(msg.tool_calls))
-      for (const tc of msg.tool_calls)
-        // arguments is a JSON STRING; redacting it as text keeps it valid JSON
-        // (placeholders are <TYPE_N>) and re-identification restores it on return.
-        if (tc?.function && typeof tc.function.arguments === "string") slots.push(slot(tc.function, "arguments"));
+      for (const tc of msg.tool_calls) {
+        const fn = tc?.function;
+        if (!fn || typeof fn.arguments !== "string") continue;
+        // arguments is a JSON STRING. Parse → redact its leaves (incl. NUMERIC PII)
+        // → re-serialize, so a redacted number becomes a QUOTED "<TYPE_N>" and the
+        // args stay valid JSON (a textual replace left an unquoted placeholder).
+        // Unparseable args fall back to text redaction.
+        let parsed: any;
+        try { parsed = JSON.parse(fn.arguments); } catch { parsed = undefined; }
+        if (parsed && typeof parsed === "object") {
+          pushStringLeaves(parsed, slots);
+          finalizers.push(() => { fn.arguments = JSON.stringify(parsed); });
+        } else {
+          slots.push(slot(fn, "arguments"));
+        }
+      }
   }
 
-  return slots;
+  return { slots, finalizers };
 }
 
 /** Replace spans in one string right-to-left so earlier offsets stay valid. */
@@ -137,7 +151,7 @@ export function applyRedaction(
   detector: Detector,
 ): RedactionResult {
   const deidBody = clone(rawBody);
-  const slots = requestTextSlots(deidBody, provider);
+  const { slots, finalizers } = requestTextSlots(deidBody, provider);
   const all: Span[] = [];
 
   for (const sl of slots) {
@@ -154,6 +168,7 @@ export function applyRedaction(
     sl.set(replaceSpans(text, spans, vault));
     all.push(...spans);
   }
+  for (const f of finalizers) f(); // re-serialize parsed JSON-string fields (tool_calls.arguments)
 
   return { deidBody, spans: all };
 }
