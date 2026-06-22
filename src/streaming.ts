@@ -42,10 +42,15 @@ export async function captureAndReidentify(
   res.setHeader("cache-control", "no-cache");
 
   const reider = new StreamReidentifier(vault);
-  const emitText = (chunk: string) => {
-    if (chunk) res.write(adapter.frameFromText(chunk));
+  // The content-block index our re-emitted text frames target. Anthropic responses can
+  // interleave blocks (a `thinking` block at index 0, the `text` block at index 1, plus
+  // tool_use blocks); a re-emitted text_delta MUST carry the matching block index or the
+  // client SDK throws "Content block is not a text block". OpenAI has no block index → 0.
+  let emitIndex = 0;
+  const emitText = (chunk: string, index = emitIndex) => {
+    if (chunk) res.write(adapter.frameFromText(chunk, index));
   };
-  const flushTail = () => emitText(reider.end());
+  const flushTail = () => emitText(reider.end(), emitIndex);
 
   const handleFrame = (frame: string) => {
     const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
@@ -61,20 +66,29 @@ export async function captureAndReidentify(
     }
 
     if (provider === "anthropic") {
-      let type = "";
+      let j: any;
       try {
-        type = JSON.parse(data).type;
+        j = JSON.parse(data);
       } catch {}
+      const type = j?.type;
       if (type === "content_block_delta") {
-        emitText(reider.push(adapter.parseDelta(data).textDelta ?? "")); // suppress original
+        // Re-identify ONLY text deltas (matching the non-streaming path, which restores
+        // type:"text" blocks only). thinking_delta / signature_delta / input_json_delta
+        // carry no restorable assistant text and pass through verbatim at their own index.
+        if (j.delta?.type === "text_delta") {
+          emitIndex = j.index ?? emitIndex;
+          emitText(reider.push(j.delta.text ?? ""), emitIndex); // suppress original, re-emit restored
+        } else {
+          res.write(frame);
+        }
         return;
       }
       if (type === "content_block_stop") {
-        flushTail(); // emit any held tail BEFORE the block closes
+        emitText(reider.end(), j?.index ?? emitIndex); // flush held text BEFORE this block closes (no-op for non-text)
         res.write(frame);
         return;
       }
-      res.write(frame); // message_start / message_delta / message_stop / ping
+      res.write(frame); // content_block_start / message_start / message_delta / message_stop / ping
       return;
     }
 
