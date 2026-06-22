@@ -26,6 +26,12 @@ export const config = {
   defaultMode: (env.DEFAULT_MODE ?? "reversible") as RedactMode,
   activeSets: parseSets(env.ACTIVE_SETS, ALL_SETS),
 
+  // The system prompt is application scaffolding, not user input. When false, cordon
+  // never redacts it — agent frameworks (e.g. Claude Code) put framework text there
+  // (the date, example emails); redacting it corrupts the model's instructions for no
+  // user-PII benefit. Default true keeps the redact-everything guarantee.
+  redactSystem: (env.REDACT_SYSTEM ?? "true") === "true",
+
   consistentPseudonyms: (env.CONSISTENT_PSEUDONYMS ?? "false") === "true",
   // HMAC key for consistent pseudonyms. The value being hashed is the PII; the key
   // keeps tokens from being reversible by anyone who guesses inputs.

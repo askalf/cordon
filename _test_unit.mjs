@@ -105,6 +105,21 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   ok("apply: anthropic tool_result redacted", deidBody.messages[0].content[0].content[0].text === "ip [IPV4]", JSON.stringify(deidBody.messages[0].content));
   ok("apply: strip span count", spans.length === 2);
 }
+{
+  // redactSystem=false → system prompt is application scaffolding, left untouched;
+  // user message content (and OpenAI role:"system" messages) handled accordingly.
+  const va = new Vault("strip");
+  const aBody = { model: "m", system: "agent for jane@corp.io", messages: [{ role: "user", content: "mail bob@x.io" }] };
+  const { deidBody: da } = applyRedaction(aBody, "anthropic", va, ALL, detector, false);
+  ok("apply: redactSystem=false leaves anthropic system intact", da.system === "agent for jane@corp.io");
+  ok("apply: redactSystem=false still redacts user message", da.messages[0].content === "mail [EMAIL]");
+
+  const vo = new Vault("strip");
+  const oBody = { model: "m", messages: [{ role: "system", content: "ops for jane@corp.io" }, { role: "user", content: "mail bob@x.io" }] };
+  const { deidBody: doo } = applyRedaction(oBody, "openai", vo, ALL, detector, false);
+  ok("apply: redactSystem=false leaves openai system message intact", doo.messages[0].content === "ops for jane@corp.io");
+  ok("apply: redactSystem=false still redacts openai user message", doo.messages[1].content === "mail [EMAIL]");
+}
 
 // ---------------- streaming re-identify (boundary split) ----------------
 {

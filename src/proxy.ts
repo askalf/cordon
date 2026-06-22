@@ -28,6 +28,7 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   const pol = getPolicy(r.tenant);
   const failMode = pol.failMode ?? config.failMode;
   const consistentPseudonyms = pol.consistentPseudonyms ?? config.consistentPseudonyms;
+  const redactSystem = pol.redactSystem ?? config.redactSystem;
 
   // ---- detect + redact (fail-closed boundary) ----
   let vault: Vault;
@@ -36,7 +37,7 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   try {
     if (r.testFail) throw new Error("forced detection failure (test hook)");
     vault = new Vault(r.mode, { consistentPseudonyms, secret: config.tenantSecret });
-    ({ deidBody, spans } = applyRedaction(r.raw, r.provider, vault, r.activeSets, detector));
+    ({ deidBody, spans } = applyRedaction(r.raw, r.provider, vault, r.activeSets, detector, redactSystem));
   } catch (e) {
     return onRedactionError(r, res, e, failMode, t0);
   }

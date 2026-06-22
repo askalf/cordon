@@ -46,7 +46,11 @@ function pushStringLeaves(node: any, slots: Slot[], depth = 0): void {
  * definitions (descriptions + parameter schemas), and Anthropic `tool_use` inputs.
  * Only image parts and raw provider-auth headers are intentionally left untouched.
  */
-function requestTextSlots(body: any, provider: Provider): { slots: Slot[]; finalizers: (() => void)[] } {
+function requestTextSlots(
+  body: any,
+  provider: Provider,
+  redactSystem: boolean,
+): { slots: Slot[]; finalizers: (() => void)[] } {
   const slots: Slot[] = [];
   const finalizers: (() => void)[] = []; // run after redaction (re-serialize parsed JSON-string fields)
 
@@ -74,10 +78,13 @@ function requestTextSlots(body: any, provider: Provider): { slots: Slot[]; final
   };
 
   if (provider === "anthropic") {
-    if (typeof body.system === "string") slots.push(slot(body, "system"));
-    else if (Array.isArray(body.system))
-      for (const b of body.system)
-        if (b?.type === "text" && typeof b.text === "string") slots.push(slot(b, "text"));
+    // The system prompt is application scaffolding; skip it unless redactSystem is on.
+    if (redactSystem) {
+      if (typeof body.system === "string") slots.push(slot(body, "system"));
+      else if (Array.isArray(body.system))
+        for (const b of body.system)
+          if (b?.type === "text" && typeof b.text === "string") slots.push(slot(b, "text"));
+    }
     if (Array.isArray(body.tools))
       for (const t of body.tools) {
         if (t && typeof t.description === "string") slots.push(slot(t, "description"));
@@ -95,6 +102,8 @@ function requestTextSlots(body: any, provider: Provider): { slots: Slot[]; final
 
   for (const msg of body.messages ?? []) {
     if (!msg || typeof msg !== "object") continue;
+    // OpenAI carries the system prompt as a role:"system" message — skip it too.
+    if (!redactSystem && msg.role === "system") continue;
     if (typeof msg.content === "string" || Array.isArray(msg.content)) pushContent(msg, "content");
     // OpenAI: participant `name` and assistant `tool_calls` arguments are model-visible.
     if (typeof msg.name === "string") slots.push(slot(msg, "name"));
@@ -149,9 +158,10 @@ export function applyRedaction(
   vault: Vault,
   activeSets: RedactSet[],
   detector: Detector,
+  redactSystem = true,
 ): RedactionResult {
   const deidBody = clone(rawBody);
-  const { slots, finalizers } = requestTextSlots(deidBody, provider);
+  const { slots, finalizers } = requestTextSlots(deidBody, provider, redactSystem);
   const all: Span[] = [];
 
   for (const sl of slots) {
