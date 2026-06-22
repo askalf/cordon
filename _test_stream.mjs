@@ -42,7 +42,49 @@ function reconstruct(sse, provider) {
   return out;
 }
 
+/** Strict SSE validator mimicking the client SDK: a `text_delta` must land on a
+ *  `text` block, a `thinking_delta` on a `thinking` block. Catches the exact failure
+ *  ("Content block is not a text block") cordon hit with real CLI traffic. */
+function validateSSE(sse) {
+  const blockType = {}; // index -> declared block type
+  let text = "", thinking = "", sawThinking = false, error = "";
+  for (const frame of sse.split("\n\n")) {
+    const line = frame.split("\n").find((l) => l.startsWith("data:"));
+    if (!line) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    let j;
+    try { j = JSON.parse(data); } catch { continue; }
+    if (j.type === "content_block_start") {
+      blockType[j.index] = j.content_block?.type;
+      if (j.content_block?.type === "thinking") sawThinking = true;
+    } else if (j.type === "content_block_delta") {
+      const bt = blockType[j.index], dt = j.delta?.type;
+      if (dt === "text_delta") {
+        if (bt !== "text") error ||= `text_delta on '${bt}' block @${j.index}`;
+        text += j.delta.text ?? "";
+      } else if (dt === "thinking_delta") {
+        if (bt !== "thinking") error ||= `thinking_delta on '${bt}' block @${j.index}`;
+        thinking += j.delta.thinking ?? "";
+      }
+    }
+  }
+  return { ok: !error, error, text, thinking, sawThinking };
+}
+
 (async () => {
+  // ---- reversible streaming WITH extended thinking (Anthropic) ----
+  // Regression for "Content block is not a text block": the response has a thinking
+  // block at index 0 and the text block at index 1; re-emitted (restored) text deltas
+  // must carry index 1, never collide with the thinking block at index 0.
+  await reset();
+  let traw = await (await post("/v1/messages", aBody(PII, { thinking: { type: "enabled", budget_tokens: 1024 } }))).text();
+  let v = validateSSE(traw);
+  ok("stream/thinking: SSE block structure valid (no text_delta on thinking block)", v.ok, v.error);
+  ok("stream/thinking: thinking block present + passed through verbatim", v.sawThinking && v.thinking.length > 0);
+  ok("stream/thinking: email restored in text block", v.text.includes("john@acme.com") && !v.text.includes("<EMAIL"));
+  ok("stream/thinking: card restored in text block", v.text.includes("4012888888881881") && !v.text.includes("<CREDIT_CARD"));
+
   // ---- reversible streaming (Anthropic) ----
   await reset();
   let txt = await (await post("/v1/messages", aBody(PII))).text();

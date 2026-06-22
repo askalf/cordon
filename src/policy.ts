@@ -12,6 +12,8 @@ export interface TenantPolicy {
   failMode?: "closed" | "open";
   /** Stable HMAC pseudonyms instead of per-request counters. */
   consistentPseudonyms?: boolean;
+  /** When false, never redact the system prompt (application scaffolding, not user data). */
+  redactSystem?: boolean;
   /** Data-residency: route this tenant's traffic to a specific upstream base. */
   upstreamOverride?: Partial<Record<Provider, string>>;
 }

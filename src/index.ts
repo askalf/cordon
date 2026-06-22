@@ -72,6 +72,7 @@ app.post("/admin/tenant", async (req, reply) => {
   }
   if (b.failMode === "closed" || b.failMode === "open") patch.failMode = b.failMode;
   if (typeof b.consistentPseudonyms === "boolean") patch.consistentPseudonyms = b.consistentPseudonyms;
+  if (typeof b.redactSystem === "boolean") patch.redactSystem = b.redactSystem;
   if (b.upstreamOverride && typeof b.upstreamOverride === "object") patch.upstreamOverride = b.upstreamOverride;
   return setPolicy(b.tenant, patch);
 });

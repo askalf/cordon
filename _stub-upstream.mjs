@@ -55,13 +55,24 @@ function streamOpenAI(res, text) {
   res.write("data: [DONE]\n\n");
   res.end();
 }
-function streamAnthropic(res, text) {
+function streamAnthropic(res, text, body = {}) {
   res.setHeader("content-type", "text/event-stream");
   const f = (e, d) => res.write(`event: ${e}\ndata: ${JSON.stringify({ type: e, ...d })}\n\n`);
   f("message_start", { message: { id: "stub", type: "message", role: "assistant", model: "claude-haiku-4-5-20251001", content: [], usage: { input_tokens: 10, output_tokens: 0 } } });
-  f("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
-  for (const t of chunk3(text)) f("content_block_delta", { index: 0, delta: { type: "text_delta", text: t } });
-  f("content_block_stop", { index: 0 });
+  let idx = 0;
+  // Extended thinking: a `thinking` block streams FIRST (index 0), then the text block
+  // (index 1) — the shape the real Claude CLI produces and the regression the streaming
+  // re-identifier must survive (don't emit a text_delta against the thinking block).
+  if (body.thinking) {
+    f("content_block_start", { index: idx, content_block: { type: "thinking", thinking: "" } });
+    for (const t of chunk3("Let me reason about this request step by step.")) f("content_block_delta", { index: idx, delta: { type: "thinking_delta", thinking: t } });
+    f("content_block_delta", { index: idx, delta: { type: "signature_delta", signature: "c3R1Yg==" } });
+    f("content_block_stop", { index: idx });
+    idx++;
+  }
+  f("content_block_start", { index: idx, content_block: { type: "text", text: "" } });
+  for (const t of chunk3(text)) f("content_block_delta", { index: idx, delta: { type: "text_delta", text: t } });
+  f("content_block_stop", { index: idx });
   f("message_delta", { delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } });
   f("message_stop", {});
   res.end();
@@ -97,7 +108,7 @@ http
       if (req.url.includes("/chat/completions"))
         return body.stream ? streamOpenAI(res, text) : json(res, openaiBody(n, text));
       if (req.url.includes("/messages"))
-        return body.stream ? streamAnthropic(res, text) : json(res, anthropicBody(n, text));
+        return body.stream ? streamAnthropic(res, text, body) : json(res, anthropicBody(n, text));
       res.statusCode = 404;
       res.end("nope");
     });

@@ -11,8 +11,9 @@ import type { CanonicalRequest, Provider, RedactMode, RedactSet } from "./types"
 export interface ProviderAdapter {
   /** Read a streamed SSE `data:` payload. */
   parseDelta(data: string): { textDelta?: string; done: boolean };
-  /** Build a provider-correct SSE frame carrying one assistant-text chunk. */
-  frameFromText(text: string): string;
+  /** Build a provider-correct SSE frame carrying one assistant-text chunk at `index`
+   *  (the content-block index; ignored by providers without block indices). */
+  frameFromText(text: string, index?: number): string;
   /** Walk a non-streaming response body's assistant-text fields (for re-identify). */
   responseTextSlots(body: any): Array<{ get(): string; set(v: string): void }>;
 }
@@ -28,7 +29,8 @@ export const openai: ProviderAdapter = {
       return { done: false };
     }
   },
-  frameFromText(text) {
+  frameFromText(text, _index = 0) {
+    // OpenAI chat.completions has no content-block index; always choices[0].
     return `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n`;
   },
   responseTextSlots(body) {
@@ -59,8 +61,8 @@ export const anthropic: ProviderAdapter = {
       return { done: false };
     }
   },
-  frameFromText(text) {
-    const data = { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } };
+  frameFromText(text, index = 0) {
+    const data = { type: "content_block_delta", index, delta: { type: "text_delta", text } };
     return `event: content_block_delta\ndata: ${JSON.stringify(data)}\n\n`;
   },
   responseTextSlots(body) {
