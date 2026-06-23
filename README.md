@@ -137,7 +137,7 @@ cordon currently redacts the two generation endpoints (`/v1/chat/completions`, `
 
 ## The agent-security stack
 
-One spine across every surface an agent touches: **[warden](https://github.com/askalf/warden)** (own your agent security) contains the call · **[canon](https://github.com/askalf/canon)** (own your agent skills) vets the tool · **[keeper](https://github.com/askalf/keeper)** (own your agent secrets) holds the keys · **[picket](https://github.com/askalf/picket)** (own your agent browser) governs the page · **cordon** (own your prompts) strips the PII *(you are here)*. Run them together → **[agent-security-stack](https://github.com/askalf/agent-security-stack)**.
+cordon — **own your prompts** — is a standalone **[Own Your Stack](https://github.com/askalf)** tool. The core agent-security stack is the trio that guards a tool call — **[warden](https://github.com/askalf/warden)** contains the call · **[canon](https://github.com/askalf/canon)** vets the tool · **[keeper](https://github.com/askalf/keeper)** holds the keys (**[agent-security-stack](https://github.com/askalf/agent-security-stack)**) — with **[picket](https://github.com/askalf/picket)** governing the browser. cordon strips PII/secrets out of the prompt before it ever reaches the model.
 
 ---
 Part of the [Own Your Stack](https://sprayberrylabs.com/own-your-stack) portfolio.
