@@ -67,8 +67,19 @@ app.post("/admin/tenant", async (req, reply) => {
     patch.mode = b.mode;
   }
   if (b.activeSets !== undefined) {
-    const sets = (Array.isArray(b.activeSets) ? b.activeSets : []).filter((s: any) => VALID_SETS.has(s));
-    patch.activeSets = sets;
+    if (!Array.isArray(b.activeSets)) {
+      reply.code(400);
+      return { error: `${config.brand}: activeSets must be an array of sets (pii, phi, pci, secrets)` };
+    }
+    const arr = b.activeSets.map((s: any) => String(s).trim().toLowerCase()).filter((s: string) => s.length > 0);
+    const unknown = [...new Set(arr.filter((s: string) => !VALID_SETS.has(s as RedactSet)))];
+    if (unknown.length) {
+      reply.code(400);
+      return {
+        error: `${config.brand}: unknown redaction set(s): ${unknown.join(", ")} — valid sets are pii, phi, pci, secrets`,
+      };
+    }
+    patch.activeSets = arr;
   }
   if (b.failMode === "closed" || b.failMode === "open") patch.failMode = b.failMode;
   if (typeof b.consistentPseudonyms === "boolean") patch.consistentPseudonyms = b.consistentPseudonyms;

@@ -90,6 +90,10 @@ const setTenant = (patch) =>
   ok("admin: 403 without token", (await fetch(BASE + "/admin/stats")).status === 403);
   ok("admin: 200 with token", (await fetch(BASE + "/admin/stats", { headers: { "x-admin-token": ADMIN } })).status === 200);
 
+  // ---- admin activeSets validation (a typo'd set is rejected, not silently dropped) ----
+  ok("admin: unknown activeSet rejected (400)", (await setTenant({ tenant: "t1", activeSets: ["pii", "scerets"] })).status === 400);
+  ok("admin: valid activeSets accepted (200)", (await setTenant({ tenant: "t2", activeSets: ["pii", "pci"] })).status === 200);
+
   // ---- consistent pseudonyms via tenant policy ----
   await setTenant({ tenant: "acme", consistentPseudonyms: true, mode: "reversible" });
   await reset();
