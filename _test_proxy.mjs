@@ -70,6 +70,16 @@ const setTenant = (patch) =>
   ok("fail-closed: status 422", res.status === 422);
   ok("fail-closed: upstream NOT called", (await calls()).total === 0);
 
+  // ---- X-Redact-Sets: unknown token rejected (a typo must NOT silently drop a set) ----
+  await reset();
+  res = await post("/v1/messages", aBody(PII), { "x-redact-sets": "pii,scerets" });
+  ok("unknown set: rejected with 400", res.status === 400, String(res.status));
+  ok("unknown set: error names the bad token", JSON.stringify(await res.json().catch(() => ({}))).includes("scerets"));
+  ok("unknown set: upstream NOT called (PII never forwarded)", (await calls()).total === 0);
+  await reset();
+  res = await post("/v1/messages", aBody(PII), { "x-redact-sets": "pii,pci" });
+  ok("valid sets: accepted (200, not over-rejected)", res.status === 200, String(res.status));
+
   // ---- passthrough (count_tokens) ----
   await reset();
   res = await post("/v1/messages/count_tokens", aBody("hello"));

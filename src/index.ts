@@ -133,6 +133,26 @@ app.post("/v1/*", async (req, reply) => {
     return passthroughUnknown(req, reply, "POST");
   }
 
+  // X-Redact-Sets: reject unknown set tokens. A typo (e.g. `pii,scerets`) must never
+  // silently drop a set's protection — fail closed so the caller fixes it, pre-hijack.
+  const setsHeader = headers["x-redact-sets"];
+  if (setsHeader) {
+    const unknown = [
+      ...new Set(
+        setsHeader
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter((s) => s.length > 0 && !VALID_SETS.has(s as RedactSet)),
+      ),
+    ];
+    if (unknown.length) {
+      reply.code(400);
+      return {
+        error: `${config.brand}: unknown redaction set(s): ${unknown.join(", ")} — valid sets are pii, phi, pci, secrets`,
+      };
+    }
+  }
+
   // Normalize first so a bad request 400s cleanly (pre-hijack).
   const creq = normalize(path, req.body, headers);
   if (!creq || !creq.model) {
