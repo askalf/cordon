@@ -4,7 +4,9 @@
 // the client gets the real values restored. Records every received body at /__calls.
 import http from "node:http";
 
-let calls = { total: 0, byPath: {}, bodies: [] };
+// byPath is keyed by the raw request URL — null prototype so a path like
+// "/__proto__" can only ever be a plain counter key.
+let calls = { total: 0, byPath: Object.create(null), bodies: [] };
 
 const json = (res, obj) => {
   res.setHeader("content-type", "application/json");
@@ -84,7 +86,7 @@ http
     req.on("data", (c) => (b += c));
     req.on("end", async () => {
       if (req.url === "/__calls") return json(res, calls);
-      if (req.url === "/__reset") { calls = { total: 0, byPath: {}, bodies: [] }; return json(res, { ok: true }); }
+      if (req.url === "/__reset") { calls = { total: 0, byPath: Object.create(null), bodies: [] }; return json(res, { ok: true }); }
       const body = b ? JSON.parse(b) : {};
 
       calls.total++;

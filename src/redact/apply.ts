@@ -4,10 +4,20 @@ import type { Vault } from "./vault";
 
 type Slot = { get(): string; set(v: string): void; numeric?: boolean };
 
+// Leaf keys come from client-supplied bodies, so a key can literally be named
+// "__proto__" or "constructor". Write those via defineProperty so the redacted value
+// lands on the OWN property and the inherited prototype setter is never invoked —
+// the leaf must still be redacted (skipping it would forward the raw value upstream).
+const setLeaf = (obj: any, key: string | number, v: string): void => {
+  if (key === "__proto__" || key === "constructor")
+    Object.defineProperty(obj, key, { value: v, writable: true, enumerable: true, configurable: true });
+  else obj[key] = v;
+};
+
 /** A closure over (parent object, key) that reads/writes one string field in place. */
 const slot = (obj: any, key: string | number): Slot => ({
   get: () => obj[key],
-  set: (v) => (obj[key] = v),
+  set: (v) => setLeaf(obj, key, v),
 });
 
 // A numeric/bigint leaf, coerced to text for detection and marked `numeric` so the
@@ -16,7 +26,7 @@ const slot = (obj: any, key: string | number): Slot => ({
 // number sent as a JSON NUMBER would otherwise skip detection and reach the model.
 const numSlot = (obj: any, key: string | number): Slot => ({
   get: () => String(obj[key]),
-  set: (v) => (obj[key] = v),
+  set: (v) => setLeaf(obj, key, v),
   numeric: true,
 });
 
