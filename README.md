@@ -1,5 +1,8 @@
 # cordon
 
+[![ci](https://github.com/askalf/cordon/actions/workflows/ci.yml/badge.svg)](https://github.com/askalf/cordon/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/askalf/cordon/badge)](https://scorecard.dev/viewer/?uri=github.com/askalf/cordon)
+
 > own your prompts — PII never leaves your perimeter.
 
 A drop-in **LLM compliance gateway**. Point any OpenAI- or Anthropic-compatible client at cordon and raw PII / PHI / PCI / secrets are stripped or tokenized **before** the request reaches the model. In reversible mode the real values are restored in the model's reply, so the answer stays usable while the provider only ever sees placeholders. Self-hosted — your data never leaves your network.
