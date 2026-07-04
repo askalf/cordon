@@ -17,7 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "fastify": "^5.8.3"
+    "fastify": "^5.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",
