@@ -7,13 +7,30 @@
   "license": "MIT",
   "author": "Sprayberry Labs",
   "homepage": "https://github.com/askalf/cordon#readme",
-  "repository": { "type": "git", "url": "git+https://github.com/askalf/cordon.git" },
-  "keywords": ["pii", "redaction", "phi", "pci", "llm", "proxy", "compliance", "gdpr", "hipaa", "openai", "anthropic", "own-your-stack"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/askalf/cordon.git"
+  },
+  "keywords": [
+    "pii",
+    "redaction",
+    "phi",
+    "pci",
+    "llm",
+    "proxy",
+    "compliance",
+    "gdpr",
+    "hipaa",
+    "openai",
+    "anthropic",
+    "own-your-stack"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "audit": "tsx src/tools/audit.ts",
     "test": "node _run_tests.mjs",
+    "fuzz": "node --import tsx _test_fuzz.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -21,6 +38,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
+    "fast-check": "^4.8.0",
     "tsx": "^4.23.0",
     "typescript": "^6.0.3"
   }
