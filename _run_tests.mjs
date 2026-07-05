@@ -15,8 +15,8 @@ const instances = {
 };
 
 // Suites importing TS modules directly run under the tsx loader.
-const TSX_SUITES = new Set(["_test_unit.mjs"]);
-const suites = ["_test_unit.mjs", "_test_proxy.mjs", "_test_stream.mjs"];
+const TSX_SUITES = new Set(["_test_unit.mjs", "_test_fuzz.js"]);
+const suites = ["_test_unit.mjs", "_test_fuzz.js", "_test_proxy.mjs", "_test_stream.mjs"];
 
 // Fresh audit chain each run.
 try { rmSync("./_audit_test.jsonl", { force: true }); } catch {}
