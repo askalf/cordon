@@ -1,4 +1,4 @@
-import { config } from "./config";
+import { config, adequatePseudonymSecret, allowWeakPseudonymSecret } from "./config";
 import { metrics } from "./metrics";
 import { getPolicy } from "./policy";
 import { adapterFor, forwardUpstream } from "./providers";
@@ -29,6 +29,20 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   const failMode = pol.failMode ?? config.failMode;
   const consistentPseudonyms = pol.consistentPseudonyms ?? config.consistentPseudonyms;
   const redactSystem = pol.redactSystem ?? config.redactSystem;
+
+  // A tenant can enable consistent pseudonyms via /admin/tenant even when the global
+  // secret is empty. Minting a keyed token with no adequate secret produces a token
+  // anyone can reproduce from the public source (a partial-PII leak), so treat it as a
+  // fail-closed misconfiguration for THIS request rather than silently degrading.
+  if (consistentPseudonyms && !adequatePseudonymSecret(config.tenantSecret) && !allowWeakPseudonymSecret())
+    return onRedactionError(
+      r,
+      res,
+      new Error("consistent pseudonyms enabled without an adequate TENANT_SECRET"),
+      failMode,
+      t0,
+      "pseudonym-secret",
+    );
 
   // ---- detect + redact (fail-closed boundary) ----
   let vault: Vault;

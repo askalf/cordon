@@ -41,7 +41,7 @@ What happens:
 
 | | value |
 |---|---|
-| the **model** receives | `email <EMAIL_1> re card <CREDIT_CARD_1>` |
+| the **model** receives | `email <EMAIL_7F3A2B_1> re card <CREDIT_CARD_7F3A2B_1>` |
 | the **client** receives | `email john@acme.com re card 4012-8888-8888-1881` *(restored)* |
 | response headers | `X-Redacted: 2`, `X-Redacted-Types: EMAIL:1,CREDIT_CARD:1` |
 | audit log | `{… entityCounts:{EMAIL:1,CREDIT_CARD:1}, total:2, prevHash, hash}` — **no values** |
@@ -50,7 +50,7 @@ What happens:
 
 Selected per-tenant (policy) or per-request (`X-Redact-Mode` header):
 
-- **`reversible`** *(default)* — de-identify upstream, restore the real values in the reply (including streaming). The answer stays usable; the provider only ever sees placeholders.
+- **`reversible`** *(default)* — de-identify upstream, restore the real values in the reply (including streaming). The answer stays usable; the provider only ever sees placeholders. Counter tokens carry a per-request random nonce (`<EMAIL_7F3A2B_1>`, not `<EMAIL_1>`) so a caller's own placeholder-shaped text can never collide with a minted token and be rewritten to a real value.
 - **`strip`** — irreversible placeholders (`[EMAIL]`); nothing is restored. Hardened mode for when the answer never needs the real value back.
 - **`off`** — transparent passthrough (still audited as a bypass).
 
@@ -101,18 +101,19 @@ curl localhost:8080/admin/tenant -H 'x-admin-token: …' -H 'content-type: appli
        "consistentPseudonyms":true,"upstreamOverride":{"anthropic":"https://eu.anthropic.example"}}'
 ```
 
-- **Consistent pseudonyms** — `<EMAIL_3F2A…>` derived as `HMAC(TENANT_SECRET, value)`, so the same person maps to the same token across requests (the model can correlate) while the value is never stored.
+- **Consistent pseudonyms** — `<EMAIL_3F2A…>` derived as `HMAC(TENANT_SECRET, value)`, so the same person maps to the same token across requests (the model can correlate) while the value is never stored. **Requires a strong `TENANT_SECRET` (≥ 16 chars): this mode fails closed without one** — the server refuses to boot when it's the global default, and any tenant that enables it while no secret is set is blocked with `422` per request (a guessable token would be a partial-PII leak). Override for dev only with `ALLOW_WEAK_PSEUDONYM_SECRET=1`.
 - **Data-residency override** — route a tenant's traffic to a specific regional upstream base.
+- **Durable policy** *(optional)* — set `POLICY_STORE=./policies.json` to persist tenant policy across restarts (see Deploy); unset keeps it in-memory only.
 
 Ops endpoints: `GET /healthz`, `GET /metrics` (+ `/metrics.prom`), `GET /dashboard` (single-file ops view: redactions by type, mode mix, set mix, fail-closed count, tenant policies, audit-chain status), `GET /admin/stats`. Admin routes require `x-admin-token` when `ADMIN_TOKEN` is set (open in dev).
 
 ## Configuration
 
-See [`.env.example`](./.env.example). Key knobs: `FAIL_MODE` (default `closed`), `DEFAULT_MODE`, `ACTIVE_SETS`, `CONSISTENT_PSEUDONYMS` + `TENANT_SECRET`, `AUDIT_LOG`, `ADMIN_TOKEN`, `OPENAI_BASE` / `ANTHROPIC_BASE`.
+See [`.env.example`](./.env.example). Key knobs: `FAIL_MODE` (default `closed`), `DEFAULT_MODE`, `ACTIVE_SETS`, `CONSISTENT_PSEUDONYMS` + `TENANT_SECRET` (the secret is **mandatory** when pseudonyms are on — see above), `AUDIT_LOG`, `ADMIN_TOKEN`, `POLICY_STORE` (optional policy durability), `OPENAI_BASE` / `ANTHROPIC_BASE`.
 
 ## Deploy
 
-cordon keeps no cache and no shared state (the vault is per-request and ephemeral, policy is in-memory, the audit log is a local file), so it runs as a single self-contained container — no Redis/DB sidecar.
+cordon keeps no cache and no shared state (the vault is per-request and ephemeral, policy is in-memory, the audit log is a local file), so it runs as a single self-contained container — no Redis/DB sidecar. Set `POLICY_STORE=./policies.json` to make per-tenant policy **durable across restarts** without adding a datastore — it's a JSON file on the same volume as the audit log, loaded at startup and re-written on every admin change (so a redeploy never silently reverts a stricter-than-default tenant). Unset (default) keeps policy purely in-memory.
 
 ```bash
 docker compose up -d --build      # cordon on 127.0.0.1:8080, audit log persisted to a volume

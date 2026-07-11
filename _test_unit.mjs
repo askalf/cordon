@@ -1,9 +1,12 @@
 // Unit checks needing module access (run with: node --import tsx _test_unit.mjs).
+import { rmSync, writeFileSync, readFileSync } from "node:fs";
 import { runAll, detector } from "./src/detect/index.ts";
 import { luhn, ibanMod97, abaRouting, ssnValid } from "./src/detect/validators.ts";
 import { Vault } from "./src/redact/vault.ts";
 import { applyRedaction, tally } from "./src/redact/apply.ts";
 import { reidentifyBody, StreamReidentifier } from "./src/redact/reidentify.ts";
+import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN } from "./src/config.ts";
+import { setPolicy, getPolicy, allPolicies, save as savePolicy, load as loadPolicy } from "./src/policy.ts";
 
 let pass = 0, fail = 0;
 const ok = (n, c, e = "") => { c ? pass++ : fail++; console.log(`${c ? "PASS" : "FAIL"}  ${n}${e ? "   (" + e + ")" : ""}`); };
@@ -53,8 +56,12 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   const t1 = v.placeholderFor("a@b.com", "EMAIL");
   const t1b = v.placeholderFor("a@b.com", "EMAIL");
   const t2 = v.placeholderFor("c@d.com", "EMAIL");
-  ok("vault stable within request", t1 === "<EMAIL_1>" && t1b === t1);
-  ok("vault increments per value", t2 === "<EMAIL_2>");
+  // Counter tokens carry a per-request nonce (<EMAIL_<hex>_N>), stable within the request,
+  // so a caller's literal <EMAIL_1> can never collide with a minted token (issue #19).
+  ok("vault stable within request", /^<EMAIL_[0-9A-F]+_1>$/.test(t1) && t1b === t1, t1);
+  ok("vault increments per value", /^<EMAIL_[0-9A-F]+_2>$/.test(t2) && t2 !== t1, t2);
+  ok("vault nonce shared within a request", t1.split("_")[1] === t2.split("_")[1], `${t1} / ${t2}`);
+  ok("vault mints no bare <EMAIL_N> (collision-resistant)", t1 !== "<EMAIL_1>" && t2 !== "<EMAIL_2>");
   ok("vault reverse lookup", v.lookup(t1) === "a@b.com" && v.hasReverse);
 }
 {
@@ -76,11 +83,15 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   const body = { model: "m", messages: [{ role: "user", content: "email john@acme.com about card 4012888888881881" }] };
   const { deidBody, spans } = applyRedaction(body, "openai", v, ALL, detector);
   ok("apply: original body untouched (clone)", body.messages[0].content.includes("john@acme.com"));
-  ok("apply: de-id has placeholders, no raw", deidBody.messages[0].content === "email <EMAIL_1> about card <CREDIT_CARD_1>", deidBody.messages[0].content);
+  const deid = deidBody.messages[0].content;
+  ok("apply: de-id has placeholders, no raw",
+    /^email <EMAIL_[0-9A-F]+_1> about card <CREDIT_CARD_[0-9A-F]+_1>$/.test(deid) && !deid.includes("john@acme.com"), deid);
   ok("apply: span count", spans.length === 2 && tally(spans).EMAIL === 1 && tally(spans).CREDIT_CARD === 1);
 
-  // round-trip restore on a response shaped like the echo
-  const resp = { choices: [{ message: { role: "assistant", content: "re <EMAIL_1> and <CREDIT_CARD_1>" } }] };
+  // round-trip restore on a response shaped like the echo (use the actual minted tokens)
+  const et = v.placeholderFor("john@acme.com", "EMAIL"); // idempotent → returns the minted token
+  const ct = v.placeholderFor("4012888888881881", "CREDIT_CARD");
+  const resp = { choices: [{ message: { role: "assistant", content: `re ${et} and ${ct}` } }] };
   const restored = reidentifyBody(resp, "openai", v);
   ok("reidentify round-trips", restored.choices[0].message.content === "re john@acme.com and 4012888888881881", restored.choices[0].message.content);
 }
@@ -89,7 +100,7 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   const v = new Vault("reversible");
   const body = { model: "m", messages: [{ role: "user", content: [{ type: "text", text: "call 555-123-4567" }, { type: "image_url", image_url: { url: "http://x/y.png" } }] }] };
   const { deidBody } = applyRedaction(body, "openai", v, ALL, detector);
-  ok("apply: array text redacted", deidBody.messages[0].content[0].text === "call <PHONE_1>");
+  ok("apply: array text redacted", /^call <PHONE_[0-9A-F]+_1>$/.test(deidBody.messages[0].content[0].text), deidBody.messages[0].content[0].text);
   ok("apply: image part untouched", deidBody.messages[0].content[1].image_url.url === "http://x/y.png");
 }
 {
@@ -124,10 +135,12 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
 // ---------------- streaming re-identify (boundary split) ----------------
 {
   const v = new Vault("reversible");
-  v.placeholderFor("john@acme.com", "EMAIL"); // → <EMAIL_1>
+  const tok = v.placeholderFor("john@acme.com", "EMAIL"); // e.g. <EMAIL_7F3A2B_1>
+  const s = `Hi ${tok}!`;
+  const c1 = 5, c2 = 3 + Math.floor(tok.length / 2); // both cuts fall INSIDE the placeholder
   const sr = new StreamReidentifier(v);
   let out = "";
-  for (const d of ["Hi <EM", "AIL_1", ">!"]) out += sr.push(d); // placeholder split across 3 frames
+  for (const d of [s.slice(0, c1), s.slice(c1, c2), s.slice(c2)]) out += sr.push(d); // split across 3 frames
   out += sr.end();
   ok("stream: split placeholder restored", out === "Hi john@acme.com!", out);
 }
@@ -198,10 +211,10 @@ const noRaw = (body, raw) => !JSON.stringify(body).includes(raw);
   // Finding 3: a stream that ends mid-placeholder ("<EMAIL_1", no closing '>') must
   // restore by unique prefix, not emit the partial placeholder to the client.
   const v = new Vault("reversible");
-  v.placeholderFor("john@acme.com", "EMAIL"); // → <EMAIL_1>
+  const tok = v.placeholderFor("john@acme.com", "EMAIL"); // → <EMAIL_<hex>_1>
   const sr = new StreamReidentifier(v);
-  let out = sr.push("see <EMAIL_1"); // ends mid-token; the forming tail is held
-  out += sr.end();                   // stream ends — must resolve, not leak the partial
+  let out = sr.push("see " + tok.slice(0, -1)); // ends mid-token (drop the closing '>'); tail is held
+  out += sr.end();                              // stream ends — must resolve, not leak the partial
   ok("stream: truncated trailing placeholder restored (not leaked)", out === "see john@acme.com", out);
 }
 
@@ -213,8 +226,12 @@ ok("Class2: full-width card detected", types(runAll("card ４０１２８８８�
   const body = { messages: [{ role: "user", content: "reach john​@acme.com" }] };
   const { deidBody } = applyRedaction(body, "openai", v, ALL, detector);
   const sent = deidBody.messages[0].content;
-  ok("Class2: zero-width email redacted in body", !sent.includes("acme.com") && sent.includes("<EMAIL_1>"), sent);
-  ok("Class2: re-id restores original zero-width value", v.lookup("<EMAIL_1>") === "john​@acme.com");
+  const etok = sent.match(/<EMAIL_[0-9A-F]+_1>/)?.[0];
+  // Assert the exact redacted form ("reach <token>") rather than a substring check — proves
+  // the whole raw email (domain and all) was replaced, with no host-shaped literal to trip
+  // CodeQL's incomplete-URL-sanitization heuristic in a test assertion.
+  ok("Class2: zero-width email redacted in body", !!etok && sent === `reach ${etok}`, sent);
+  ok("Class2: re-id restores original zero-width value", v.lookup(etok) === "john​@acme.com");
 }
 
 // ---------------- Class 3: format / secret-key coverage ----------------
@@ -232,5 +249,44 @@ ok("FP: plain ASCII email unaffected", types(runAll("a@b.com", ["pii"])).join() 
 ok("FP: version string is not a card", !types(runAll("v1.2.3.4.5.6.7", ["pci"])).includes("CREDIT_CARD"));
 ok("FP: a normal sentence has no spans", runAll("the quick brown fox jumps", ALL).length === 0);
 
+// ---------------- consistent-pseudonym secret guard (issue #18, fail-closed) ----------------
+const guard = (consistentPseudonyms, secret, allowWeak = false) => pseudonymSecretGuard({ consistentPseudonyms, secret, allowWeak });
+ok("secret guard: OK when pseudonyms off", guard(false, "").ok === true);
+ok("secret guard: BLOCK pseudonyms + empty secret", guard(true, "").ok === false);
+ok("secret guard: BLOCK pseudonyms + too-short secret", guard(true, "x".repeat(MIN_PSEUDONYM_SECRET_LEN - 1)).ok === false);
+ok("secret guard: OK pseudonyms + adequate secret", guard(true, "x".repeat(MIN_PSEUDONYM_SECRET_LEN)).ok === true);
+ok("secret guard: escape hatch overrides", guard(true, "", true).ok === true);
+ok("secret guard: error names TENANT_SECRET", (guard(true, "").error || "").includes("TENANT_SECRET"));
+ok("adequatePseudonymSecret threshold", !adequatePseudonymSecret("short") && adequatePseudonymSecret("x".repeat(MIN_PSEUDONYM_SECRET_LEN)));
+
+// ---------------- tenant policy persistence (issue #20, optional file-backed) ----------------
+{
+  const tmp = "./_policy_unit.json";
+  try { rmSync(tmp, { force: true }); } catch {}
+  setPolicy("acme", { mode: "strip", failMode: "closed" }); // stricter-than-default tenant
+  await savePolicy(tmp);
+  ok("policy persist: file written with the tenant", readFileHas(tmp, "acme") && readFileHas(tmp, "strip"));
+  // simulate a restart: in-memory drifts, then load() replaces the map from disk
+  setPolicy("acme", { mode: "reversible" });
+  setPolicy("ephemeral", { failMode: "open" });
+  await loadPolicy(tmp);
+  ok("policy persist: stricter tenant restored after reload", getPolicy("acme").mode === "strip" && getPolicy("acme").failMode === "closed");
+  ok("policy persist: reload is source-of-truth (drops unsaved tenants)", !allPolicies().ephemeral);
+
+  // fail-safe: absent + malformed files never throw and never wipe good state
+  await loadPolicy("./_policy_does_not_exist.json");
+  ok("policy persist: absent file non-fatal, state preserved", getPolicy("acme").mode === "strip");
+  const bad = "./_policy_bad.json";
+  writeFileSync(bad, "{ not valid json ");
+  await loadPolicy(bad);
+  ok("policy persist: malformed file non-fatal, state preserved", getPolicy("acme").mode === "strip");
+  try { rmSync(tmp, { force: true }); } catch {}
+  try { rmSync(bad, { force: true }); } catch {}
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
+
+function readFileHas(path, needle) {
+  try { return readFileSync(path, "utf8").includes(needle); } catch { return false; }
+}

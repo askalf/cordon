@@ -19,6 +19,10 @@ audit.jsonl
 *.audit.jsonl
 # test/smoke audit artifacts (_audit_test.jsonl, …)
 _*.jsonl
+# test/smoke policy-persistence scratch files (_policy_unit.json, …)
+_policy_*.json
+# optional file-backed tenant policy (POLICY_STORE)
+policies.json
 coverage/
 
 # os cruft

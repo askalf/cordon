@@ -92,7 +92,7 @@ function validateSSE(sse) {
   ok("stream/anthropic: email restored across frame split", text.includes("john@acme.com") && !text.includes("<EMAIL"));
   ok("stream/anthropic: card restored across frame split", text.includes("4012888888881881") && !text.includes("<CREDIT_CARD"));
   let sent = JSON.stringify(await calls());
-  ok("stream/anthropic: upstream saw placeholder not raw", sent.includes("EMAIL_1") && !sent.includes("john@acme.com"));
+  ok("stream/anthropic: upstream saw placeholder not raw", /<EMAIL_[0-9A-F]+_1>/.test(sent) && !sent.includes("john@acme.com"));
 
   // ---- reversible streaming (OpenAI) ----
   await reset();
@@ -101,7 +101,7 @@ function validateSSE(sse) {
   ok("stream/openai: email restored across frame split", text.includes("john@acme.com") && !text.includes("<EMAIL"));
   ok("stream/openai: card restored across frame split", text.includes("4012888888881881") && !text.includes("<CREDIT_CARD"));
   sent = JSON.stringify(await calls());
-  ok("stream/openai: upstream saw placeholder not raw", sent.includes("EMAIL_1") && !sent.includes("john@acme.com"));
+  ok("stream/openai: upstream saw placeholder not raw", /<EMAIL_[0-9A-F]+_1>/.test(sent) && !sent.includes("john@acme.com"));
 
   // ---- strip streaming: placeholders persist, no restore, no hold-back ----
   await reset();

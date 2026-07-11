@@ -11,15 +11,20 @@ const base = { OPENAI_BASE: STUB, ANTHROPIC_BASE: STUB };
 
 // port → instance env
 const instances = {
-  8810: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test.jsonl", CORDON_TEST_HOOKS: "1" },
+  // Primary instance: has a strong TENANT_SECRET, so consistent-pseudonym requests work.
+  8810: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test.jsonl", CORDON_TEST_HOOKS: "1", TENANT_SECRET: "test-secret-0123456789abcdef" },
+  // Secret-less instance: consistent pseudonyms enabled per-tenant here must FAIL CLOSED
+  // (no ALLOW_WEAK_PSEUDONYM_SECRET) — exercises the per-request pseudonym-secret guard.
+  8811: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test_nosecret.jsonl" },
 };
 
 // Suites importing TS modules directly run under the tsx loader.
 const TSX_SUITES = new Set(["_test_unit.mjs", "_test_fuzz.js"]);
 const suites = ["_test_unit.mjs", "_test_fuzz.js", "_test_proxy.mjs", "_test_stream.mjs"];
 
-// Fresh audit chain each run.
-try { rmSync("./_audit_test.jsonl", { force: true }); } catch {}
+// Fresh audit chains + scratch files each run.
+for (const f of ["./_audit_test.jsonl", "./_audit_test_nosecret.jsonl", "./_policy_unit.json", "./_policy_bad.json"])
+  try { rmSync(f, { force: true }); } catch {}
 
 /**
  * Kill whatever is already LISTENING on `port`. Prior runs can leave an orphaned stub

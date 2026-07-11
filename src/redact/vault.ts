@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { hmac } from "../util";
 import type { RedactMode } from "../types";
 
@@ -7,16 +8,26 @@ import type { RedactMode } from "../types";
  * audit log, or any cache. This is the only place raw PII lives, and only for the
  * lifetime of one request.
  *
- *   reversible : <TYPE_N>  (or <TYPE_HMAC8> with consistent pseudonyms) + reverse map
- *   strip      : [TYPE]    (irreversible — no reverse map kept)
+ *   reversible : <TYPE_NONCE_N>  (or <TYPE_HMAC8> with consistent pseudonyms) + reverse map
+ *   strip      : [TYPE]         (irreversible — no reverse map kept)
  *
  * A given value always maps to the same placeholder within a request, so repeated
  * mentions stay consistent and re-identification restores all occurrences.
+ *
+ * Counter tokens carry a per-request random NONCE (<EMAIL_7F3A2B_1>, not <EMAIL_1>) so a
+ * caller's own placeholder-shaped text (e.g. asking "what does <EMAIL_1> mean?") can never
+ * collide with a minted token and get rewritten to a real value on the way back. The
+ * caller can't know the nonce, so it can't craft a colliding literal. The nonce is
+ * uppercase hex, so tokens still fit the <[A-Z][A-Z0-9_]*> grammar the streaming buffer
+ * relies on (PLACEHOLDER_RE / isFormingPlaceholder).
  */
 export class Vault {
   private fwd = new Map<string, string>(); // value → placeholder
   private rev = new Map<string, string>(); // placeholder → value (reversible only)
   private counters = new Map<string, number>(); // type → next counter
+  // Per-request nonce for counter tokens (uppercase hex). Fresh per Vault, so it's stable
+  // within a request but unpredictable to the caller.
+  private readonly nonce = randomBytes(3).toString("hex").toUpperCase();
 
   constructor(
     public readonly mode: RedactMode,
@@ -38,7 +49,9 @@ export class Vault {
     } else {
       const n = (this.counters.get(type) ?? 0) + 1;
       this.counters.set(type, n);
-      token = `<${type}_${n}>`;
+      // Nonce keeps the token from colliding with any placeholder-shaped string the
+      // caller supplied (which would otherwise be rewritten to a real value on restore).
+      token = `<${type}_${this.nonce}_${n}>`;
     }
 
     this.fwd.set(value, token);
