@@ -227,7 +227,10 @@ ok("Class2: full-width card detected", types(runAll("card ４０１２８８８�
   const { deidBody } = applyRedaction(body, "openai", v, ALL, detector);
   const sent = deidBody.messages[0].content;
   const etok = sent.match(/<EMAIL_[0-9A-F]+_1>/)?.[0];
-  ok("Class2: zero-width email redacted in body", !sent.includes("acme.com") && !!etok, sent);
+  // Assert the exact redacted form ("reach <token>") rather than a substring check — proves
+  // the whole raw email (domain and all) was replaced, with no host-shaped literal to trip
+  // CodeQL's incomplete-URL-sanitization heuristic in a test assertion.
+  ok("Class2: zero-width email redacted in body", !!etok && sent === `reach ${etok}`, sent);
   ok("Class2: re-id restores original zero-width value", v.lookup(etok) === "john​@acme.com");
 }
 
