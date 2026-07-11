@@ -2,8 +2,12 @@ import { createHash, createHmac } from "node:crypto";
 
 export const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
+// No default-key fallback: an empty key must never silently produce a "valid-looking"
+// keyed token. On the consistent-pseudonym path a missing/weak secret is caught up front
+// (config.pseudonymSecretGuard + the per-request guard in proxy.ts) so an empty key never
+// reaches here; keeping hmac total (empty key still hashes) is fine for any other caller.
 export const hmac = (key: string, s: string) =>
-  createHmac("sha256", key || "cordon-default-secret").update(s).digest("hex");
+  createHmac("sha256", key).update(s).digest("hex");
 
 export const nowMs = () => Date.now();
 

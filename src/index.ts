@@ -1,9 +1,9 @@
 import Fastify from "fastify";
 import { normalize, passthroughBase, forwardVerbatim } from "./providers";
 import { handle } from "./proxy";
-import { config } from "./config";
+import { config, pseudonymSecretGuard, adequatePseudonymSecret, allowWeakPseudonymSecret } from "./config";
 import { metrics } from "./metrics";
-import { setPolicy, allPolicies } from "./policy";
+import { setPolicy, allPolicies, load as loadPolicies } from "./policy";
 import { audit } from "./audit";
 import { dashboardHtml } from "./dashboard";
 import type { RedactMode, RedactSet } from "./types";
@@ -181,16 +181,34 @@ app.post("/v1/*", async (req, reply) => {
 // GET /v1/* (models listing etc.) — transparent passthrough.
 app.get("/v1/*", async (req, reply) => passthroughUnknown(req, reply, "GET"));
 
+// Fail-closed startup guard: consistent pseudonyms with no adequate secret would mint
+// guessable (source-reproducible) tokens — a partial-PII leak. Refuse to boot in that mode
+// rather than silently degrade, unless the explicit dev escape hatch is set.
+const secretGuard = pseudonymSecretGuard({
+  consistentPseudonyms: config.consistentPseudonyms,
+  secret: config.tenantSecret,
+  allowWeak: allowWeakPseudonymSecret(),
+});
+if (!secretGuard.ok) {
+  console.error(`[${config.brand}] fatal: ${secretGuard.error}`);
+  process.exit(1);
+}
+
+// Load any persisted per-tenant policy BEFORE accepting traffic (no-op when POLICY_STORE
+// is unset), so a restart doesn't serve requests under reverted defaults.
+await loadPolicies();
+
 app.listen({ port: config.port, host: "0.0.0.0" }).then(() => {
   console.log(
     `${config.brand} listening on :${config.port}  ` +
       `[mode=${config.defaultMode}, fail=${config.failMode}, sets=${config.activeSets.join("+")}` +
       `${config.consistentPseudonyms ? ", pseudonyms=consistent" : ""}` +
-      `${config.tenantFromAuth ? ", tenant=from-auth" : ""}]`,
+      `${config.tenantFromAuth ? ", tenant=from-auth" : ""}` +
+      `${config.policyStore ? ", policy=persisted" : ""}]`,
   );
   if (!config.admin.token) console.warn("[admin] ADMIN_TOKEN unset — /admin/* endpoints are OPEN (dev only)");
-  if (config.consistentPseudonyms && !config.tenantSecret)
-    console.warn("[pseudonyms] CONSISTENT_PSEUDONYMS=true but TENANT_SECRET unset — tokens use a weak default key");
+  if (config.consistentPseudonyms && !adequatePseudonymSecret(config.tenantSecret))
+    console.warn("[pseudonyms] weak/empty TENANT_SECRET but ALLOW_WEAK_PSEUDONYM_SECRET=1 — tokens are guessable (dev only)");
   if (config.failMode === "open")
     console.warn("[fail] FAIL_MODE=open — a redaction error will forward RAW PII upstream (dev only)");
 });

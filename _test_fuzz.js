@@ -255,6 +255,29 @@ prop(
   }),
 );
 
+// ---------------- collision resistance (issue #19) ----------------
+
+prop(
+  "a caller's own <TYPE_N>-shaped literal is never rewritten on restore (nonce'd tokens)",
+  fc.property(
+    seededText,
+    fc.constantFrom("EMAIL", "PHONE", "SSN", "CREDIT_CARD", "IPV4"),
+    fc.integer({ min: 1, max: 20 }),
+    ({ text }, ltype, ln) => {
+      const literal = `<${ltype}_${ln}>`; // exactly the pre-fix (bare-counter) token shape
+      const v = new Vault("reversible");
+      // the literal is forwarded verbatim (not a detected entity) alongside real PII
+      const { deidBody } = applyRedaction(userBody(`${literal} ${text}`), "openai", v, ALL, detector);
+      const deid = deidBody.messages[0].content;
+      if (!deid.includes(literal)) return false; // literal must reach the model untouched
+      // the model "echoes" the de-identified text; restore rewrites minted tokens only
+      const resp = { choices: [{ message: { role: "assistant", content: deid } }] };
+      const back = reidentifyBody(resp, "openai", v).choices[0].message.content;
+      return back.includes(literal); // caller's literal comes back exactly as written
+    },
+  ),
+);
+
 // ---------------- body-walking hardening ----------------
 
 prop(
@@ -276,7 +299,7 @@ prop(
     const val = JSON.parse(outArgs)[key]; // own JSON-parsed property shadows the inherited accessor
     return (
       !outArgs.includes(card) &&
-      val === "card <CREDIT_CARD_1>" &&
+      /^card <CREDIT_CARD_[0-9A-F]+_1>$/.test(val) && // nonce'd counter token
       Object.prototype.constructor === Object && // prototype untouched
       {}.polluted === undefined
     );
@@ -294,7 +317,7 @@ prop(
       const v = new Vault("reversible");
       const { deidBody } = applyRedaction(body, "anthropic", v, ["pci"], detector);
       const input = deidBody.messages[0].content[0].input;
-      return input.card === "<CREDIT_CARD_1>" && input.other === n;
+      return /^<CREDIT_CARD_[0-9A-F]+_1>$/.test(input.card) && input.other === n;
     },
   ),
 );

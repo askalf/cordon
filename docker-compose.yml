@@ -22,6 +22,9 @@ services:
       CONSISTENT_PSEUDONYMS: "${CORDON_CONSISTENT_PSEUDONYMS:-false}"
       TENANT_SECRET: "${CORDON_TENANT_SECRET:-}"
       AUDIT_LOG: "/app/data/audit.jsonl"
+      # Optional: persist per-tenant policy across restarts (lives on the same data volume).
+      # Empty (default) = in-memory only, no datastore. e.g. CORDON_POLICY_STORE=/app/data/policies.json
+      POLICY_STORE: "${CORDON_POLICY_STORE:-}"
       ADMIN_TOKEN: "${CORDON_ADMIN_TOKEN:-}"
       TENANT_FROM_AUTH: "${CORDON_TENANT_FROM_AUTH:-true}"
       OPENAI_BASE: "${CORDON_OPENAI_BASE:-https://api.openai.com}"
