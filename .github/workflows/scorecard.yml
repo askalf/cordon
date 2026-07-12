@@ -32,6 +32,12 @@ jobs:
         with:
           results_file: results.sarif
           results_format: sarif
+          # The default GITHUB_TOKEN can't read branch-protection settings, so the
+          # Branch-Protection check errors out (-1). A fine-grained PAT with
+          # `administration: read` + `metadata: read` (repo secret SCORECARD_TOKEN)
+          # lets it read them; falls back to the default token if the secret is
+          # unset (all other checks still run).
+          repo_token: ${{ secrets.SCORECARD_TOKEN || github.token }}
           publish_results: true
 
       - name: Upload artifact
