@@ -1,7 +1,12 @@
 # cordon
 
 [![ci](https://github.com/askalf/cordon/actions/workflows/ci.yml/badge.svg)](https://github.com/askalf/cordon/actions/workflows/ci.yml)
+[![codeql](https://github.com/askalf/cordon/actions/workflows/codeql.yml/badge.svg)](https://github.com/askalf/cordon/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/askalf/cordon/badge)](https://scorecard.dev/viewer/?uri=github.com/askalf/cordon)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<!-- OpenSSF Best Practices — uncomment once enrolled at https://www.bestpractices.dev and replace PROJECT_ID:
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/PROJECT_ID/badge)](https://www.bestpractices.dev/projects/PROJECT_ID)
+-->
 
 > own your prompts — PII never leaves your perimeter.
 
@@ -142,6 +147,8 @@ cordon currently redacts the two generation endpoints (`/v1/chat/completions`, `
 ## The agent-security stack
 
 cordon — **own your prompts** — is a standalone **[Own Your Stack](https://github.com/askalf)** tool. The core agent-security stack is the trio that guards a tool call — **[redstamp](https://github.com/askalf/redstamp)** contains the call · **[truecopy](https://github.com/askalf/truecopy)** vets the tool · **[strongroom](https://github.com/askalf/strongroom)** holds the keys (**[agent-security-stack](https://github.com/askalf/agent-security-stack)**) — with **[fieldpass](https://github.com/askalf/fieldpass)** governing the browser. cordon strips PII/secrets out of the prompt before it ever reaches the model.
+
+Related: **[plumbline](https://github.com/askalf/plumbline)** — *own your agent trajectory.* Out-of-band, read-only monitoring of the whole action sequence against the declared job, catching escapes assembled from individually-authorized steps. Like cordon it sits alongside the in-path trio rather than inside it — it watches, it never blocks an action.
 
 ---
 Part of the [Own Your Stack](https://sprayberrylabs.com/own-your-stack) portfolio.
