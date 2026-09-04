@@ -5,9 +5,10 @@ body:
   - type: markdown
     attributes:
       value: |
-        For a **missed injection** or a **wrong flag**, please use the
-        false-positive template or the security advisory link instead — those
-        need different information than a crash does.
+        For **over-redaction** — text redacted that is not personal data — use the
+        false-positive template. For personal data that got THROUGH, use the
+        private security advisory and never a public issue: a report that
+        reproduces a leak is the leak.
 
   - type: textarea
     id: what
