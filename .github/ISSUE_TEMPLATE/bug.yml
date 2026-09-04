@@ -1,0 +1,53 @@
+name: Bug report
+description: cordon did something other than what it says it does.
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For **over-redaction** — text redacted that is not personal data — use the
+        false-positive template. For personal data that got THROUGH, use the
+        private security advisory and never a public issue: a report that
+        reproduces a leak is the leak.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, and what it did.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest thing that shows it. A saved page, a URL, or a local HTML fixture is ideal — attach it if you can share it.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: cordon version
+      placeholder: '0.3.0'
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: OS and Node version
+      placeholder: 'macOS 15.2, node 22.11.0'
+    validations:
+      required: true

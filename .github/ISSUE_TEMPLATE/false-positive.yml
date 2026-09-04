@@ -1,0 +1,68 @@
+name: False positive — cordon redacted something that is not PII
+description: Text cordon redacts, or a request it fails closed on, that carries no personal data.
+title: 'false positive: '
+labels: ['false positive', 'detection']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### ⚠️ Do not paste real personal data into this issue
+
+        This form is public. If the only way to show the problem is with real
+        PII, **stop** and use the private security advisory instead — a report
+        that demonstrates a leak by reproducing it *is* the leak.
+
+        Use a synthetic example with the same shape: same format, same length,
+        same surrounding text, invented values. That is enough to fix a rule.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What happened
+      options:
+        - Text was redacted that is not personal data
+        - The request failed closed and should not have
+        - Redaction mangled the payload (valid JSON became invalid, and so on)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: sample
+    attributes:
+      label: Synthetic sample that reproduces it
+      description: >
+        Invented values with the real shape. An order id that looks like a
+        phone number, a base64 blob that trips an entropy rule, a git SHA read
+        as an account number — that class of thing.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: What cordon did with it
+      description: The redacted output, the detector name if you have it, and the audit line.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it is not personal data
+      description: >
+        What the value actually is. The most useful reports name the mechanism —
+        "this is a fixed-length product SKU, not a national ID", "this is a
+        content hash, and its entropy is why it looks like a secret".
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: cordon version
+      placeholder: '0.3.0'
+    validations:
+      required: false

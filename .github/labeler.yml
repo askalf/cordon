@@ -1,0 +1,75 @@
+# Path → label map for .github/workflows/pr-triage.yml (actions/labeler v7).
+#
+# Additive only: sync-labels is off, so nothing here ever strips a label a
+# human — or Dependabot — put on a PR by hand. Add a path, get a label.
+#
+# Label names match the Own Your Stack family vocabulary (redstamp is the
+# reference): bare nouns, not `area:` prefixes, so a reader moving between
+# repos sees the same words for the same things.
+
+# What counts as PII, and how confidently. A change here changes what gets
+# through the gateway, so it is the label a reviewer should look for first.
+detection:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/detect/**'
+          - 'src/policy.ts'
+
+# What replaces the PII, and what can turn it back. Reidentification is the
+# half that decides whether redaction is reversible by the wrong party.
+redaction:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/redact/**'
+
+# The fail-closed path itself: if this breaks open, nothing else matters.
+proxy:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/proxy.ts'
+          - 'src/streaming.ts'
+          - 'src/providers.ts'
+          - 'src/index.ts'
+
+dashboard:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/dashboard.ts'
+          - 'src/metrics.ts'
+
+audit:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/audit.ts'
+          - 'src/tools/audit.ts'
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '_test_*.mjs'
+          - '_test_*.js'
+          - '_run_tests.mjs'
+
+fuzz:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'fuzz/**'
+          - '.clusterfuzzlite/**'
+
+github_actions:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/**'
+          - '.github/labeler.yml'
+
+# Prose only. Scoped to the docs that exist rather than a bare '**/*.md', so a
+# PR shipping code plus its README paragraph is not filed as documentation.
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'README.md'
+          - 'CONTRIBUTING.md'
+          - 'CODE_OF_CONDUCT.md'
+          - 'SECURITY.md'
+          - '.github/ISSUE_TEMPLATE/**'
+          - '.github/pull_request_template.md'
