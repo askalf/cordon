@@ -63,9 +63,15 @@ test('every glob matches at least one tracked file', () => {
   assert.deepEqual(dead, [], `these labeler globs match nothing (moved or renamed?): ${dead.join(', ')}`);
 });
 
-test('labels named in the config exist in the repo label set', () => {
-  // Names only — a label the repo does not define gets created implicitly with
-  // a default colour and no description, which is how label sets turn to mush.
+// This does NOT verify the repo defines these labels — nothing offline can know
+// that, and an earlier version of this test said so in its name while only
+// parsing the config (caught in review). What it checks is that the names are
+// well-formed. GitHub labels are case-sensitive, so a capitalised rule quietly
+// creates a SECOND, undescribed label instead of reusing the one that exists.
+//
+// Existence is enforced where it can be: `gh label create --force` with a colour
+// and a description, before the workflow's first run.
+test('label names in the config are well-formed', () => {
   const labels = [...config.matchAll(/^'?([a-z][a-z0-9 :_-]*)'?:$/gim)].map((m) => m[1].trim());
   assert.ok(labels.includes('tests'), 'expected a tests label rule');
   assert.ok(labels.length >= 5, `only ${labels.length} label rules — did the file shape change?`);

@@ -10,7 +10,7 @@ contact_links:
       ship a fix before the details are public — see SECURITY.md.
 
   - name: A provider or model leaking data it should not
-    url: https://github.com/askalf/cordon/blob/master/SECURITY.md
+    url: https://github.com/askalf/cordon/blob/main/SECURITY.md
     about: >
       Never paste real personal data into a public issue to demonstrate a leak
       — the report becomes the leak. Use the private advisory and a synthetic
