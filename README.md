@@ -125,6 +125,25 @@ docker compose up -d --build      # cordon on 127.0.0.1:8080, audit log persiste
 ./deploy.sh                       # idempotent clone/pull/build/healthcheck to a remote box
 ```
 
+### Published image
+
+Every tagged release publishes a multi-arch image (linux/amd64 + linux/arm64) to GHCR with keyless Sigstore provenance and an SBOM, so you can run cordon without cloning or building:
+
+```bash
+docker run -d --name cordon --init -p 127.0.0.1:8080:8080 \
+  -v cordon-data:/app/data \
+  -e ADMIN_TOKEN=change-me \
+  ghcr.io/askalf/cordon:latest     # or :v0.2.0 / :v0.2 / :v0
+```
+
+Or in compose, replace `build: .` with `image: ghcr.io/askalf/cordon:v0.2.0`. Verify the image came from this repo's release workflow before trusting it:
+
+```bash
+gh attestation verify oci://ghcr.io/askalf/cordon:v0.2.0 --repo askalf/cordon
+```
+
+Pairing with [dario](https://github.com/askalf/dario) to share one Claude or ChatGPT subscription without leaking PII is documented in dario's [cordon integration guide](https://github.com/askalf/dario/blob/main/docs/integrations/cordon.md).
+
 ## Tests
 
 ```bash

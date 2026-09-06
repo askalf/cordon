@@ -6,7 +6,7 @@ name: cordon
 services:
   cordon:
     build: .
-    image: cordon:latest
+    image: ghcr.io/askalf/cordon:latest
     container_name: cordon
     restart: unless-stopped
     init: true

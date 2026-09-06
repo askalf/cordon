@@ -12,3 +12,12 @@ README.md
 PLAN.md
 Dockerfile
 docker-compose.yml
+CHANGELOG.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+CLAUDE.md
+LICENSE
+deploy.sh
+fuzz
+.clusterfuzzlite
