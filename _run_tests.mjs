@@ -20,7 +20,7 @@ const instances = {
 
 // Suites importing TS modules directly run under the tsx loader.
 const TSX_SUITES = new Set(["_test_unit.mjs", "_test_fuzz.js"]);
-const suites = ["_test_unit.mjs", "_test_fuzz.js", "_test_proxy.mjs", "_test_stream.mjs", "_test_labeler_config.mjs"];
+const suites = ["_test_unit.mjs", "_test_fuzz.js", "_test_proxy.mjs", "_test_stream.mjs", "_test_labeler_config.mjs", "_test_release_notes.mjs"];
 
 // Fresh audit chains + scratch files each run.
 for (const f of ["./_audit_test.jsonl", "./_audit_test_nosecret.jsonl", "./_policy_unit.json", "./_policy_bad.json"])
