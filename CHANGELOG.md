@@ -11,6 +11,15 @@ to match, push a tag `vX.Y.Z`, and release.yml builds + pushes the GHCR
 image and creates the GitHub release from this file.
 -->
 
+## [0.2.1] - 2026-09-11
+
+### Changed
+
+- `fastify` 5.12.1 → 5.12.3. The only runtime dependency to move in this release;
+  the gateway itself is unchanged.
+- Dev and CI updates: `tsx`, `@types/node`, and the pinned actions group.
+
+
 ## [0.2.0] - 2026-09-06
 
 First published container image: `ghcr.io/askalf/cordon` (linux/amd64 + linux/arm64, Sigstore provenance attested, SBOM attached). Everything below landed on `main` since 0.1.0 and ships in this image.
