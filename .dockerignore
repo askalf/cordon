@@ -19,6 +19,11 @@ SECURITY.md
 CLAUDE.md
 LICENSE
 deploy.sh
-fuzz
-.clusterfuzzlite
 scripts
+
+# NOT ignored on purpose: fuzz/ and .clusterfuzzlite/. The ClusterFuzzLite image
+# (.clusterfuzzlite/Dockerfile) builds from this same context — it does
+# `COPY . $SRC/cordon` plus `COPY .clusterfuzzlite/build.sh`, and build.sh
+# bundles fuzz/*.fuzz.ts and zips fuzz/seeds/. Ignoring either breaks the fuzz
+# build with "not found". The runtime Dockerfile COPYs only package*.json,
+# tsconfig.json and src/, so neither directory reaches the shipped image.
