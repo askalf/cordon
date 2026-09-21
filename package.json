@@ -34,13 +34,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "fastify": "^5.12.4"
+    "fastify": "^5.12.5"
   },
   "devDependencies": {
     "@jazzer.js/core": "4.0.0",
-    "@types/node": "^26.5.1",
+    "@types/node": "^26.6.1",
     "esbuild": "0.28.2",
-    "fast-check": "^4.10.0",
+    "fast-check": "^4.10.1",
     "tsx": "^4.23.13",
     "typescript": "^6.0.3"
   }
