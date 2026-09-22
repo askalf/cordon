@@ -129,6 +129,24 @@ function streamResponsesInterleaved(res, text, n) {
   res.end();
 }
 
+// A Responses stream that just STOPS: deltas up to a point four characters inside a
+// placeholder, then the socket ends with no output_text.done, no response.completed
+// and no [DONE]. Whatever the re-identifier is holding has to reach the client anyway.
+function streamResponsesTruncated(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  let seq = 0;
+  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  const addr = { item_id: "msg_stub" + n, output_index: 0, content_index: 0 };
+  const body = text.replace("TRUNCATE ", "");
+  const marks = [...body.matchAll(/</g)].map((m) => m.index);
+  const cut = marks.length > 1 ? marks[1] + 4 : Math.ceil(body.length / 2);
+  f("response.created", { response: { id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status: "in_progress", output: [] } });
+  f("response.output_item.added", { output_index: 0, item: { id: addr.item_id, type: "message", role: "assistant", status: "in_progress", content: [] } });
+  f("response.content_part.added", { ...addr, part: { type: "output_text", text: "", annotations: [] } });
+  for (const c of chunk3(body.slice(0, cut))) f("response.output_text.delta", { ...addr, delta: c });
+  res.end();
+}
+
 // A REFUSED Responses turn streams the same frame shape under refusal-flavoured
 // event types (`response.refusal.delta` / `.done`, a `refusal` content part). A
 // client consuming refusals reads only those, so cordon must re-emit a restored
@@ -204,7 +222,8 @@ http
         return body.stream ? streamOpenAI(res, text) : json(res, openaiBody(n, text));
       if (req.url.includes("/responses"))
         return body.stream
-          ? text.includes("FORCE_REFUSAL") ? streamResponsesRefusal(res, text, n)
+          ? text.includes("TRUNCATE") ? streamResponsesTruncated(res, text, n)
+            : text.includes("FORCE_REFUSAL") ? streamResponsesRefusal(res, text, n)
             : text.includes("INTERLEAVE") ? streamResponsesInterleaved(res, text, n)
             : streamResponses(res, text, n)
           : json(res, responsesBody(n, text));

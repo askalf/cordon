@@ -200,6 +200,28 @@ function validateSSE(sse) {
       joined.every((t) => t.includes("john@acme.com") && !/<EMAIL|<CREDIT|IL_[0-9A-F]+_\d>/.test(t)), JSON.stringify(joined));
   }
 
+  // ---- Responses stream that ends with no terminal frame ----
+  // The upstream stops after a delta that leaves a placeholder half-written: the
+  // per-part buffers are the only place that text lives, so the end-of-reader path
+  // has to flush THEM. Flushing the chat-dialect buffer there emits nothing and the
+  // client silently loses the tail.
+  await reset();
+  txt = await (await post("/v1/responses", rBody("TRUNCATE " + PII))).text();
+  {
+    let got = "";
+    for (const f of txt.split("\n\n")) {
+      const d = f.split("\n").find((l) => l.startsWith("data:"));
+      if (!d) continue;
+      let j; try { j = JSON.parse(d.slice(5).trim()); } catch { continue; }
+      if (j?.type === "response.output_text.delta") got += j.delta ?? "";
+    }
+    ok("stream/responses/truncated: the resolved text arrives", got.includes("john@acme.com"), JSON.stringify(got));
+    // The card's placeholder was still held when the socket closed. Flushing the
+    // per-part buffer restores it; flushing the chat buffer instead emits nothing and
+    // the client's text stops at "about card ".
+    ok("stream/responses/truncated: the held tail is not dropped", got.includes("4012888888881881"), JSON.stringify(got));
+  }
+
   // ---- reversible streaming (Responses REFUSAL) ----
   // A refusal carries restorable text too, but under its own event type. Regression:
   // the re-emit path shared frameFromText with output text and hardcoded the

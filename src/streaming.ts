@@ -98,6 +98,13 @@ export async function captureAndReidentify(
   /** Every part still open: only for the frames that close the whole response. */
   const flushAllParts = () => flushParts(() => true);
   /**
+   * Whatever this dialect is holding, for the paths that end a stream rather than
+   * close it: the terminal frame, the reader throwing, and an upstream that simply
+   * stops. Responses keeps its held text in the per-part map, so calling the single
+   * `flushTail` buffer there emits nothing and the client loses the tail.
+   */
+  const flushHeld = () => (dialect === "responses" ? flushAllParts() : flushTail());
+  /**
    * The parts of ONE output item, on its `output_item.done`. Closing item A must not
    * end item B's re-identifier: B may be holding a half-written placeholder, and
    * ending it early emits the resolved value and then B's own suffix separately.
@@ -116,8 +123,7 @@ export async function captureAndReidentify(
       return;
     }
     if (data === "[DONE]") {
-      if (dialect === "responses") flushAllParts();
-      else flushTail();
+      flushHeld();
       res.write(frame);
       return;
     }
@@ -233,11 +239,11 @@ export async function captureAndReidentify(
     }
     if (buf.length) handleFrame(buf); // trailing frame without a terminating blank line
   } catch {
-    flushTail(); // best-effort restore of whatever was held
+    flushHeld(); // best-effort restore of whatever was held
     res.end();
     return;
   }
 
-  flushTail(); // safety: flush if the stream ended without an explicit close frame
+  flushHeld(); // safety: flush if the stream ended without an explicit close frame
   res.end();
 }
