@@ -4,170 +4,166 @@
 [![codeql](https://github.com/askalf/cordon/actions/workflows/codeql.yml/badge.svg)](https://github.com/askalf/cordon/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/askalf/cordon/badge)](https://scorecard.dev/viewer/?uri=github.com/askalf/cordon)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-<!-- OpenSSF Best Practices — uncomment once enrolled at https://www.bestpractices.dev and replace PROJECT_ID:
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/PROJECT_ID/badge)](https://www.bestpractices.dev/projects/PROJECT_ID)
--->
 
-> own your prompts — PII never leaves your perimeter.
-
-A drop-in **LLM compliance gateway**. Point any OpenAI- or Anthropic-compatible client at cordon and raw PII / PHI / PCI / secrets are stripped or tokenized **before** the request reaches the model. In reversible mode the real values are restored in the model's reply, so the answer stays usable while the provider only ever sees placeholders. Self-hosted — your data never leaves your network.
+**A PII-redacting proxy for the OpenAI and Anthropic APIs.** Point your client at cordon instead of the provider. Emails, phone numbers, card numbers, SSNs, API keys and the rest are replaced with placeholders before the request leaves your network, and put back in the reply so your app never notices. One container, no database, no ML model, no client code changes beyond the base URL.
 
 ```
-client ──▶ cordon ──▶ OpenAI / Anthropic
-            │  1. detect PII            (deterministic spans)
-            │  2. redact / tokenize     (ephemeral per-request vault)
-            │  3. forward de-identified body upstream   ← model never sees raw PII
-            │  4. restore real values in the response   (reversible mode, incl. streaming)
-            └─ audit: hash-chained log of counts/types (never values), fail-closed
+your app ──▶ cordon ──▶ api.openai.com / api.anthropic.com
+              │
+              ├─ model receives:    email <EMAIL_5285D1_1> re card <CREDIT_CARD_5285D1_1>
+              └─ your app receives: email john@acme.com re card 4012-8888-8888-1881
 ```
 
-## Why
-
-The model — and everything downstream of it (provider logs, retention, subprocessors) — never sees the raw value. cordon sits between your app and the provider, so no client code changes: you only change the base URL. It is **fail-closed** — if detection errors, the request is **blocked**, never forwarded with PII intact.
-
-## Quick start
+## Run it
 
 ```bash
-npm install
-npm run dev          # cordon on :8080
+docker run -d --name cordon --init -p 127.0.0.1:8080:8080 \
+  -v cordon-data:/app/data -e ADMIN_TOKEN=change-me \
+  ghcr.io/askalf/cordon:v0.2.0
 ```
 
-Point your client's base URL at cordon and send a normal request:
+Then change one thing in your client: the base URL.
 
 ```bash
+# Anthropic client: base URL http://localhost:8080 (was https://api.anthropic.com)
 curl localhost:8080/v1/messages \
   -H 'content-type: application/json' \
-  -H 'x-api-key: '"$ANTHROPIC_API_KEY" -H 'anthropic-version: 2023-06-01' \
-  -d '{"model":"claude-haiku-4-5","messages":[{"role":"user",
+  -H "x-api-key: $ANTHROPIC_API_KEY" -H 'anthropic-version: 2023-06-01' \
+  -d '{"model":"claude-haiku-4-5","max_tokens":64,"messages":[{"role":"user",
        "content":"email john@acme.com re card 4012-8888-8888-1881"}]}'
 ```
 
-What happens:
+```bash
+# OpenAI client: base URL http://localhost:8080/v1 (was https://api.openai.com/v1)
+curl localhost:8080/v1/chat/completions \
+  -H 'content-type: application/json' -H "authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user",
+       "content":"email john@acme.com re card 4012-8888-8888-1881"}]}'
+```
 
-| | value |
-|---|---|
-| the **model** receives | `email <EMAIL_7F3A2B_1> re card <CREDIT_CARD_7F3A2B_1>` |
-| the **client** receives | `email john@acme.com re card 4012-8888-8888-1881` *(restored)* |
-| response headers | `X-Redacted: 2`, `X-Redacted-Types: EMAIL:1,CREDIT_CARD:1` |
-| audit log | `{… entityCounts:{EMAIL:1,CREDIT_CARD:1}, total:2, prevHash, hash}` — **no values** |
+Your provider key goes through untouched; cordon never holds it. What comes back, captured from the published image:
 
-## Modes
+```
+HTTP/1.1 200 OK
+X-Redact-Mode: reversible
+X-Redacted: 2
+X-Redacted-Types: EMAIL:1,CREDIT_CARD:1
 
-Selected per-tenant (policy) or per-request (`X-Redact-Mode` header):
+{"content":[{"type":"text","text":"email john@acme.com re card 4012-8888-8888-1881"}], ...}
+```
 
-- **`reversible`** *(default)* — de-identify upstream, restore the real values in the reply (including streaming). The answer stays usable; the provider only ever sees placeholders. Counter tokens carry a per-request random nonce (`<EMAIL_7F3A2B_1>`, not `<EMAIL_1>`) so a caller's own placeholder-shaped text can never collide with a minted token and be rewritten to a real value.
-- **`strip`** — irreversible placeholders (`[EMAIL]`); nothing is restored. Hardened mode for when the answer never needs the real value back.
-- **`off`** — transparent passthrough (still audited as a bypass).
+What the provider was sent:
 
-## Detection
+```
+"content":"email <EMAIL_5285D1_1> re card <CREDIT_CARD_5285D1_1>"
+```
 
-Deterministic by design — **regex + checksum validators, zero ML dependencies, fully auditable.** A wrong redaction corrupts the prompt, so every entity with a check digit is validated before its span is accepted (Luhn for cards, ISO 7064 mod-97 for IBANs, ABA for routing numbers, SSN area/group rules). Overlapping matches are resolved by precedence so a 16-digit card isn't also clipped as a phone number.
+The line appended to the audit log (counts and types, never values):
 
-**Catalog** (each type tagged with the set it belongs to):
+```json
+{"ts":1790043464004,"tenant":"auth:cdba95a3…","provider":"anthropic","model":"claude-haiku-4-5",
+ "mode":"reversible","entityCounts":{"EMAIL":1,"CREDIT_CARD":1},"total":2,"prevHash":"0","hash":"7b6e07…"}
+```
+
+## What it catches
+
+Deterministic detection: regex plus checksum validators, no ML dependencies, fully auditable. Every entity with a check digit is validated before its span is accepted (Luhn for cards, ISO 7064 mod-97 for IBANs, ABA for routing numbers, SSN area/group rules), and overlapping matches resolve by precedence so a 16-digit card is not also clipped as a phone number.
 
 | set | entities |
 |---|---|
 | `pii` | EMAIL, PHONE, SSN, IPV4, IPV6, MAC, STREET_ADDRESS |
-| `phi` | MRN, DATE *(+ SSN)* |
+| `phi` | MRN, DATE *(and SSN)* |
 | `pci` | CREDIT_CARD, IBAN, US_ROUTING |
 | `secrets` | OpenAI / Anthropic / AWS / GitHub / Google / Slack keys, JWTs, Bearer tokens, PEM private keys |
 
-Active sets default to all four; override per-tenant or with `X-Redact-Sets: pii,pci,secrets`.
+All four sets are on by default; narrow per tenant or per request with `X-Redact-Sets: pii,pci`.
 
-The detector is a clean interface (`src/detect`), so an optional NER/Presidio sidecar can be slotted in later without touching the proxy spine — it is **not** included here (deterministic core only).
+## What it does not do
 
-## Caller controls
+- **Names, free-text addresses, medical conditions.** There is no NER. A person's name in prose passes through. The detector is an interface (`src/detect`), so a Presidio-style sidecar can be added; it is not included.
+- **Embeddings, `count_tokens`, images.** Only the two generation endpoints (`/v1/chat/completions`, `/v1/messages`) are redacted; other `/v1/*` paths pass through verbatim. Image parts are left untouched.
+- **Token counts.** Streaming usage figures are the provider's, computed on the de-identified text.
 
-Request headers:
+If you need one of those, say so in an issue. The scope above is deliberate, not accidental.
 
-- `X-Redact-Mode: reversible | strip | off`
-- `X-Redact-Sets: pii,phi,pci,secrets`
-- `X-Tenant: <id>` *(else derived from the API key)*
+## Modes
 
-Response headers: `X-Redacted: <n>`, `X-Redacted-Types: EMAIL:2,SSN:1` (counts only), `X-Redact-Mode`.
+Per tenant (policy) or per request (`X-Redact-Mode` header):
 
-Provider auth (`authorization` / `x-api-key` / `anthropic-version`) is forwarded **verbatim** — cordon never terminates provider auth.
+- **`reversible`** *(default)*: placeholders go up, real values come back in the reply, including mid-stream. Tokens carry a per-request random nonce (`<EMAIL_5285D1_1>`, not `<EMAIL_1>`) so a caller's own placeholder-shaped text can never be rewritten to a real value.
+- **`strip`**: irreversible placeholders (`[EMAIL]`); nothing is restored. For when the answer never needs the real value.
+- **`off`**: passthrough, still audited as a bypass.
+
+```
+X-Redact-Mode: strip   →   "text":"email [EMAIL] re card [CREDIT_CARD]"
+```
+
+## Fail closed
+
+If detection throws, the request is **blocked**, never forwarded with PII intact (`FAIL_MODE=closed`, the default). The test suite asserts the upstream is never called on that path.
 
 ## Audit
 
-Every request appends one record to a hash-chained JSONL log (`AUDIT_LOG`): `{ts, tenant, provider, model, mode, entityCounts, sets, total, prevHash, hash}` where `hash = sha256(prevHash + canonicalJSON(record))`. **Records carry counts and types only — never raw values.** Any edit, deletion, or reorder breaks the chain.
+Every request appends one record to a hash-chained JSONL log (`AUDIT_LOG`): `{ts, tenant, provider, model, mode, entityCounts, sets, total, prevHash, hash}` with `hash = sha256(prevHash + canonicalJSON(record))`. Records carry counts and types only. Any edit, deletion or reorder breaks the chain.
 
 ```bash
-npm run audit                         # verify the chain → tamper report
+npm run audit                                   # verify the chain, print a tamper report
 curl localhost:8080/admin/audit/verify -H 'x-admin-token: …'
 ```
 
-## Per-tenant policy & admin
+## Per-tenant policy
 
 ```bash
-# default mode/sets, fail-mode, stable pseudonyms, and data-residency routing per tenant
 curl localhost:8080/admin/tenant -H 'x-admin-token: …' -H 'content-type: application/json' \
   -d '{"tenant":"acme","mode":"reversible","activeSets":["pii","pci"],
        "consistentPseudonyms":true,"upstreamOverride":{"anthropic":"https://eu.anthropic.example"}}'
 ```
 
-- **Consistent pseudonyms** — `<EMAIL_3F2A…>` derived as `HMAC(TENANT_SECRET, value)`, so the same person maps to the same token across requests (the model can correlate) while the value is never stored. **Requires a strong `TENANT_SECRET` (≥ 16 chars): this mode fails closed without one** — the server refuses to boot when it's the global default, and any tenant that enables it while no secret is set is blocked with `422` per request (a guessable token would be a partial-PII leak). Override for dev only with `ALLOW_WEAK_PSEUDONYM_SECRET=1`.
-- **Data-residency override** — route a tenant's traffic to a specific regional upstream base.
-- **Durable policy** *(optional)* — set `POLICY_STORE=./policies.json` to persist tenant policy across restarts (see Deploy); unset keeps it in-memory only.
+- **Consistent pseudonyms**: `<EMAIL_3F2A…>` derived as `HMAC(TENANT_SECRET, value)`, so the same person maps to the same token across requests (the model can correlate) while the value is never stored. Requires a strong `TENANT_SECRET` (16+ chars); this mode fails closed without one. `ALLOW_WEAK_PSEUDONYM_SECRET=1` overrides for dev only.
+- **Data residency**: route a tenant to a regional upstream base.
+- **Durable policy**: `POLICY_STORE=./policies.json` persists tenant policy across restarts on the same volume as the audit log; unset keeps it in memory.
+- **Tenant identity**: `X-Tenant: <id>`, else derived from the API key.
 
-Ops endpoints: `GET /healthz`, `GET /metrics` (+ `/metrics.prom`), `GET /dashboard` (single-file ops view: redactions by type, mode mix, set mix, fail-closed count, tenant policies, audit-chain status), `GET /admin/stats`. Admin routes require `x-admin-token` when `ADMIN_TOKEN` is set (open in dev).
+Ops: `GET /healthz`, `GET /metrics` (and `/metrics.prom`), `GET /dashboard` (single-file view of redactions by type, mode and set mix, fail-closed count, tenant policies, audit-chain status), `GET /admin/stats`. Admin routes require `x-admin-token` when `ADMIN_TOKEN` is set.
 
 ## Configuration
 
-See [`.env.example`](./.env.example). Key knobs: `FAIL_MODE` (default `closed`), `DEFAULT_MODE`, `ACTIVE_SETS`, `CONSISTENT_PSEUDONYMS` + `TENANT_SECRET` (the secret is **mandatory** when pseudonyms are on — see above), `AUDIT_LOG`, `ADMIN_TOKEN`, `POLICY_STORE` (optional policy durability), `OPENAI_BASE` / `ANTHROPIC_BASE`.
+See [`.env.example`](./.env.example). The knobs that matter: `FAIL_MODE` (default `closed`), `DEFAULT_MODE`, `ACTIVE_SETS`, `CONSISTENT_PSEUDONYMS` with `TENANT_SECRET`, `AUDIT_LOG`, `ADMIN_TOKEN`, `POLICY_STORE`, `OPENAI_BASE` / `ANTHROPIC_BASE`.
 
 ## Deploy
 
-cordon keeps no cache and no shared state (the vault is per-request and ephemeral, policy is in-memory, the audit log is a local file), so it runs as a single self-contained container — no Redis/DB sidecar. Set `POLICY_STORE=./policies.json` to make per-tenant policy **durable across restarts** without adding a datastore — it's a JSON file on the same volume as the audit log, loaded at startup and re-written on every admin change (so a redeploy never silently reverts a stricter-than-default tenant). Unset (default) keeps policy purely in-memory.
+No cache, no shared state: the vault is per request and ephemeral, policy is a JSON file, the audit log is a local file. One container, no Redis or database.
 
 ```bash
-docker compose up -d --build      # cordon on 127.0.0.1:8080, audit log persisted to a volume
+docker compose up -d --build      # from a clone: cordon on 127.0.0.1:8080, audit log on a volume
 ./deploy.sh                       # idempotent clone/pull/build/healthcheck to a remote box
 ```
 
-### Published image
-
-Every tagged release publishes a multi-arch image (linux/amd64 + linux/arm64) to GHCR with keyless Sigstore provenance and an SBOM, so you can run cordon without cloning or building:
-
-```bash
-docker run -d --name cordon --init -p 127.0.0.1:8080:8080 \
-  -v cordon-data:/app/data \
-  -e ADMIN_TOKEN=change-me \
-  ghcr.io/askalf/cordon:latest     # or :v0.2.0 / :v0.2 / :v0
-```
-
-Or in compose, replace `build: .` with `image: ghcr.io/askalf/cordon:v0.2.0`. Verify the image came from this repo's release workflow before trusting it:
+Every tagged release publishes a multi-arch image (linux/amd64, linux/arm64) to GHCR with keyless Sigstore provenance and an SBOM. Verify it came from this repository's release workflow:
 
 ```bash
 gh attestation verify oci://ghcr.io/askalf/cordon:v0.2.0 --repo askalf/cordon
 ```
 
-Pairing with [dario](https://github.com/askalf/dario) to share one Claude or ChatGPT subscription without leaking PII is documented in dario's [cordon integration guide](https://github.com/askalf/dario/blob/main/docs/integrations/cordon.md).
+Sharing one Claude or ChatGPT subscription through [dario](https://github.com/askalf/dario) without leaking PII: dario's [cordon integration guide](https://github.com/askalf/dario/blob/main/docs/integrations/cordon.md).
 
-## Tests
+## Development
 
 ```bash
+npm install
+npm run dev          # cordon on :8080 from source
 npm test
 ```
 
-A stub upstream **echoes the body it received**, so the suites assert the model never saw raw PII while the client still gets restored values:
+The test suite runs against a stub upstream that echoes the body it received, so every suite asserts two things at once: the model never saw raw PII, and the client still got the real values back.
 
-- **detect** — every pattern fires; Luhn / mod-97 / ABA reject false positives; set gating; overlap resolution.
-- **apply** — string + content-array bodies de-identified, structure preserved, images untouched; reversible round-trip.
-- **streaming re-identify** — a placeholder split across a frame boundary is still restored (the critical case).
-- **strip / off / fail-closed** — strip persists placeholders; off passes through; a detection error blocks and the **upstream is never called**.
-- **audit** — the chain verifies, tampering is detected, and the log is proven to contain **no values**.
-- **passthrough** — `count_tokens` and other non-generation paths forward verbatim.
+- **detect**: every pattern fires; Luhn / mod-97 / ABA reject false positives; set gating; overlap resolution.
+- **apply**: string and content-array bodies de-identified with structure preserved, images untouched; reversible round trip.
+- **streaming**: a placeholder split across a frame boundary is still restored.
+- **strip / off / fail-closed**: strip persists placeholders; off passes through; a detection error blocks and the upstream is never called.
+- **audit**: the chain verifies, tampering is detected, the log is proven to contain no values.
+- **passthrough**: `count_tokens` and other non-generation paths forward verbatim.
 
-## Scope
+## Part of Own Your Stack
 
-cordon currently redacts the two generation endpoints (`/v1/chat/completions`, `/v1/messages`); other `/v1/*` paths (e.g. `count_tokens`, `embeddings`) pass through verbatim. Streaming token/usage counts are the upstream's (computed on the de-identified text).
-
-## The agent-security stack
-
-cordon — **own your prompts** — is a standalone **[Own Your Stack](https://github.com/askalf)** tool. The core agent-security stack is the trio that guards a tool call — **[redstamp](https://github.com/askalf/redstamp)** contains the call · **[truecopy](https://github.com/askalf/truecopy)** vets the tool · **[strongroom](https://github.com/askalf/strongroom)** holds the keys (**[agent-security-stack](https://github.com/askalf/agent-security-stack)**) — with **[fieldpass](https://github.com/askalf/fieldpass)** governing the browser. cordon strips PII/secrets out of the prompt before it ever reaches the model.
-
-Related: **[plumbline](https://github.com/askalf/plumbline)** — *own your agent trajectory.* Out-of-band, read-only monitoring of the whole action sequence against the declared job, catching escapes assembled from individually-authorized steps. Like cordon it sits alongside the in-path trio rather than inside it — it watches, it never blocks an action.
-
----
-Part of the [Own Your Stack](https://sprayberrylabs.com/own-your-stack) portfolio.
+cordon guards the prompt. The rest of the [Own Your Stack](https://sprayberrylabs.com/own-your-stack) tools guard the agent around it: [redstamp](https://github.com/askalf/redstamp) contains the tool call, [truecopy](https://github.com/askalf/truecopy) vets the tool before it is installed, [browser-bridge](https://github.com/askalf/browser-bridge) governs the browser, and [plumbline](https://github.com/askalf/plumbline) watches the whole action sequence against the declared job. cordon and plumbline sit beside that path rather than in it.
