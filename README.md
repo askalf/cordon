@@ -81,7 +81,7 @@ All four sets are on by default; narrow per tenant or per request with `X-Redact
 ## What it does not do
 
 - **Names, free-text addresses, medical conditions.** There is no NER. A person's name in prose passes through. The detector is an interface (`src/detect`), so a Presidio-style sidecar can be added; it is not included.
-- **Embeddings, `count_tokens`, images.** Only the two generation endpoints (`/v1/chat/completions`, `/v1/messages`) are redacted; other `/v1/*` paths pass through verbatim. Image parts are left untouched.
+- **Embeddings, `count_tokens`, images.** Only the three generation endpoints (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) are redacted; other `/v1/*` paths, including `/v1/responses/{id}`, pass through verbatim. Image and file parts are left untouched.
 - **Token counts.** Streaming usage figures are the provider's, computed on the de-identified text.
 
 If you need one of those, say so in an issue. The scope above is deliberate, not accidental.
