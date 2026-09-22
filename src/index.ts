@@ -138,9 +138,9 @@ async function passthroughUnknown(req: any, reply: any, method: string) {
 app.post("/v1/*", async (req, reply) => {
   const { headers, bare, path } = reqParts(req);
 
-  // Only the two generation endpoints are redacted; everything else (count_tokens,
+  // Only the three generation endpoints are redacted; everything else (count_tokens,
   // embeddings, …) forwards verbatim so it is never normalize-mangled.
-  if (bare !== "/v1/chat/completions" && bare !== "/v1/messages") {
+  if (bare !== "/v1/chat/completions" && bare !== "/v1/responses" && bare !== "/v1/messages") {
     return passthroughUnknown(req, reply, "POST");
   }
 

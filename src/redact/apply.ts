@@ -1,5 +1,5 @@
 import { clone } from "../util";
-import type { Detector, Provider, RedactSet, Span } from "../types";
+import type { Detector, Dialect, Provider, RedactSet, Span } from "../types";
 import type { Vault } from "./vault";
 
 type Slot = { get(): string; set(v: string): void; numeric?: boolean };
@@ -48,18 +48,36 @@ function pushStringLeaves(node: any, slots: Slot[], depth = 0): void {
   }
 }
 
+// A JSON-string field (tool-call arguments): parse → redact its leaves (incl. NUMERIC
+// PII) → re-serialize, so a redacted number becomes a QUOTED "<TYPE_N>" and the args
+// stay valid JSON (a textual replace left an unquoted placeholder). Unparseable args
+// fall back to text redaction.
+function pushJsonString(obj: any, key: string, slots: Slot[], finalizers: (() => void)[]): void {
+  let parsed: any;
+  try { parsed = JSON.parse(obj[key]); } catch { parsed = undefined; }
+  if (parsed && typeof parsed === "object") {
+    pushStringLeaves(parsed, slots);
+    finalizers.push(() => { obj[key] = JSON.stringify(parsed); });
+  } else {
+    slots.push(slot(obj, key));
+  }
+}
+
 /**
  * Collect every REDACTABLE text field in a provider REQUEST body. Walks message
  * content (string or content-part array), Anthropic system blocks + tool_result
- * content, AND every model-visible structured field that can carry user data:
- * OpenAI message `name` + assistant `tool_calls[].function.arguments`, tool
- * definitions (descriptions + parameter schemas), and Anthropic `tool_use` inputs.
- * Only image parts and raw provider-auth headers are intentionally left untouched.
+ * content, Responses `instructions` + `input` items, AND every model-visible
+ * structured field that can carry user data: OpenAI message `name` + assistant
+ * `tool_calls[].function.arguments`, Responses `function_call` arguments and
+ * `function_call_output` output, tool definitions (descriptions + parameter
+ * schemas), and Anthropic `tool_use` inputs. Only image / file parts and raw
+ * provider-auth headers are intentionally left untouched.
  */
 function requestTextSlots(
   body: any,
   provider: Provider,
   redactSystem: boolean,
+  dialect: Dialect,
 ): { slots: Slot[]; finalizers: (() => void)[] } {
   const slots: Slot[] = [];
   const finalizers: (() => void)[] = []; // run after redaction (re-serialize parsed JSON-string fields)
@@ -73,7 +91,7 @@ function requestTextSlots(
         const part = c[i];
         if (typeof part === "string") { slots.push(slot(c, i)); continue; } // a bare-string content element
         if (!part || typeof part !== "object") continue;
-        if (part.type === "text" && typeof part.text === "string") {
+        if ((part.type === "text" || part.type === "input_text") && typeof part.text === "string") {
           slots.push(slot(part, "text"));
         } else if (part.type === "tool_result") {
           // Anthropic tool_result content can itself be a string or block array.
@@ -100,6 +118,28 @@ function requestTextSlots(
         if (t && typeof t.description === "string") slots.push(slot(t, "description"));
         if (t && t.input_schema && typeof t.input_schema === "object") pushStringLeaves(t.input_schema, slots);
       }
+  } else if (dialect === "responses") {
+    // Responses: `instructions` is the system prompt; tools are flat function objects.
+    if (redactSystem && typeof body.instructions === "string") slots.push(slot(body, "instructions"));
+    if (Array.isArray(body.tools))
+      for (const t of body.tools) {
+        if (t?.type !== "function") continue;
+        if (typeof t.description === "string") slots.push(slot(t, "description"));
+        if (t.parameters && typeof t.parameters === "object") pushStringLeaves(t.parameters, slots);
+      }
+    // `input` is a string, or a list of items: messages (string or part-array content),
+    // assistant function calls (JSON-string arguments) and their outputs.
+    if (typeof body.input === "string") slots.push(slot(body, "input"));
+    else if (Array.isArray(body.input))
+      for (const item of body.input) {
+        if (!item || typeof item !== "object") continue;
+        if (!redactSystem && (item.role === "system" || item.role === "developer")) continue;
+        if (typeof item.content === "string" || Array.isArray(item.content)) pushContent(item, "content");
+        if (item.type === "function_call" && typeof item.arguments === "string")
+          pushJsonString(item, "arguments", slots, finalizers);
+        if (item.type === "function_call_output" && typeof item.output === "string") slots.push(slot(item, "output"));
+      }
+    return { slots, finalizers };
   } else {
     // OpenAI tool definitions: description + parameter schema string leaves.
     if (Array.isArray(body.tools))
@@ -121,18 +161,7 @@ function requestTextSlots(
       for (const tc of msg.tool_calls) {
         const fn = tc?.function;
         if (!fn || typeof fn.arguments !== "string") continue;
-        // arguments is a JSON STRING. Parse → redact its leaves (incl. NUMERIC PII)
-        // → re-serialize, so a redacted number becomes a QUOTED "<TYPE_N>" and the
-        // args stay valid JSON (a textual replace left an unquoted placeholder).
-        // Unparseable args fall back to text redaction.
-        let parsed: any;
-        try { parsed = JSON.parse(fn.arguments); } catch { parsed = undefined; }
-        if (parsed && typeof parsed === "object") {
-          pushStringLeaves(parsed, slots);
-          finalizers.push(() => { fn.arguments = JSON.stringify(parsed); });
-        } else {
-          slots.push(slot(fn, "arguments"));
-        }
+        pushJsonString(fn, "arguments", slots, finalizers);
       }
   }
 
@@ -169,9 +198,10 @@ export function applyRedaction(
   activeSets: RedactSet[],
   detector: Detector,
   redactSystem = true,
+  dialect: Dialect = provider === "anthropic" ? "messages" : "chat",
 ): RedactionResult {
   const deidBody = clone(rawBody);
-  const { slots, finalizers } = requestTextSlots(deidBody, provider, redactSystem);
+  const { slots, finalizers } = requestTextSlots(deidBody, provider, redactSystem, dialect);
   const all: Span[] = [];
 
   for (const sl of slots) {

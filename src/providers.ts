@@ -1,19 +1,21 @@
 import { config } from "./config";
 import { sha256 } from "./util";
 import { getPolicy } from "./policy";
-import type { CanonicalRequest, Provider, RedactMode, RedactSet } from "./types";
+import type { CanonicalRequest, Dialect, Provider, RedactMode, RedactSet } from "./types";
 
 /**
- * A ProviderAdapter knows the wire dialect of one provider: how to read a text
- * delta off a streamed frame, and — the inverse cordon needs — how to synthesize a
+ * A ProviderAdapter knows one wire dialect: how to read a text delta off a
+ * streamed frame, and — the inverse cordon needs — how to synthesize a
  * text-carrying SSE frame from a (re-identified) text chunk.
  */
 export interface ProviderAdapter {
   /** Read a streamed SSE `data:` payload. */
   parseDelta(data: string): { textDelta?: string; done: boolean };
-  /** Build a provider-correct SSE frame carrying one assistant-text chunk at `index`
-   *  (the content-block index; ignored by providers without block indices). */
-  frameFromText(text: string, index?: number): string;
+  /** Build a dialect-correct SSE frame carrying one assistant-text chunk at `index`
+   *  (the content-block index; ignored by dialects without block indices). `ctx` is
+   *  the addressing the dialect needs beyond an index (Responses: item_id,
+   *  output_index, content_index), copied from the frame being re-emitted. */
+  frameFromText(text: string, index?: number, ctx?: Record<string, unknown>): string;
   /** Walk a non-streaming response body's assistant-text fields (for re-identify). */
   responseTextSlots(body: any): Array<{ get(): string; set(v: string): void }>;
 }
@@ -74,7 +76,41 @@ export const anthropic: ProviderAdapter = {
   },
 };
 
-export const adapterFor = (p: Provider) => (p === "openai" ? openai : anthropic);
+// ----------------------------- OpenAI (responses) -----------------------------
+export const openaiResponses: ProviderAdapter = {
+  parseDelta(data) {
+    try {
+      const j = JSON.parse(data);
+      if (j.type === "response.output_text.delta") return { textDelta: j.delta ?? "", done: false };
+      if (j.type === "response.completed") return { done: true };
+      return { done: false };
+    } catch {
+      return { done: false };
+    }
+  },
+  frameFromText(text, _index = 0, ctx = {}) {
+    // The Responses stream addresses a delta by item_id / output_index / content_index,
+    // not by a single block index; `ctx` carries those from the frame being re-emitted.
+    const data = { type: "response.output_text.delta", ...ctx, delta: text };
+    return `event: response.output_text.delta\ndata: ${JSON.stringify(data)}\n\n`;
+  },
+  responseTextSlots(body) {
+    const slots: Array<{ get(): string; set(v: string): void }> = [];
+    for (const item of body?.output ?? []) {
+      if (item?.type !== "message" || !Array.isArray(item.content)) continue;
+      for (const part of item.content) {
+        if (part?.type === "output_text" && typeof part.text === "string")
+          slots.push({ get: () => part.text, set: (v) => (part.text = v) });
+        else if (part?.type === "refusal" && typeof part.refusal === "string")
+          slots.push({ get: () => part.refusal, set: (v) => (part.refusal = v) });
+      }
+    }
+    return slots;
+  },
+};
+
+export const adapterFor = (p: Provider, dialect?: Dialect) =>
+  p === "anthropic" ? anthropic : dialect === "responses" ? openaiResponses : openai;
 
 // ----------------------------- normalize: HTTP → CanonicalRequest -----------------------------
 
@@ -108,14 +144,22 @@ export function normalize(
   // EXACT endpoint match — sub-paths (e.g. /v1/messages/count_tokens) are NOT
   // generation requests and must take the transparent-passthrough route instead.
   const bare = path.split("?")[0];
-  const provider: Provider | null =
-    bare === "/v1/chat/completions" ? "openai" : bare === "/v1/messages" ? "anthropic" : null;
-  if (!provider || !body || typeof body !== "object") return null;
+  const route: [Provider, Dialect] | null =
+    bare === "/v1/chat/completions"
+      ? ["openai", "chat"]
+      : bare === "/v1/responses"
+        ? ["openai", "responses"]
+        : bare === "/v1/messages"
+          ? ["anthropic", "messages"]
+          : null;
+  if (!route || !body || typeof body !== "object") return null;
+  const [provider, dialect] = route;
 
   const tenant = resolveTenant(headers);
 
   return {
     provider,
+    dialect,
     model: body.model,
     tenant,
     mode: resolveMode(headers, tenant),
@@ -178,7 +222,12 @@ export function forwardUpstream(r: CanonicalRequest, bodyOverride?: any): Promis
  */
 export function passthroughBase(path: string, headers: Record<string, string>): string {
   if (path.startsWith("/v1/messages")) return config.upstream.anthropic;
-  if (path.startsWith("/v1/chat") || path.startsWith("/v1/embeddings") || path.startsWith("/v1/completions"))
+  if (
+    path.startsWith("/v1/chat") ||
+    path.startsWith("/v1/responses") ||
+    path.startsWith("/v1/embeddings") ||
+    path.startsWith("/v1/completions")
+  )
     return config.upstream.openai;
   return headers["x-api-key"] ? config.upstream.anthropic : config.upstream.openai;
 }

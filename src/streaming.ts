@@ -1,6 +1,6 @@
-import type { HttpRes, Provider } from "./types";
+import type { Dialect, HttpRes, Provider } from "./types";
 import type { ProviderAdapter } from "./providers";
-import { StreamReidentifier } from "./redact/reidentify";
+import { reidentifyBody, restore, StreamReidentifier } from "./redact/reidentify";
 import type { Vault } from "./redact/vault";
 
 /** Pipe an upstream Response straight to the client, verbatim (strip / off / errors). */
@@ -23,6 +23,11 @@ export async function pipeUpstream(up: Response, res: HttpRes): Promise<void> {
   }
 }
 
+/** The same SSE frame with its `data:` payload replaced by `j` (event: lines kept). */
+function reframe(frame: string, j: unknown): string {
+  return frame.replace(/^data:.*$/m, `data: ${JSON.stringify(j)}`);
+}
+
 /**
  * Reversible streaming: tee the upstream SSE stream while restoring real values in
  * flight. Text-carrying frames are suppressed and re-emitted (re-identified) via the
@@ -37,6 +42,7 @@ export async function captureAndReidentify(
   adapter: ProviderAdapter,
   vault: Vault,
   provider: Provider,
+  dialect: Dialect = provider === "anthropic" ? "messages" : "chat",
 ): Promise<void> {
   res.setHeader("content-type", "text/event-stream");
   res.setHeader("cache-control", "no-cache");
@@ -47,8 +53,11 @@ export async function captureAndReidentify(
   // tool_use blocks); a re-emitted text_delta MUST carry the matching block index or the
   // client SDK throws "Content block is not a text block". OpenAI has no block index → 0.
   let emitIndex = 0;
+  // Responses addresses a delta by item_id / output_index / content_index; a re-emitted
+  // delta carries the addressing of the frame it stands in for.
+  let emitCtx: Record<string, unknown> = {};
   const emitText = (chunk: string, index = emitIndex) => {
-    if (chunk) res.write(adapter.frameFromText(chunk, index));
+    if (chunk) res.write(adapter.frameFromText(chunk, index, emitCtx));
   };
   const flushTail = () => emitText(reider.end(), emitIndex);
 
@@ -89,6 +98,53 @@ export async function captureAndReidentify(
         return;
       }
       res.write(frame); // content_block_start / message_start / message_delta / message_stop / ping
+      return;
+    }
+
+    if (dialect === "responses") {
+      let j: any;
+      try {
+        j = JSON.parse(data);
+      } catch {}
+      const type = j?.type;
+      if (type === "response.output_text.delta" || type === "response.refusal.delta") {
+        // Suppress the original delta, re-emit the restorable prefix under the same
+        // addressing; the possibly-forming tail stays held in the re-identifier.
+        const { type: _t, delta: _d, ...ctx } = j;
+        emitCtx = ctx;
+        emitText(reider.push(j.delta ?? ""));
+        return;
+      }
+      // Every frame below carries the text in full, so the held tail is flushed first
+      // (a placeholder split across deltas is then already restored on the client) and
+      // the frame's own text is restored before it passes.
+      if (type === "response.output_text.done" || type === "response.refusal.done") {
+        flushTail();
+        if (typeof j.text === "string") j.text = restore(j.text, vault);
+        if (typeof j.refusal === "string") j.refusal = restore(j.refusal, vault);
+        res.write(reframe(frame, j));
+        return;
+      }
+      if (type === "response.content_part.done" && j.part && typeof j.part === "object") {
+        flushTail();
+        if (typeof j.part.text === "string") j.part.text = restore(j.part.text, vault);
+        if (typeof j.part.refusal === "string") j.part.refusal = restore(j.part.refusal, vault);
+        res.write(reframe(frame, j));
+        return;
+      }
+      if (type === "response.output_item.done" && j.item && typeof j.item === "object") {
+        flushTail();
+        res.write(reframe(frame, { ...j, item: reidentifyBody({ output: [j.item] }, provider, vault, dialect).output[0] }));
+        return;
+      }
+      if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
+        flushTail();
+        if (j.response && typeof j.response === "object")
+          res.write(reframe(frame, { ...j, response: reidentifyBody(j.response, provider, vault, dialect) }));
+        else res.write(frame);
+        return;
+      }
+      res.write(frame); // response.created / in_progress / output_item.added / content_part.added / function-call frames / ping
       return;
     }
 

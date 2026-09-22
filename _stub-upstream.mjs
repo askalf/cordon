@@ -26,8 +26,21 @@ function collectText(body, provider) {
   };
   if (provider === "anthropic" && body.system) pushContent(body.system);
   for (const m of body.messages || []) if (m.role === "user") pushContent(m.content);
+  // Responses API: `input` is a string or a list of items (messages, function calls, outputs).
+  if (typeof body.input === "string") parts.push(body.input);
+  else for (const item of body.input || []) {
+    if (item?.role === "user") pushContent(item.content);
+    if (item?.type === "function_call_output" && typeof item.output === "string") parts.push(item.output);
+  }
   return parts.join(" ");
 }
+
+const responsesBody = (n, text) => ({
+  id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status: "completed",
+  output: [{ id: "msg_stub" + n, type: "message", role: "assistant", status: "completed",
+    content: [{ type: "output_text", text, annotations: [] }] }],
+  usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, _stub_call: n,
+});
 
 const openaiBody = (n, text) => ({
   id: "stub-" + n, object: "chat.completion", model: "gpt-4o-mini",
@@ -55,6 +68,24 @@ function streamOpenAI(res, text) {
     res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: c } }] })}\n\n`);
   res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
   res.write("data: [DONE]\n\n");
+  res.end();
+}
+function streamResponses(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  let seq = 0;
+  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  const addr = { item_id: "msg_stub" + n, output_index: 0, content_index: 0 };
+  const shell = (status) => ({ id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status, output: [] });
+  f("response.created", { response: shell("in_progress") });
+  f("response.in_progress", { response: shell("in_progress") });
+  f("response.output_item.added", { output_index: 0, item: { id: addr.item_id, type: "message", role: "assistant", status: "in_progress", content: [] } });
+  f("response.content_part.added", { ...addr, part: { type: "output_text", text: "", annotations: [] } });
+  for (const c of chunk3(text)) f("response.output_text.delta", { ...addr, delta: c });
+  f("response.output_text.done", { ...addr, text });
+  f("response.content_part.done", { ...addr, part: { type: "output_text", text, annotations: [] } });
+  const item = { id: addr.item_id, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] };
+  f("response.output_item.done", { output_index: 0, item });
+  f("response.completed", { response: { ...shell("completed"), output: [item], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
   res.end();
 }
 function streamAnthropic(res, text, body = {}) {
@@ -109,6 +140,8 @@ http
       // Echo the received text back as the assistant reply.
       if (req.url.includes("/chat/completions"))
         return body.stream ? streamOpenAI(res, text) : json(res, openaiBody(n, text));
+      if (req.url.includes("/responses"))
+        return body.stream ? streamResponses(res, text, n) : json(res, responsesBody(n, text));
       if (req.url.includes("/messages"))
         return body.stream ? streamAnthropic(res, text, body) : json(res, anthropicBody(n, text));
       res.statusCode = 404;

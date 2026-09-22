@@ -11,6 +11,12 @@ to match, push a tag `vX.Y.Z`, and release.yml builds + pushes the GHCR
 image and creates the GitHub release from this file.
 -->
 
+## [Unreleased]
+
+### Added
+
+- `POST /v1/responses` (the OpenAI Responses API) is redacted like `/v1/chat/completions`. Current OpenAI clients (`client.responses.create`, the Agents SDK, Codex) use it by default, and until now it passed through verbatim, so a modern OpenAI client pointed at cordon sent raw PII upstream with `X-Redacted: 0`. The request walk covers `instructions` (under `REDACT_SYSTEM`, with `system` and `developer` items), `input` as a string or an item list (`input_text` parts, `function_call` arguments as parsed JSON, `function_call_output` text) and flat function tool definitions; `input_image` and `input_file` parts are left untouched. Non-streaming replies restore `output_text` and `refusal` parts; streaming restores `response.output_text.delta` through the same hold-back buffer as chat, re-emitting each delta under its original `item_id` / `output_index` / `content_index`, and restores the full text carried by `output_text.done`, `content_part.done`, `output_item.done` and `response.completed`. Same modes, headers and audit record (provider `openai`). Sub-paths such as `/v1/responses/{id}` still pass through verbatim.
+
 ## [0.2.1] - 2026-09-11
 
 ### Changed

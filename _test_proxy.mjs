@@ -24,6 +24,8 @@ const post = postTo(BASE);
 const post2 = postTo(BASE2);
 const aBody = (text, extra = {}) => ({ model: "claude-haiku-4-5", messages: [{ role: "user", content: text }], ...extra });
 const oBody = (text, extra = {}) => ({ model: "gpt-4o-mini", messages: [{ role: "user", content: text }], ...extra });
+const rBody = (input, extra = {}) => ({ model: "gpt-4o-mini", input, ...extra });
+const rText = (j) => j?.output?.[0]?.content?.[0]?.text || "";
 const setTenantOn = (base) => (patch) =>
   fetch(base + "/admin/tenant", { method: "POST", headers: { "content-type": "application/json", "x-admin-token": ADMIN }, body: JSON.stringify(patch) });
 const setTenant = setTenantOn(BASE);
@@ -81,6 +83,63 @@ const setTenant2 = setTenantOn(BASE2);
   ok("off: X-Redacted is 0", res.headers.get("x-redacted") === "0");
   sent = JSON.stringify(await calls());
   ok("off: upstream saw RAW (verbatim passthrough)", sent.includes("john@acme.com"));
+
+  // ---- reversible (OpenAI Responses API): string input ----
+  await reset();
+  res = await post("/v1/responses", rBody(PII));
+  text = rText(await res.json());
+  ok("responses/string: email restored in output_text", text.includes("john@acme.com") && !text.includes("<EMAIL"));
+  ok("responses/string: card restored in output_text", text.includes("4012888888881881"));
+  ok("responses/string: X-Redacted >= 2", Number(res.headers.get("x-redacted")) >= 2, res.headers.get("x-redacted"));
+  ok("responses/string: X-Redacted-Types lists EMAIL and CREDIT_CARD",
+    /EMAIL:1/.test(res.headers.get("x-redacted-types") || "") && /CREDIT_CARD:1/.test(res.headers.get("x-redacted-types") || ""),
+    res.headers.get("x-redacted-types"));
+  sent = JSON.stringify(await calls());
+  ok("responses/string: upstream saw placeholder", /<EMAIL_[0-9A-F]+_1>/.test(sent));
+  ok("responses/string: upstream NEVER saw raw PII", !sent.includes("john@acme.com") && !sent.includes("4012888888881881"));
+
+  // ---- reversible (Responses): item list with input_text parts, instructions, a function output ----
+  await reset();
+  res = await post("/v1/responses", rBody(
+    [
+      { role: "user", content: [{ type: "input_text", text: PII }, { type: "input_image", image_url: "data:image/png;base64,AAAA" }] },
+      { type: "function_call", call_id: "call_1", name: "lookup", arguments: JSON.stringify({ email: "jane@corp.io" }) },
+      { type: "function_call_output", call_id: "call_1", output: "account for jane@corp.io: card 4012888888881881" },
+    ],
+    { instructions: "You help ops@acme.com triage tickets." },
+  ));
+  text = rText(await res.json());
+  ok("responses/items: input_text restored in reply", text.includes("john@acme.com") && !text.includes("<EMAIL"));
+  const rsent = await calls();
+  sent = JSON.stringify(rsent);
+  ok("responses/items: upstream NEVER saw raw PII in any item", !sent.includes("john@acme.com") && !sent.includes("jane@corp.io") && !sent.includes("ops@acme.com") && !sent.includes("4012888888881881"));
+  ok("responses/items: input_image part forwarded untouched", sent.includes("data:image/png;base64,AAAA"));
+  {
+    const fc = rsent.bodies?.[0]?.body?.input?.find((i) => i.type === "function_call");
+    let args;
+    try { args = JSON.parse(fc?.arguments ?? ""); } catch {}
+    ok("responses/items: function_call arguments stay valid JSON with a placeholder", typeof args?.email === "string" && /^<EMAIL_/.test(args.email), fc?.arguments);
+  }
+  ok("responses/items: X-Redacted counts every field", Number(res.headers.get("x-redacted")) >= 5, res.headers.get("x-redacted"));
+
+  // ---- strip / off (Responses) ----
+  await reset();
+  res = await post("/v1/responses", rBody(PII), { "x-redact-mode": "strip" });
+  text = rText(await res.json());
+  ok("responses/strip: placeholders persist (not restored)", text.includes("[EMAIL]") && !text.includes("john@acme.com"));
+  sent = JSON.stringify(await calls());
+  ok("responses/strip: upstream saw [EMAIL], not raw", sent.includes("[EMAIL]") && !sent.includes("john@acme.com"));
+  await reset();
+  res = await post("/v1/responses", rBody(PII), { "x-redact-mode": "off" });
+  text = rText(await res.json());
+  ok("responses/off: reply echoes raw (nothing redacted)", text.includes("john@acme.com"));
+  ok("responses/off: X-Redacted 0", res.headers.get("x-redacted") === "0");
+
+  // ---- fail-closed (Responses) ----
+  await reset();
+  res = await post("/v1/responses", rBody(PII), { "x-cordon-fail": "1" });
+  ok("responses/fail-closed: status 422", res.status === 422);
+  ok("responses/fail-closed: upstream NOT called", (await calls()).total === 0);
 
   // ---- fail-closed ----
   await reset();
@@ -152,6 +211,8 @@ const setTenant2 = setTenantOn(BASE2);
   ok("audit: log contains NO raw email", !log.includes("john@acme.com"));
   ok("audit: log contains NO raw card", !log.includes("4012888888881881"));
   ok("audit: log contains NO raw jane", !log.includes("jane@corp.io"));
+  ok("audit: log contains NO raw ops address from Responses instructions", !log.includes("ops@acme.com"));
+  ok("audit: Responses requests recorded under provider openai", log.split("\n").some((l) => l.includes('"provider":"openai"') && l.includes('"CREDIT_CARD":1')));
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

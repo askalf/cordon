@@ -18,6 +18,7 @@ const post = (path, body, headers = {}) =>
   });
 const aBody = (text, extra = {}) => ({ model: "claude-haiku-4-5", messages: [{ role: "user", content: text }], stream: true, ...extra });
 const oBody = (text, extra = {}) => ({ model: "gpt-4o-mini", messages: [{ role: "user", content: text }], stream: true, ...extra });
+const rBody = (text, extra = {}) => ({ model: "gpt-4o-mini", input: text, stream: true, ...extra });
 
 /** Reconstruct assistant text from an SSE response body. */
 function reconstruct(sse, provider) {
@@ -35,11 +36,43 @@ function reconstruct(sse, provider) {
     }
     if (provider === "anthropic") {
       if (j.type === "content_block_delta") out += j.delta?.text ?? "";
+    } else if (provider === "responses") {
+      if (j.type === "response.output_text.delta") out += j.delta ?? "";
     } else {
       out += j.choices?.[0]?.delta?.content ?? "";
     }
   }
   return out;
+}
+
+/** Every Responses frame that carries the full text, in stream order. A client SDK
+ *  reads the final text from these, not from the deltas, so each must be restored. */
+function responsesFullTexts(sse) {
+  const out = [];
+  for (const frame of sse.split("\n\n")) {
+    const line = frame.split("\n").find((l) => l.startsWith("data:"));
+    if (!line) continue;
+    let j;
+    try { j = JSON.parse(line.slice(5).trim()); } catch { continue; }
+    if (j.type === "response.output_text.done") out.push(["output_text.done", j.text]);
+    if (j.type === "response.content_part.done") out.push(["content_part.done", j.part?.text]);
+    if (j.type === "response.output_item.done") out.push(["output_item.done", j.item?.content?.[0]?.text]);
+    if (j.type === "response.completed") out.push(["completed", j.response?.output?.[0]?.content?.[0]?.text]);
+  }
+  return out;
+}
+
+/** Addressing on every re-emitted Responses delta must match the upstream's. */
+function responsesDeltaAddressing(sse) {
+  const seen = new Set();
+  for (const frame of sse.split("\n\n")) {
+    const line = frame.split("\n").find((l) => l.startsWith("data:"));
+    if (!line) continue;
+    let j;
+    try { j = JSON.parse(line.slice(5).trim()); } catch { continue; }
+    if (j.type === "response.output_text.delta") seen.add(`${j.item_id}/${j.output_index}/${j.content_index}`);
+  }
+  return [...seen];
 }
 
 /** Strict SSE validator mimicking the client SDK: a `text_delta` must land on a
@@ -102,6 +135,29 @@ function validateSSE(sse) {
   ok("stream/openai: card restored across frame split", text.includes("4012888888881881") && !text.includes("<CREDIT_CARD"));
   sent = JSON.stringify(await calls());
   ok("stream/openai: upstream saw placeholder not raw", /<EMAIL_[0-9A-F]+_1>/.test(sent) && !sent.includes("john@acme.com"));
+
+  // ---- reversible streaming (OpenAI Responses API) ----
+  await reset();
+  txt = await (await post("/v1/responses", rBody(PII))).text();
+  text = reconstruct(txt, "responses");
+  ok("stream/responses: email restored across frame split", text.includes("john@acme.com") && !text.includes("<EMAIL"), text);
+  ok("stream/responses: card restored across frame split", text.includes("4012888888881881") && !text.includes("<CREDIT_CARD"));
+  {
+    const full = responsesFullTexts(txt);
+    ok("stream/responses: all four full-text frames present", full.map((f) => f[0]).join(",") === "output_text.done,content_part.done,output_item.done,completed", full.map((f) => f[0]).join(","));
+    ok("stream/responses: every full-text frame restored", full.every((f) => typeof f[1] === "string" && f[1].includes("john@acme.com") && !f[1].includes("<EMAIL")), JSON.stringify(full));
+    const addr = responsesDeltaAddressing(txt);
+    ok("stream/responses: re-emitted deltas keep the upstream item addressing", addr.length === 1 && /^msg_stub\d+\/0\/0$/.test(addr[0]), JSON.stringify(addr));
+    ok("stream/responses: event: lines preserved", txt.includes("event: response.output_text.delta") && txt.includes("event: response.completed"));
+  }
+  sent = JSON.stringify(await calls());
+  ok("stream/responses: upstream saw placeholder not raw", /<EMAIL_[0-9A-F]+_1>/.test(sent) && !sent.includes("john@acme.com"));
+
+  // ---- strip streaming (Responses) ----
+  await reset();
+  txt = await (await post("/v1/responses", rBody(PII), { "x-redact-mode": "strip" })).text();
+  text = reconstruct(txt, "responses");
+  ok("stream/responses/strip: placeholders persist", text.includes("[EMAIL]") && !text.includes("john@acme.com"));
 
   // ---- strip streaming: placeholders persist, no restore, no hold-back ----
   await reset();
