@@ -171,6 +171,30 @@ function validateSSE(sse) {
   sent = JSON.stringify(await calls());
   ok("stream/responses: upstream saw placeholder not raw", /<EMAIL_[0-9A-F]+_1>/.test(sent) && !sent.includes("john@acme.com"));
 
+  // ---- reversible streaming (Responses, two interleaved content parts) ----
+  // Responses addresses a delta by item_id/output_index/content_index and parts can
+  // interleave. With one buffer for the whole stream, part B's text lands inside a
+  // placeholder part A had half-written and is re-emitted under B's address.
+  await reset();
+  txt = await (await post("/v1/responses", rBody("INTERLEAVE " + PII))).text();
+  {
+    const byAddr = new Map();
+    for (const f of txt.split("\n\n")) {
+      const d = f.split("\n").find((l) => l.startsWith("data:"));
+      if (!d) continue;
+      let j; try { j = JSON.parse(d.slice(5).trim()); } catch { continue; }
+      if (j?.type !== "response.output_text.delta") continue;
+      const k = `${j.item_id}/${j.output_index}/${j.content_index}`;
+      byAddr.set(k, (byAddr.get(k) ?? "") + (j.delta ?? ""));
+    }
+    ok("stream/responses/interleave: both parts present", byAddr.size === 2, JSON.stringify([...byAddr.keys()]));
+    const joined = [...byAddr.values()];
+    ok("stream/responses/interleave: the PII part is restored whole",
+      joined.some((t) => t.includes("john@acme.com")) && !joined.join("").includes("<EMAIL"), JSON.stringify(joined));
+    ok("stream/responses/interleave: the other part keeps its own text",
+      joined.some((t) => t.includes("second part") && !t.includes("john@acme.com")), JSON.stringify(joined));
+  }
+
   // ---- reversible streaming (Responses REFUSAL) ----
   // A refusal carries restorable text too, but under its own event type. Regression:
   // the re-emit path shared frameFromText with output text and hardcoded the

@@ -59,10 +59,41 @@ export async function captureAndReidentify(
   // Responses addresses a delta by item_id / output_index / content_index; a re-emitted
   // delta carries the addressing of the frame it stands in for.
   let emitCtx: Record<string, unknown> = {};
-  const emitText = (chunk: string, index = emitIndex) => {
-    if (chunk) res.write(adapter.frameFromText(chunk, index, emitCtx));
+  const emitText = (chunk: string, index = emitIndex, ctx = emitCtx) => {
+    if (chunk) res.write(adapter.frameFromText(chunk, index, ctx));
   };
   const flushTail = () => emitText(reider.end(), emitIndex);
+
+  // A Responses stream can carry several content parts at once (two output items, or two
+  // content indices of one item) and their deltas interleave. One buffer for all of them
+  // would splice part B's text into a placeholder part A had half-written, and re-emit it
+  // under B's address. Each part gets its own re-identifier and its own addressing, and
+  // is flushed and dropped when that part's own done frame arrives.
+  const parts = new Map<string, { reider: StreamReidentifier; ctx: Record<string, unknown> }>();
+  const partKey = (j: any) => `${j?.item_id ?? ""}/${j?.output_index ?? 0}/${j?.content_index ?? 0}`;
+  const partFor = (j: any, ctx: Record<string, unknown>) => {
+    const key = partKey(j);
+    const found = parts.get(key);
+    if (found) { found.ctx = ctx; return found; }
+    const made = { reider: new StreamReidentifier(vault), ctx };
+    parts.set(key, made);
+    return made;
+  };
+  /** Flush one part's held tail under its own addressing and forget it. */
+  const flushPart = (j: any) => {
+    const key = partKey(j);
+    const part = parts.get(key);
+    if (!part) return;
+    emitText(part.reider.end(), 0, part.ctx);
+    parts.delete(key);
+  };
+  /** Flush every part still open, for the frames that close the whole response. */
+  const flushAllParts = () => {
+    for (const [key, part] of parts) {
+      emitText(part.reider.end(), 0, part.ctx);
+      parts.delete(key);
+    }
+  };
 
   const handleFrame = (frame: string) => {
     const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
@@ -72,7 +103,8 @@ export async function captureAndReidentify(
       return;
     }
     if (data === "[DONE]") {
-      flushTail();
+      if (dialect === "responses") flushAllParts();
+      else flushTail();
       res.write(frame);
       return;
     }
@@ -116,34 +148,34 @@ export async function captureAndReidentify(
         // text would break a client that reads refusal events; the possibly-forming
         // tail stays held in the re-identifier.
         const { delta: _d, ...ctx } = j;
-        emitCtx = ctx;
-        emitText(reider.push(j.delta ?? ""));
+        const part = partFor(j, ctx);
+        emitText(part.reider.push(j.delta ?? ""), 0, part.ctx);
         return;
       }
       // Every frame below carries the text in full, so the held tail is flushed first
       // (a placeholder split across deltas is then already restored on the client) and
       // the frame's own text is restored before it passes.
       if (type === "response.output_text.done" || type === "response.refusal.done") {
-        flushTail();
+        flushPart(j);
         if (typeof j.text === "string") j.text = restore(j.text, vault);
         if (typeof j.refusal === "string") j.refusal = restore(j.refusal, vault);
         res.write(reframe(frame, j));
         return;
       }
       if (type === "response.content_part.done" && j.part && typeof j.part === "object") {
-        flushTail();
+        flushPart(j);
         if (typeof j.part.text === "string") j.part.text = restore(j.part.text, vault);
         if (typeof j.part.refusal === "string") j.part.refusal = restore(j.part.refusal, vault);
         res.write(reframe(frame, j));
         return;
       }
       if (type === "response.output_item.done" && j.item && typeof j.item === "object") {
-        flushTail();
+        flushAllParts();
         res.write(reframe(frame, { ...j, item: reidentifyBody({ output: [j.item] }, provider, vault, dialect).output[0] }));
         return;
       }
       if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
-        flushTail();
+        flushAllParts();
         if (j.response && typeof j.response === "object")
           res.write(reframe(frame, { ...j, response: reidentifyBody(j.response, provider, vault, dialect) }));
         else res.write(frame);

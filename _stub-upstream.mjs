@@ -88,6 +88,38 @@ function streamResponses(res, text, n) {
   f("response.completed", { response: { ...shell("completed"), output: [item], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
   res.end();
 }
+// Two content parts of ONE response, streaming at the same time: the deltas of
+// output_index 0 and 1 alternate on the wire, which is what a Responses turn with
+// more than one output item looks like. Only part 0 carries PII.
+function streamResponsesInterleaved(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  let seq = 0;
+  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  const a = { item_id: "msg_stub" + n + "a", output_index: 0, content_index: 0 };
+  const b = { item_id: "msg_stub" + n + "b", output_index: 1, content_index: 0 };
+  const aText = text.replace("INTERLEAVE ", "");
+  const bText = "the second part says nothing private";
+  const shell = (status) => ({ id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status, output: [] });
+  const item = (addr, t, status) => ({ id: addr.item_id, type: "message", role: "assistant", status, content: status === "completed" ? [{ type: "output_text", text: t, annotations: [] }] : [] });
+  f("response.created", { response: shell("in_progress") });
+  for (const [addr, t] of [[a, aText], [b, bText]]) {
+    f("response.output_item.added", { output_index: addr.output_index, item: item(addr, t, "in_progress") });
+    f("response.content_part.added", { ...addr, part: { type: "output_text", text: "", annotations: [] } });
+  }
+  const ac = chunk3(aText), bc = chunk3(bText);
+  for (let i = 0; i < Math.max(ac.length, bc.length); i++) {
+    if (i < ac.length) f("response.output_text.delta", { ...a, delta: ac[i] });
+    if (i < bc.length) f("response.output_text.delta", { ...b, delta: bc[i] });
+  }
+  for (const [addr, t] of [[a, aText], [b, bText]]) {
+    f("response.output_text.done", { ...addr, text: t });
+    f("response.content_part.done", { ...addr, part: { type: "output_text", text: t, annotations: [] } });
+    f("response.output_item.done", { output_index: addr.output_index, item: item(addr, t, "completed") });
+  }
+  f("response.completed", { response: { ...shell("completed"), output: [item(a, aText, "completed"), item(b, bText, "completed")], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
+  res.end();
+}
+
 // A REFUSED Responses turn streams the same frame shape under refusal-flavoured
 // event types (`response.refusal.delta` / `.done`, a `refusal` content part). A
 // client consuming refusals reads only those, so cordon must re-emit a restored
@@ -163,7 +195,9 @@ http
         return body.stream ? streamOpenAI(res, text) : json(res, openaiBody(n, text));
       if (req.url.includes("/responses"))
         return body.stream
-          ? text.includes("FORCE_REFUSAL") ? streamResponsesRefusal(res, text, n) : streamResponses(res, text, n)
+          ? text.includes("FORCE_REFUSAL") ? streamResponsesRefusal(res, text, n)
+            : text.includes("INTERLEAVE") ? streamResponsesInterleaved(res, text, n)
+            : streamResponses(res, text, n)
           : json(res, responsesBody(n, text));
       if (req.url.includes("/messages"))
         return body.stream ? streamAnthropic(res, text, body) : json(res, anthropicBody(n, text));
