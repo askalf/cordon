@@ -19,7 +19,7 @@ your app ──▶ cordon ──▶ api.openai.com / api.anthropic.com
 ```bash
 docker run -d --name cordon --init -p 127.0.0.1:8080:8080 \
   -v cordon-data:/app/data -e ADMIN_TOKEN=change-me \
-  ghcr.io/askalf/cordon:v0.2.0
+  ghcr.io/askalf/cordon:v0.3.0
 ```
 
 Then change one thing in your client: the base URL. Anthropic clients use `http://localhost:8080`, OpenAI clients use `http://localhost:8080/v1`. Your provider key goes through untouched; cordon never holds it. Every response says what it did: `X-Redacted: 2`, `X-Redacted-Types: EMAIL:1,CREDIT_CARD:1`.

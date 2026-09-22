@@ -12,7 +12,7 @@ docker compose up -d --build      # from a clone: cordon on 127.0.0.1:8080, audi
 Every tagged release publishes a multi-arch image (linux/amd64, linux/arm64) to GHCR with keyless Sigstore provenance and an SBOM. Verify it came from this repository's release workflow:
 
 ```bash
-gh attestation verify oci://ghcr.io/askalf/cordon:v0.2.0 --repo askalf/cordon
+gh attestation verify oci://ghcr.io/askalf/cordon:v0.3.0 --repo askalf/cordon
 ```
 
 Sharing one Claude or ChatGPT subscription through [dario](https://github.com/askalf/dario) without leaking PII: dario's [cordon integration guide](https://github.com/askalf/dario/blob/main/docs/integrations/cordon.md).
