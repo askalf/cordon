@@ -13,6 +13,10 @@ image and creates the GitHub release from this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-22
+
+The first image since 0.2.0: it also carries 0.2.1's dependency update, which was never tagged or published as an image.
+
 ### Added
 
 - `POST /v1/responses` (the OpenAI Responses API) is redacted like `/v1/chat/completions`. Current OpenAI clients (`client.responses.create`, the Agents SDK, Codex) use it by default, and until now it passed through verbatim, so a modern OpenAI client pointed at cordon sent raw PII upstream with `X-Redacted: 0`. The request walk covers `instructions` (under `REDACT_SYSTEM`, with `system` and `developer` items), `input` as a string or an item list (`input_text` parts, `function_call` arguments as parsed JSON, `function_call_output` text) and flat function tool definitions; `input_image` and `input_file` parts are left untouched. Non-streaming replies restore `output_text` and `refusal` parts; streaming restores `response.output_text.delta` and `response.refusal.delta` under their own event kind, giving EACH content part its own hold-back buffer keyed by `item_id` / `output_index` / `content_index` (parts of one turn interleave on the wire, and one shared buffer spliced their text together). A part is flushed on its own done frame; `output_item.done` flushes only the item it names; `response.completed` / `incomplete` / `failed`, `[DONE]`, a reader error and an upstream that stops without any terminal frame all flush whatever is still held. The full text carried by `output_text.done`, `content_part.done`, `output_item.done` and `response.completed` is restored in place. Prior assistant turns fed back as input (`output_text` and `refusal` parts) are redacted too: a stateless client appends the previous reply, which cordon had already restored. Same modes, headers and audit record (provider `openai`). Sub-paths such as `/v1/responses/{id}` still pass through verbatim.
