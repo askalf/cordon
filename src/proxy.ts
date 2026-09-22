@@ -18,7 +18,7 @@ import type { CanonicalRequest, HttpRes } from "./types";
  */
 export async function handle(r: CanonicalRequest, res: HttpRes) {
   const t0 = nowMs();
-  const adapter = adapterFor(r.provider);
+  const adapter = adapterFor(r.provider, r.dialect);
   metrics.request(r.mode);
   res.setHeader("X-Redact-Mode", r.mode);
 
@@ -51,7 +51,7 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   try {
     if (r.testFail) throw new Error("forced detection failure (test hook)");
     vault = new Vault(r.mode, { consistentPseudonyms, secret: config.tenantSecret });
-    ({ deidBody, spans } = applyRedaction(r.raw, r.provider, vault, r.activeSets, detector, redactSystem));
+    ({ deidBody, spans } = applyRedaction(r.raw, r.provider, vault, r.activeSets, detector, redactSystem, r.dialect));
   } catch (e) {
     return onRedactionError(r, res, e, failMode, t0);
   }
@@ -102,7 +102,7 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
 
   // ---- relay the response (re-identify in reversible mode) ----
   if (r.stream && up.body) {
-    if (r.mode === "reversible") await captureAndReidentify(up.body, res, adapter, vault, r.provider);
+    if (r.mode === "reversible") await captureAndReidentify(up.body, res, adapter, vault, r.provider, r.dialect);
     else await pipeUpstream(up, res); // strip: placeholders persist, verbatim
     metrics.timing("stream", t0);
     return;
@@ -110,7 +110,7 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
 
   const body = await up.json();
   res.setHeader("content-type", "application/json");
-  res.end(JSON.stringify(r.mode === "reversible" ? reidentifyBody(body, r.provider, vault) : body));
+  res.end(JSON.stringify(r.mode === "reversible" ? reidentifyBody(body, r.provider, vault, r.dialect) : body));
   metrics.timing("full", t0);
 }
 

@@ -1,5 +1,13 @@
 export type Provider = "openai" | "anthropic";
 
+/**
+ * The wire dialect of a generation request. A provider can speak more than one:
+ * OpenAI serves both chat.completions (`messages`) and the Responses API
+ * (`input`/`output`), which differ in request shape, response shape and SSE
+ * event grammar while sharing the upstream base, auth headers and audit provider.
+ */
+export type Dialect = "chat" | "responses" | "messages";
+
 export interface Msg {
   role: string;
   content: any;
@@ -58,6 +66,8 @@ export interface Detector {
 
 export interface CanonicalRequest {
   provider: Provider;
+  /** Which of the provider's wire shapes this request uses (decided by path). */
+  dialect: Dialect;
   model: string;
   tenant: string;
   /** Resolved: X-Redact-Mode header > tenant policy > config.defaultMode. */

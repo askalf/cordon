@@ -26,8 +26,21 @@ function collectText(body, provider) {
   };
   if (provider === "anthropic" && body.system) pushContent(body.system);
   for (const m of body.messages || []) if (m.role === "user") pushContent(m.content);
+  // Responses API: `input` is a string or a list of items (messages, function calls, outputs).
+  if (typeof body.input === "string") parts.push(body.input);
+  else for (const item of body.input || []) {
+    if (item?.role === "user") pushContent(item.content);
+    if (item?.type === "function_call_output" && typeof item.output === "string") parts.push(item.output);
+  }
   return parts.join(" ");
 }
+
+const responsesBody = (n, text) => ({
+  id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status: "completed",
+  output: [{ id: "msg_stub" + n, type: "message", role: "assistant", status: "completed",
+    content: [{ type: "output_text", text, annotations: [] }] }],
+  usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, _stub_call: n,
+});
 
 const openaiBody = (n, text) => ({
   id: "stub-" + n, object: "chat.completion", model: "gpt-4o-mini",
@@ -55,6 +68,104 @@ function streamOpenAI(res, text) {
     res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: c } }] })}\n\n`);
   res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
   res.write("data: [DONE]\n\n");
+  res.end();
+}
+function streamResponses(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  let seq = 0;
+  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  const addr = { item_id: "msg_stub" + n, output_index: 0, content_index: 0 };
+  const shell = (status) => ({ id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status, output: [] });
+  f("response.created", { response: shell("in_progress") });
+  f("response.in_progress", { response: shell("in_progress") });
+  f("response.output_item.added", { output_index: 0, item: { id: addr.item_id, type: "message", role: "assistant", status: "in_progress", content: [] } });
+  f("response.content_part.added", { ...addr, part: { type: "output_text", text: "", annotations: [] } });
+  for (const c of chunk3(text)) f("response.output_text.delta", { ...addr, delta: c });
+  f("response.output_text.done", { ...addr, text });
+  f("response.content_part.done", { ...addr, part: { type: "output_text", text, annotations: [] } });
+  const item = { id: addr.item_id, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] };
+  f("response.output_item.done", { output_index: 0, item });
+  f("response.completed", { response: { ...shell("completed"), output: [item], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
+  res.end();
+}
+// Two content parts of ONE response, streaming at the same time: the deltas of
+// output_index 0 and 1 alternate on the wire, which is what a Responses turn with
+// more than one output item looks like. Only part 0 carries PII.
+function streamResponsesInterleaved(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  let seq = 0;
+  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  const a = { item_id: "msg_stub" + n + "a", output_index: 0, content_index: 0 };
+  const b = { item_id: "msg_stub" + n + "b", output_index: 1, content_index: 0 };
+  const aText = text.replace("INTERLEAVE ", "");
+  // B's text is the SAME de-identified text the stub received, so it carries real
+  // placeholders and the cut below can land inside one.
+  const bText = "second part repeats " + aText;
+  const shell = (status) => ({ id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status, output: [] });
+  const item = (addr, t, status) => ({ id: addr.item_id, type: "message", role: "assistant", status, content: status === "completed" ? [{ type: "output_text", text: t, annotations: [] }] : [] });
+  f("response.created", { response: shell("in_progress") });
+  for (const [addr, t] of [[a, aText], [b, bText]]) {
+    f("response.output_item.added", { output_index: addr.output_index, item: item(addr, t, "in_progress") });
+    f("response.content_part.added", { ...addr, part: { type: "output_text", text: "", annotations: [] } });
+  }
+  // B goes first and stops PART-WAY THROUGH ITS PLACEHOLDER, then A runs to
+  // completion INCLUDING its output_item.done, and only then does B finish. Closing A
+  // must not end B's re-identifier while B still holds a half-written placeholder.
+  // The cut lands INSIDE B's placeholder: the text the stub echoes is already
+  // de-identified, so `<` is the placeholder's first character and B stops four
+  // characters in, holding a fragment no re-identifier can resolve yet.
+  const ac = chunk3(aText);
+  const cut = bText.indexOf("<") >= 0 ? bText.indexOf("<") + 4 : Math.ceil(bText.length / 2);
+  for (const c of chunk3(bText.slice(0, cut))) f("response.output_text.delta", { ...b, delta: c });
+  for (const c of ac) f("response.output_text.delta", { ...a, delta: c });
+  f("response.output_text.done", { ...a, text: aText });
+  f("response.content_part.done", { ...a, part: { type: "output_text", text: aText, annotations: [] } });
+  f("response.output_item.done", { output_index: a.output_index, item: item(a, aText, "completed") });
+  for (const c of chunk3(bText.slice(cut))) f("response.output_text.delta", { ...b, delta: c });
+  f("response.output_text.done", { ...b, text: bText });
+  f("response.content_part.done", { ...b, part: { type: "output_text", text: bText, annotations: [] } });
+  f("response.output_item.done", { output_index: b.output_index, item: item(b, bText, "completed") });
+  f("response.completed", { response: { ...shell("completed"), output: [item(a, aText, "completed"), item(b, bText, "completed")], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
+  res.end();
+}
+
+// A Responses stream that just STOPS: deltas up to a point four characters inside a
+// placeholder, then the socket ends with no output_text.done, no response.completed
+// and no [DONE]. Whatever the re-identifier is holding has to reach the client anyway.
+function streamResponsesTruncated(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  let seq = 0;
+  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  const addr = { item_id: "msg_stub" + n, output_index: 0, content_index: 0 };
+  const body = text.replace("TRUNCATE ", "");
+  const marks = [...body.matchAll(/</g)].map((m) => m.index);
+  const cut = marks.length > 1 ? marks[1] + 4 : Math.ceil(body.length / 2);
+  f("response.created", { response: { id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status: "in_progress", output: [] } });
+  f("response.output_item.added", { output_index: 0, item: { id: addr.item_id, type: "message", role: "assistant", status: "in_progress", content: [] } });
+  f("response.content_part.added", { ...addr, part: { type: "output_text", text: "", annotations: [] } });
+  for (const c of chunk3(body.slice(0, cut))) f("response.output_text.delta", { ...addr, delta: c });
+  res.end();
+}
+
+// A REFUSED Responses turn streams the same frame shape under refusal-flavoured
+// event types (`response.refusal.delta` / `.done`, a `refusal` content part). A
+// client consuming refusals reads only those, so cordon must re-emit a restored
+// refusal delta as a refusal delta — not as output text.
+function streamResponsesRefusal(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  let seq = 0;
+  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  const addr = { item_id: "msg_stub" + n, output_index: 0, content_index: 0 };
+  const shell = (status) => ({ id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status, output: [] });
+  f("response.created", { response: shell("in_progress") });
+  f("response.output_item.added", { output_index: 0, item: { id: addr.item_id, type: "message", role: "assistant", status: "in_progress", content: [] } });
+  f("response.content_part.added", { ...addr, part: { type: "refusal", refusal: "" } });
+  for (const c of chunk3(text)) f("response.refusal.delta", { ...addr, delta: c });
+  f("response.refusal.done", { ...addr, refusal: text });
+  f("response.content_part.done", { ...addr, part: { type: "refusal", refusal: text } });
+  const item = { id: addr.item_id, type: "message", role: "assistant", status: "completed", content: [{ type: "refusal", refusal: text }] };
+  f("response.output_item.done", { output_index: 0, item });
+  f("response.completed", { response: { ...shell("completed"), output: [item], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
   res.end();
 }
 function streamAnthropic(res, text, body = {}) {
@@ -109,6 +220,13 @@ http
       // Echo the received text back as the assistant reply.
       if (req.url.includes("/chat/completions"))
         return body.stream ? streamOpenAI(res, text) : json(res, openaiBody(n, text));
+      if (req.url.includes("/responses"))
+        return body.stream
+          ? text.includes("TRUNCATE") ? streamResponsesTruncated(res, text, n)
+            : text.includes("FORCE_REFUSAL") ? streamResponsesRefusal(res, text, n)
+            : text.includes("INTERLEAVE") ? streamResponsesInterleaved(res, text, n)
+            : streamResponses(res, text, n)
+          : json(res, responsesBody(n, text));
       if (req.url.includes("/messages"))
         return body.stream ? streamAnthropic(res, text, body) : json(res, anthropicBody(n, text));
       res.statusCode = 404;

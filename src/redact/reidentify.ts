@@ -1,10 +1,10 @@
 import { clone } from "../util";
 import { adapterFor } from "../providers";
 import { PLACEHOLDER_RE, isFormingPlaceholder, Vault } from "./vault";
-import type { Provider } from "../types";
+import type { Dialect, Provider } from "../types";
 
 /** Replace every placeholder we minted with its real value; leave unknown ones as-is. */
-function restore(text: string, vault: Vault): string {
+export function restore(text: string, vault: Vault): string {
   return text.replace(PLACEHOLDER_RE, (m) => vault.lookup(m) ?? m);
 }
 
@@ -12,10 +12,10 @@ function restore(text: string, vault: Vault): string {
  * Full-body re-identification for a NON-streaming response: walk the provider
  * response's assistant-text fields and restore real values in place.
  */
-export function reidentifyBody(body: any, provider: Provider, vault: Vault): any {
+export function reidentifyBody(body: any, provider: Provider, vault: Vault, dialect?: Dialect): any {
   if (!vault.hasReverse) return body; // nothing was redacted → nothing to restore
   const out = clone(body);
-  for (const sl of adapterFor(provider).responseTextSlots(out)) sl.set(restore(sl.get(), vault));
+  for (const sl of adapterFor(provider, dialect).responseTextSlots(out)) sl.set(restore(sl.get(), vault));
   return out;
 }
 
