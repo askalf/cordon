@@ -91,8 +91,16 @@ function requestTextSlots(
         const part = c[i];
         if (typeof part === "string") { slots.push(slot(c, i)); continue; } // a bare-string content element
         if (!part || typeof part !== "object") continue;
-        if ((part.type === "text" || part.type === "input_text") && typeof part.text === "string") {
+        if (
+          (part.type === "text" || part.type === "input_text" || part.type === "output_text") &&
+          typeof part.text === "string"
+        ) {
+          // output_text is an ASSISTANT part: a stateless Responses conversation appends
+          // the previous reply's output to the next request's input, and that reply left
+          // here with its real values restored.
           slots.push(slot(part, "text"));
+        } else if (part.type === "refusal" && typeof part.refusal === "string") {
+          slots.push(slot(part, "refusal"));
         } else if (part.type === "tool_result") {
           // Anthropic tool_result content can itself be a string or block array.
           if (typeof part.content === "string") slots.push(slot(part, "content"));

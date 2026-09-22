@@ -25,7 +25,10 @@ export async function pipeUpstream(up: Response, res: HttpRes): Promise<void> {
 
 /** The same SSE frame with its `data:` payload replaced by `j` (event: lines kept). */
 function reframe(frame: string, j: unknown): string {
-  return frame.replace(/^data:.*$/m, `data: ${JSON.stringify(j)}`);
+  // A function replacement, never a string: `$&`, `$\`` and `$'` inside model text are
+  // replacement metacharacters to String.replace and would splice the original line
+  // into the payload unescaped.
+  return frame.replace(/^data:.*$/m, () => `data: ${JSON.stringify(j)}`);
 }
 
 /**

@@ -122,6 +122,28 @@ const setTenant2 = setTenantOn(BASE2);
   }
   ok("responses/items: X-Redacted counts every field", Number(res.headers.get("x-redacted")) >= 5, res.headers.get("x-redacted"));
 
+  // ---- reversible (Responses): a prior assistant turn fed back as input ----
+  // The reply cordon restores carries real values, and a stateless client appends it to
+  // the next request's input. Those parts are output_text/refusal, not input_text.
+  await reset();
+  res = await post("/v1/responses", rBody([
+    { role: "user", content: [{ type: "input_text", text: "who do I contact" }] },
+    {
+      type: "message", role: "assistant",
+      content: [
+        { type: "output_text", text: "Contact john@acme.com about card 4012888888881881", annotations: [] },
+        { type: "refusal", refusal: "I cannot share ops@acme.com" },
+      ],
+    },
+    { role: "user", content: [{ type: "input_text", text: "thanks" }] },
+  ]));
+  sent = JSON.stringify(await calls());
+  ok("responses/history: assistant output_text never reaches upstream raw",
+    !sent.includes("john@acme.com") && !sent.includes("4012888888881881"), sent.slice(0, 200));
+  ok("responses/history: assistant refusal never reaches upstream raw", !sent.includes("ops@acme.com"));
+  ok("responses/history: the assistant turn is placeholdered", /<EMAIL_[0-9A-F]+_\d>/.test(sent));
+  ok("responses/history: X-Redacted counts the assistant turn", Number(res.headers.get("x-redacted")) >= 3, res.headers.get("x-redacted"));
+
   // ---- strip / off (Responses) ----
   await reset();
   res = await post("/v1/responses", rBody(PII), { "x-redact-mode": "strip" });
