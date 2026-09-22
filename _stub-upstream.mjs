@@ -98,7 +98,9 @@ function streamResponsesInterleaved(res, text, n) {
   const a = { item_id: "msg_stub" + n + "a", output_index: 0, content_index: 0 };
   const b = { item_id: "msg_stub" + n + "b", output_index: 1, content_index: 0 };
   const aText = text.replace("INTERLEAVE ", "");
-  const bText = "the second part says nothing private";
+  // B's text is the SAME de-identified text the stub received, so it carries real
+  // placeholders and the cut below can land inside one.
+  const bText = "second part repeats " + aText;
   const shell = (status) => ({ id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status, output: [] });
   const item = (addr, t, status) => ({ id: addr.item_id, type: "message", role: "assistant", status, content: status === "completed" ? [{ type: "output_text", text: t, annotations: [] }] : [] });
   f("response.created", { response: shell("in_progress") });
@@ -106,16 +108,23 @@ function streamResponsesInterleaved(res, text, n) {
     f("response.output_item.added", { output_index: addr.output_index, item: item(addr, t, "in_progress") });
     f("response.content_part.added", { ...addr, part: { type: "output_text", text: "", annotations: [] } });
   }
-  const ac = chunk3(aText), bc = chunk3(bText);
-  for (let i = 0; i < Math.max(ac.length, bc.length); i++) {
-    if (i < ac.length) f("response.output_text.delta", { ...a, delta: ac[i] });
-    if (i < bc.length) f("response.output_text.delta", { ...b, delta: bc[i] });
-  }
-  for (const [addr, t] of [[a, aText], [b, bText]]) {
-    f("response.output_text.done", { ...addr, text: t });
-    f("response.content_part.done", { ...addr, part: { type: "output_text", text: t, annotations: [] } });
-    f("response.output_item.done", { output_index: addr.output_index, item: item(addr, t, "completed") });
-  }
+  // B goes first and stops PART-WAY THROUGH ITS PLACEHOLDER, then A runs to
+  // completion INCLUDING its output_item.done, and only then does B finish. Closing A
+  // must not end B's re-identifier while B still holds a half-written placeholder.
+  // The cut lands INSIDE B's placeholder: the text the stub echoes is already
+  // de-identified, so `<` is the placeholder's first character and B stops four
+  // characters in, holding a fragment no re-identifier can resolve yet.
+  const ac = chunk3(aText);
+  const cut = bText.indexOf("<") >= 0 ? bText.indexOf("<") + 4 : Math.ceil(bText.length / 2);
+  for (const c of chunk3(bText.slice(0, cut))) f("response.output_text.delta", { ...b, delta: c });
+  for (const c of ac) f("response.output_text.delta", { ...a, delta: c });
+  f("response.output_text.done", { ...a, text: aText });
+  f("response.content_part.done", { ...a, part: { type: "output_text", text: aText, annotations: [] } });
+  f("response.output_item.done", { output_index: a.output_index, item: item(a, aText, "completed") });
+  for (const c of chunk3(bText.slice(cut))) f("response.output_text.delta", { ...b, delta: c });
+  f("response.output_text.done", { ...b, text: bText });
+  f("response.content_part.done", { ...b, part: { type: "output_text", text: bText, annotations: [] } });
+  f("response.output_item.done", { output_index: b.output_index, item: item(b, bText, "completed") });
   f("response.completed", { response: { ...shell("completed"), output: [item(a, aText, "completed"), item(b, bText, "completed")], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
   res.end();
 }

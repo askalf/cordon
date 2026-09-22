@@ -87,12 +87,25 @@ export async function captureAndReidentify(
     emitText(part.reider.end(), 0, part.ctx);
     parts.delete(key);
   };
-  /** Flush every part still open, for the frames that close the whole response. */
-  const flushAllParts = () => {
+  /** Flush the parts matching `pick`, each under its own addressing, and forget them. */
+  const flushParts = (pick: (ctx: Record<string, unknown>) => boolean) => {
     for (const [key, part] of parts) {
+      if (!pick(part.ctx)) continue;
       emitText(part.reider.end(), 0, part.ctx);
       parts.delete(key);
     }
+  };
+  /** Every part still open: only for the frames that close the whole response. */
+  const flushAllParts = () => flushParts(() => true);
+  /**
+   * The parts of ONE output item, on its `output_item.done`. Closing item A must not
+   * end item B's re-identifier: B may be holding a half-written placeholder, and
+   * ending it early emits the resolved value and then B's own suffix separately.
+   */
+  const flushOutputItem = (j: any) => {
+    const id = j?.item?.id;
+    const idx = j?.output_index;
+    flushParts((ctx) => (id !== undefined && ctx["item_id"] === id) || (idx !== undefined && ctx["output_index"] === idx));
   };
 
   const handleFrame = (frame: string) => {
@@ -170,7 +183,7 @@ export async function captureAndReidentify(
         return;
       }
       if (type === "response.output_item.done" && j.item && typeof j.item === "object") {
-        flushAllParts();
+        flushOutputItem(j);
         res.write(reframe(frame, { ...j, item: reidentifyBody({ output: [j.item] }, provider, vault, dialect).output[0] }));
         return;
       }

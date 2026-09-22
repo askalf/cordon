@@ -192,7 +192,12 @@ function validateSSE(sse) {
     ok("stream/responses/interleave: the PII part is restored whole",
       joined.some((t) => t.includes("john@acme.com")) && !joined.join("").includes("<EMAIL"), JSON.stringify(joined));
     ok("stream/responses/interleave: the other part keeps its own text",
-      joined.some((t) => t.includes("second part") && !t.includes("john@acme.com")), JSON.stringify(joined));
+      joined.some((t) => t.startsWith("second part repeats")), JSON.stringify(joined));
+    // The stub closes item A (output_text.done, content_part.done, output_item.done)
+    // while item B is holding a half-written placeholder. Closing A must not end B's
+    // re-identifier, or B's email resolves early and its suffix arrives on its own.
+    ok("stream/responses/interleave: a part still open survives another item closing",
+      joined.every((t) => t.includes("john@acme.com") && !/<EMAIL|<CREDIT|IL_[0-9A-F]+_\d>/.test(t)), JSON.stringify(joined));
   }
 
   // ---- reversible streaming (Responses REFUSAL) ----
