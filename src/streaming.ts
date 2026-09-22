@@ -109,8 +109,10 @@ export async function captureAndReidentify(
       const type = j?.type;
       if (type === "response.output_text.delta" || type === "response.refusal.delta") {
         // Suppress the original delta, re-emit the restorable prefix under the same
-        // addressing; the possibly-forming tail stays held in the re-identifier.
-        const { type: _t, delta: _d, ...ctx } = j;
+        // addressing AND the same event type — a refusal delta re-emitted as output
+        // text would break a client that reads refusal events; the possibly-forming
+        // tail stays held in the re-identifier.
+        const { delta: _d, ...ctx } = j;
         emitCtx = ctx;
         emitText(reider.push(j.delta ?? ""));
         return;

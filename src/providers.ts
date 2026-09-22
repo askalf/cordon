@@ -14,7 +14,8 @@ export interface ProviderAdapter {
   /** Build a dialect-correct SSE frame carrying one assistant-text chunk at `index`
    *  (the content-block index; ignored by dialects without block indices). `ctx` is
    *  the addressing the dialect needs beyond an index (Responses: item_id,
-   *  output_index, content_index), copied from the frame being re-emitted. */
+   *  output_index, content_index) plus the upstream event `type`, copied from the
+   *  frame being re-emitted. */
   frameFromText(text: string, index?: number, ctx?: Record<string, unknown>): string;
   /** Walk a non-streaming response body's assistant-text fields (for re-identify). */
   responseTextSlots(body: any): Array<{ get(): string; set(v: string): void }>;
@@ -77,11 +78,16 @@ export const anthropic: ProviderAdapter = {
 };
 
 // ----------------------------- OpenAI (responses) -----------------------------
+/** Streamed Responses events carrying restorable assistant text. Output text and a
+ *  refusal are DISTINCT event types and a client consuming refusals reads only its
+ *  own, so a refusal delta must be re-emitted as a refusal delta. */
+const RESPONSES_TEXT_DELTAS = new Set(["response.output_text.delta", "response.refusal.delta"]);
+
 export const openaiResponses: ProviderAdapter = {
   parseDelta(data) {
     try {
       const j = JSON.parse(data);
-      if (j.type === "response.output_text.delta") return { textDelta: j.delta ?? "", done: false };
+      if (RESPONSES_TEXT_DELTAS.has(j.type)) return { textDelta: j.delta ?? "", done: false };
       if (j.type === "response.completed") return { done: true };
       return { done: false };
     } catch {
@@ -90,9 +96,14 @@ export const openaiResponses: ProviderAdapter = {
   },
   frameFromText(text, _index = 0, ctx = {}) {
     // The Responses stream addresses a delta by item_id / output_index / content_index,
-    // not by a single block index; `ctx` carries those from the frame being re-emitted.
-    const data = { type: "response.output_text.delta", ...ctx, delta: text };
-    return `event: response.output_text.delta\ndata: ${JSON.stringify(data)}\n\n`;
+    // not by a single block index; `ctx` carries those from the frame being re-emitted,
+    // along with that frame's event type so a refusal delta stays a refusal delta.
+    const type =
+      typeof ctx.type === "string" && RESPONSES_TEXT_DELTAS.has(ctx.type)
+        ? ctx.type
+        : "response.output_text.delta";
+    const data = { ...ctx, type, delta: text };
+    return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
   },
   responseTextSlots(body) {
     const slots: Array<{ get(): string; set(v: string): void }> = [];
