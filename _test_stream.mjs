@@ -62,6 +62,24 @@ function responsesFullTexts(sse) {
   return out;
 }
 
+/** Every re-emitted Responses delta as [eventLine, dataType, delta], in stream order.
+ *  A refusal must stay a refusal on BOTH the `event:` line and the data payload — a
+ *  client subscribing to refusal events reads nothing if either says output_text. */
+function responsesDeltaKinds(sse) {
+  const out = [];
+  for (const frame of sse.split("\n\n")) {
+    const lines = frame.split("\n");
+    const ev = lines.find((l) => l.startsWith("event:"));
+    const line = lines.find((l) => l.startsWith("data:"));
+    if (!line) continue;
+    let j;
+    try { j = JSON.parse(line.slice(5).trim()); } catch { continue; }
+    if (j.type === "response.output_text.delta" || j.type === "response.refusal.delta")
+      out.push([ev?.slice(6).trim(), j.type, j.delta]);
+  }
+  return out;
+}
+
 /** Addressing on every re-emitted Responses delta must match the upstream's. */
 function responsesDeltaAddressing(sse) {
   const seen = new Set();
@@ -152,6 +170,28 @@ function validateSSE(sse) {
   }
   sent = JSON.stringify(await calls());
   ok("stream/responses: upstream saw placeholder not raw", /<EMAIL_[0-9A-F]+_1>/.test(sent) && !sent.includes("john@acme.com"));
+
+  // ---- reversible streaming (Responses REFUSAL) ----
+  // A refusal carries restorable text too, but under its own event type. Regression:
+  // the re-emit path shared frameFromText with output text and hardcoded the
+  // output-text type, so a refusal reached the client as ordinary output text.
+  await reset();
+  txt = await (await post("/v1/responses", rBody("FORCE_REFUSAL cannot help with john@acme.com"))).text();
+  {
+    const kinds = responsesDeltaKinds(txt);
+    ok("stream/responses/refusal: deltas present", kinds.length > 0, String(kinds.length));
+    ok("stream/responses/refusal: every re-emitted delta is a refusal delta",
+      kinds.every((k) => k[1] === "response.refusal.delta"), JSON.stringify(kinds.map((k) => k[1])));
+    ok("stream/responses/refusal: event: line matches the data type",
+      kinds.every((k) => k[0] === k[1]), JSON.stringify(kinds.map((k) => [k[0], k[1]])));
+    ok("stream/responses/refusal: no output_text delta leaked",
+      !txt.includes("event: response.output_text.delta") && !txt.includes('"response.output_text.delta"'));
+    const refusal = kinds.map((k) => k[2] ?? "").join("");
+    ok("stream/responses/refusal: refusal text restored across frame split",
+      refusal.includes("john@acme.com") && !refusal.includes("<EMAIL"), refusal);
+    ok("stream/responses/refusal: refusal.done restored",
+      /"refusal":"[^"]*john@acme\.com/.test(txt) && !/"refusal":"[^"]*<EMAIL/.test(txt));
+  }
 
   // ---- strip streaming (Responses) ----
   await reset();

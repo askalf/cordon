@@ -88,6 +88,27 @@ function streamResponses(res, text, n) {
   f("response.completed", { response: { ...shell("completed"), output: [item], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
   res.end();
 }
+// A REFUSED Responses turn streams the same frame shape under refusal-flavoured
+// event types (`response.refusal.delta` / `.done`, a `refusal` content part). A
+// client consuming refusals reads only those, so cordon must re-emit a restored
+// refusal delta as a refusal delta — not as output text.
+function streamResponsesRefusal(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  let seq = 0;
+  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  const addr = { item_id: "msg_stub" + n, output_index: 0, content_index: 0 };
+  const shell = (status) => ({ id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status, output: [] });
+  f("response.created", { response: shell("in_progress") });
+  f("response.output_item.added", { output_index: 0, item: { id: addr.item_id, type: "message", role: "assistant", status: "in_progress", content: [] } });
+  f("response.content_part.added", { ...addr, part: { type: "refusal", refusal: "" } });
+  for (const c of chunk3(text)) f("response.refusal.delta", { ...addr, delta: c });
+  f("response.refusal.done", { ...addr, refusal: text });
+  f("response.content_part.done", { ...addr, part: { type: "refusal", refusal: text } });
+  const item = { id: addr.item_id, type: "message", role: "assistant", status: "completed", content: [{ type: "refusal", refusal: text }] };
+  f("response.output_item.done", { output_index: 0, item });
+  f("response.completed", { response: { ...shell("completed"), output: [item], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
+  res.end();
+}
 function streamAnthropic(res, text, body = {}) {
   res.setHeader("content-type", "text/event-stream");
   const f = (e, d) => res.write(`event: ${e}\ndata: ${JSON.stringify({ type: e, ...d })}\n\n`);
@@ -141,7 +162,9 @@ http
       if (req.url.includes("/chat/completions"))
         return body.stream ? streamOpenAI(res, text) : json(res, openaiBody(n, text));
       if (req.url.includes("/responses"))
-        return body.stream ? streamResponses(res, text, n) : json(res, responsesBody(n, text));
+        return body.stream
+          ? text.includes("FORCE_REFUSAL") ? streamResponsesRefusal(res, text, n) : streamResponses(res, text, n)
+          : json(res, responsesBody(n, text));
       if (req.url.includes("/messages"))
         return body.stream ? streamAnthropic(res, text, body) : json(res, anthropicBody(n, text));
       res.statusCode = 404;
