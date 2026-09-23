@@ -1,3 +1,5 @@
+<p align="center"><img src=".github/readme/hero.jpg" alt="Your prompts go out. Your PII stays home. Your app sends an email address and a card number through cordon, which forwards placeholders to the OpenAI or Anthropic API and restores the real values on the way back." width="100%"></p>
+
 # cordon
 
 [![ci](https://github.com/askalf/cordon/actions/workflows/ci.yml/badge.svg)](https://github.com/askalf/cordon/actions/workflows/ci.yml)
