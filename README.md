@@ -39,15 +39,17 @@ Deterministic detection: regex plus checksum validators, no ML dependencies, ful
 | `pci` | CREDIT_CARD, IBAN, US_ROUTING |
 | `secrets` | OpenAI / Anthropic / AWS / GitHub / Google / Slack keys, JWTs, Bearer tokens, PEM private keys |
 
-All four sets are on by default; narrow per tenant or per request with `X-Redact-Sets: pii,pci`.
+All four sets are on by default. Narrow them per tenant; a request can add sets with `X-Redact-Sets` but not drop them (see below).
 
 ## How it behaves
 
 - **Fails closed.** If detection throws, the request is **blocked**, never forwarded with PII intact (`FAIL_MODE=closed`, the default). The test suite asserts the upstream is never called on that path.
-- **Three modes**, per tenant or per request (`X-Redact-Mode`):
+- **Three modes**, per tenant or per request (`X-Redact-Mode`, tighten only by default):
   - **`reversible`** *(default)*: placeholders go up, real values come back in the reply, including mid-stream. Tokens carry a per-request random nonce (`<EMAIL_5285D1_1>`, not `<EMAIL_1>`) so a caller's own placeholder-shaped text can never be rewritten to a real value.
   - **`strip`**: irreversible placeholders (`[EMAIL]`); nothing is restored. For when the answer never needs the real value.
   - **`off`**: passthrough, still audited as a bypass.
+- **Policy is a floor.** A caller's `X-Redact-Mode` / `X-Redact-Sets` can only make redaction stricter than the tenant or global policy; `X-Redact-Mode: off` or a narrower set list is refused with 403 and never forwarded. Allow loosening per tenant (`allowHeaderOverride`) or globally (`ALLOW_HEADER_OVERRIDE=true`).
+- **Admin API is off until you set `ADMIN_TOKEN`.** Without it `/admin/*` returns 403 rather than running open.
 - **Tamper-evident audit.** Every request appends a hash-chained record of counts and types, never values; `npm run audit` verifies the chain.
 - **Per-tenant policy**: consistent pseudonyms, data residency (regional upstreams), durable policy store.
 - **Signed releases**: multi-arch GHCR images with keyless Sigstore provenance and an SBOM.

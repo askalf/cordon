@@ -40,7 +40,7 @@ deja **fails open** (a cache miss is harmless) and forwards the body **verbatim*
 ### Request lifecycle (`src/proxy.ts` is the spine)
 `index.ts` (Fastify) normalizes the request, then `reply.hijack()`s and hands the raw Node response to `handle()`:
 
-1. Resolve `mode` and `activeSets` (precedence: **request header → tenant policy → global config**; see `providers.normalize` + `policy.ts`).
+1. Resolve `mode` and `activeSets` (precedence: **request header → tenant policy → global config**; see `providers.normalize` + `policy.ts`). A header may only **tighten** policy: `headerOverrideViolation` (called in `index.ts` pre-hijack) refuses a weaker mode or a narrower set list with 403 unless `allowHeaderOverride` (tenant) / `ALLOW_HEADER_OVERRIDE` (global) is set.
 2. `mode === "off"` → transparent passthrough, audited as a bypass.
 3. **Detect + redact** inside a try/catch — this is the fail-closed boundary. `applyRedaction` (`redact/apply.ts`) clones the body, walks each text field, calls the `Detector`, and replaces spans with vault placeholders. Any throw here → `onRedactionError` → **422, upstream never called** (unless `failMode === "open"`, the dev escape hatch that forwards raw).
 4. **Audit append BEFORE forwarding** (`audit.ts`) — counts/types only. In closed mode an audit write failure also blocks.
@@ -72,5 +72,7 @@ The vault is per-request, policy is in-memory (`policy.ts`), the audit log is a 
 - The brand string lives in `config.brand` — don't hardcode "cordon" in user-facing strings.
 - `CORDON_TEST_HOOKS=1` enables the `X-Cordon-Fail: 1` header that forces a detection failure (to exercise fail-closed). It is **off by default** — never rely on it in production paths.
 - Provider auth headers (`authorization`/`x-api-key`/`anthropic-version`) are forwarded verbatim; cordon never terminates provider auth.
+- With `ADMIN_TOKEN` unset the admin API is **disabled**, not open (`ALLOW_OPEN_ADMIN=1` is the dev escape hatch).
+- All upstream fetches go through `upstreamFetch` (header deadline `UPSTREAM_TIMEOUT_MS` → 504); upstream error bodies are generic with a `requestId`, never the raw exception.
 - `_stub-upstream.mjs` **echoes the received body** as the assistant reply, which is what lets the suites assert (a) the model saw only placeholders and (b) reversible restores the real values. Keep that echo behavior if you edit the stub.
 - The canonical reference for the design rationale and build phases is `PLAN.md`; user-facing docs are `README.md`.
