@@ -54,6 +54,15 @@ jobs:
             -H 'X-Redact-Sets: bogus' \
             -d '{"model":"claude-haiku-4-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}')
           [ "$code" = "400" ] || { echo "::error::unknown X-Redact-Sets returned $code, expected 400"; exit 1; }
+          # a caller header can't switch redaction off
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/v1/messages \
+            -H 'content-type: application/json' -H 'x-api-key: ci' -H 'anthropic-version: 2023-06-01' \
+            -H 'X-Redact-Mode: off' \
+            -d '{"model":"claude-haiku-4-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}')
+          [ "$code" = "403" ] || { echo "::error::X-Redact-Mode: off returned $code, expected 403"; exit 1; }
+          # no ADMIN_TOKEN: admin API disabled, not open
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/admin/stats)
+          [ "$code" = "403" ] || { echo "::error::/admin/stats without ADMIN_TOKEN returned $code, expected 403"; exit 1; }
           echo "boot smoke OK"
       - name: Teardown
         if: always()

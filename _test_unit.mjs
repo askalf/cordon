@@ -5,7 +5,7 @@ import { luhn, ibanMod97, abaRouting, ssnValid } from "./src/detect/validators.t
 import { Vault } from "./src/redact/vault.ts";
 import { applyRedaction, tally } from "./src/redact/apply.ts";
 import { reidentifyBody, StreamReidentifier } from "./src/redact/reidentify.ts";
-import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN } from "./src/config.ts";
+import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN, parseTimeoutMs, DEFAULT_UPSTREAM_TIMEOUT_MS } from "./src/config.ts";
 import { setPolicy, getPolicy, allPolicies, save as savePolicy, load as loadPolicy } from "./src/policy.ts";
 
 let pass = 0, fail = 0;
@@ -258,6 +258,13 @@ ok("secret guard: OK pseudonyms + adequate secret", guard(true, "x".repeat(MIN_P
 ok("secret guard: escape hatch overrides", guard(true, "", true).ok === true);
 ok("secret guard: error names TENANT_SECRET", (guard(true, "").error || "").includes("TENANT_SECRET"));
 ok("adequatePseudonymSecret threshold", !adequatePseudonymSecret("short") && adequatePseudonymSecret("x".repeat(MIN_PSEUDONYM_SECRET_LEN)));
+
+// ---------------- UPSTREAM_TIMEOUT_MS: an invalid value falls back to the default ----------------
+ok("timeout: unset -> default", parseTimeoutMs(undefined) === DEFAULT_UPSTREAM_TIMEOUT_MS);
+ok("timeout: a positive number is used", parseTimeoutMs("1500") === 1500);
+ok("timeout: non-numeric -> default, not NaN (NaN would 504 every request)", parseTimeoutMs("ten-minutes") === DEFAULT_UPSTREAM_TIMEOUT_MS);
+ok("timeout: empty, zero, negative and Infinity -> default",
+  ["", "  ", "0", "-5", "Infinity"].every((v) => parseTimeoutMs(v) === DEFAULT_UPSTREAM_TIMEOUT_MS));
 
 // ---------------- tenant policy persistence (issue #20, optional file-backed) ----------------
 {

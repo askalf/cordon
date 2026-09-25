@@ -135,6 +135,34 @@ function resolveMode(headers: Record<string, string>, tenant: string): RedactMod
   return config.defaultMode;
 }
 
+// How much a mode protects: off forwards raw, reversible de-identifies, strip de-identifies
+// and never restores. A caller header may move up this scale, never down.
+const MODE_STRENGTH: Record<RedactMode, number> = { off: 0, reversible: 1, strip: 2 };
+
+/**
+ * A caller's X-Redact-Mode / X-Redact-Sets may only make redaction stricter than the
+ * policy the operator set (tenant policy, else global config), unless header override is
+ * allowed globally or for the tenant. Returns why the request loosens policy, or null.
+ */
+export function headerOverrideViolation(headers: Record<string, string>): string | null {
+  const tenant = resolveTenant(headers);
+  const pol = getPolicy(tenant);
+  if (pol.allowHeaderOverride ?? config.allowHeaderOverride) return null;
+
+  const h = (headers["x-redact-mode"] || "").toLowerCase();
+  if (VALID_MODES.has(h as RedactMode)) {
+    const floor = pol.mode && VALID_MODES.has(pol.mode) ? pol.mode : config.defaultMode;
+    if (MODE_STRENGTH[h as RedactMode] < MODE_STRENGTH[floor])
+      return `X-Redact-Mode: ${h} is weaker than the policy mode (${floor})`;
+  }
+  if (headers["x-redact-sets"]) {
+    const asked = new Set(resolveSets(headers, tenant));
+    const missing = (pol.activeSets ?? config.activeSets).filter((s) => !asked.has(s));
+    if (missing.length) return `X-Redact-Sets drops policy set(s): ${missing.join(", ")}`;
+  }
+  return null;
+}
+
 function resolveSets(headers: Record<string, string>, tenant: string): RedactSet[] {
   const h = headers["x-redact-sets"];
   if (h) {
@@ -192,9 +220,10 @@ export function authHeaders(headers: Record<string, string>): Record<string, str
   return fwd;
 }
 
-/** Tenant resolution: explicit X-Tenant, else (optionally) derived from the API key. */
+/** Tenant resolution: explicit X-Tenant (when trusted), else (optionally) derived from the
+ *  API key. */
 export function resolveTenant(headers: Record<string, string>): string {
-  if (headers["x-tenant"]) return headers["x-tenant"];
+  if (config.trustTenantHeader && headers["x-tenant"]) return headers["x-tenant"];
   if (config.tenantFromAuth) {
     const auth = headers["authorization"] || headers["x-api-key"] || "";
     if (auth) return "auth:" + sha256(auth).slice(0, 16);
@@ -211,6 +240,28 @@ export function baseFor(provider: Provider, tenant?: string): string {
   return provider === "openai" ? config.upstream.openai : config.upstream.anthropic;
 }
 
+/**
+ * fetch with a deadline on the response HEADERS (UPSTREAM_TIMEOUT_MS). The timer is
+ * cleared once headers arrive, so a long-running stream body is never cut off.
+ */
+async function upstreamFetch(url: string, init: RequestInit): Promise<Response> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new UpstreamTimeout()), config.upstreamTimeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: ac.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The provider did not answer within UPSTREAM_TIMEOUT_MS. */
+export class UpstreamTimeout extends Error {
+  constructor() {
+    super("upstream timeout");
+    this.name = "UpstreamTimeout";
+  }
+}
+
 /** Generic upstream POST preserving the original path + auth passthrough. */
 export async function forwardRaw(
   base: string,
@@ -219,7 +270,7 @@ export async function forwardRaw(
   body: any,
 ): Promise<Response> {
   const headers: Record<string, string> = { "content-type": "application/json", ...fwdHeaders };
-  return fetch(base + path, { method: "POST", headers, body: JSON.stringify(body) });
+  return upstreamFetch(base + path, { method: "POST", headers, body: JSON.stringify(body) });
 }
 
 /** Forward a (de-identified) body upstream. `bodyOverride` is the redacted copy. */
@@ -252,8 +303,8 @@ export function forwardVerbatim(
   body?: any,
 ): Promise<Response> {
   const fwd = authHeaders(headers);
-  if (method === "GET" || body === undefined) return fetch(base + path, { method, headers: fwd });
-  return fetch(base + path, {
+  if (method === "GET" || body === undefined) return upstreamFetch(base + path, { method, headers: fwd });
+  return upstreamFetch(base + path, {
     method,
     headers: { "content-type": "application/json", ...fwd },
     body: JSON.stringify(body),

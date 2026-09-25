@@ -70,7 +70,8 @@ export interface CanonicalRequest {
   dialect: Dialect;
   model: string;
   tenant: string;
-  /** Resolved: X-Redact-Mode header > tenant policy > config.defaultMode. */
+  /** Resolved: X-Redact-Mode header > tenant policy > config.defaultMode (a header that
+   *  loosens policy is rejected before this, see headerOverrideViolation). */
   mode: RedactMode;
   /** Resolved active sets: X-Redact-Sets > tenant policy > config.activeSets. */
   activeSets: RedactSet[];
