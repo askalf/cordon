@@ -259,7 +259,7 @@ const setTenant2 = setTenantOn(BASE2);
   {
     const j = await res.json().catch(() => ({}));
     ok("upstream error: carries a request id", !!j.requestId && res.headers.get("x-request-id") === j.requestId, JSON.stringify(j));
-    ok("upstream error: does not leak the upstream host", !JSON.stringify(j).includes("127.0.0.1"), JSON.stringify(j));
+    ok("upstream error: body is the generic text, not the caught error", /: upstream unreachable$/.test(j.error || "") && !/fetch failed|ECONNREFUSED|TypeError/.test(JSON.stringify(j)), JSON.stringify(j));
   }
 
   // ---- upstream that accepts but never answers: 504 after UPSTREAM_TIMEOUT_MS ----
