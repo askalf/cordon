@@ -67,12 +67,15 @@ curl localhost:8080/admin/tenant -H 'x-admin-token: …' -H 'content-type: appli
 - **Consistent pseudonyms**: `<EMAIL_3F2A…>` derived as `HMAC(TENANT_SECRET, value)`, so the same person maps to the same token across requests (the model can correlate) while the value is never stored. Requires a strong `TENANT_SECRET` (16+ chars); this mode fails closed without one. `ALLOW_WEAK_PSEUDONYM_SECRET=1` overrides for dev only.
 - **Data residency**: route a tenant to a regional upstream base.
 - **Durable policy**: `POLICY_STORE=./policies.json` persists tenant policy across restarts on the same volume as the audit log; unset keeps it in memory.
-- **Tenant identity**: `X-Tenant: <id>`, else derived from the API key.
+- **Tenant identity**: `X-Tenant: <id>`, else derived from the API key. Set `TRUST_TENANT_HEADER=false` when callers are not trusted to pick their tenant; `X-Tenant` is then ignored and the tenant always comes from the API key.
+- **Per-request headers can only tighten**: `X-Redact-Mode` must be at least as strong as the policy mode (`off` < `reversible` < `strip`) and `X-Redact-Sets` must include every policy set. Anything weaker is refused with 403 before the upstream is called. `"allowHeaderOverride": true` on a tenant (or `ALLOW_HEADER_OVERRIDE=true` globally) restores per-request loosening.
 
 ## Ops endpoints
 
-`GET /healthz`, `GET /metrics` (and `/metrics.prom`), `GET /dashboard` (single-file view of redactions by type, mode and set mix, fail-closed count, tenant policies, audit-chain status), `GET /admin/stats`. Admin routes require `x-admin-token` when `ADMIN_TOKEN` is set.
+`GET /healthz`, `GET /metrics` (and `/metrics.prom`), `GET /dashboard` (single-file view of redactions by type, mode and set mix, fail-closed count, tenant policies, audit-chain status), `GET /admin/stats`. Admin routes require `x-admin-token`; with `ADMIN_TOKEN` unset they are disabled (403). `ALLOW_OPEN_ADMIN=1` serves them with no auth, for local dev only.
+
+Upstream failures return a fixed message and a `requestId` (also in `X-Request-Id`); the detail is logged server-side. A provider that sends no response headers within `UPSTREAM_TIMEOUT_MS` (default 600000) gets a 504; a stream that has started is never cut off.
 
 ## Configuration
 
-See [`.env.example`](../.env.example). The knobs that matter: `FAIL_MODE` (default `closed`), `DEFAULT_MODE`, `ACTIVE_SETS`, `CONSISTENT_PSEUDONYMS` with `TENANT_SECRET`, `AUDIT_LOG`, `ADMIN_TOKEN`, `POLICY_STORE`, `OPENAI_BASE` / `ANTHROPIC_BASE`.
+See [`.env.example`](../.env.example). The knobs that matter: `FAIL_MODE` (default `closed`), `DEFAULT_MODE`, `ACTIVE_SETS`, `CONSISTENT_PSEUDONYMS` with `TENANT_SECRET`, `AUDIT_LOG`, `ADMIN_TOKEN`, `POLICY_STORE`, `OPENAI_BASE` / `ANTHROPIC_BASE`, `ALLOW_HEADER_OVERRIDE`, `TRUST_TENANT_HEADER`, `UPSTREAM_TIMEOUT_MS`.

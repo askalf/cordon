@@ -2,9 +2,11 @@
 // never sees raw PII, reversible restores it, strip/off behave, fail-closed blocks,
 // and the audit log verifies and holds no values. Run with: node _test_proxy.mjs
 import { readFileSync } from "node:fs";
+import { createServer } from "node:net";
 
 const BASE = "http://localhost:8810";
 const BASE2 = "http://localhost:8811"; // secret-less instance (pseudonym-without-secret must fail closed)
+const BASE3 = "http://localhost:8812"; // no ADMIN_TOKEN, Anthropic upstream that never answers, 500ms timeout
 const STUB = "http://localhost:8900";
 const ADMIN = "secret";
 const PII = "email john@acme.com about card 4012888888881881";
@@ -32,6 +34,10 @@ const setTenant = setTenantOn(BASE);
 const setTenant2 = setTenantOn(BASE2);
 
 (async () => {
+  // A tenant whose callers may loosen policy per request (X-Redact-Mode: off, narrower
+  // X-Redact-Sets). Everyone else can only tighten it.
+  await setTenant({ tenant: "loose", allowHeaderOverride: true });
+
   // ---- reversible (Anthropic) ----
   await reset();
   let res = await post("/v1/messages", aBody(PII));
@@ -75,9 +81,21 @@ const setTenant2 = setTenantOn(BASE2);
   sent = JSON.stringify(await calls());
   ok("strip: upstream saw [EMAIL], not raw", sent.includes("[EMAIL]") && !sent.includes("john@acme.com"));
 
-  // ---- off (passthrough) ----
+  // ---- a caller header can't loosen policy: X-Redact-Mode: off is refused by default ----
   await reset();
   res = await post("/v1/messages", aBody(PII), { "x-redact-mode": "off" });
+  ok("header off without permission: 403", res.status === 403, String(res.status));
+  ok("header off without permission: error explains", JSON.stringify(await res.json().catch(() => ({}))).includes("allowHeaderOverride"));
+  ok("header off without permission: upstream NOT called", (await calls()).total === 0);
+  await setTenant({ tenant: "strict", mode: "strip" });
+  await reset();
+  res = await post("/v1/messages", aBody(PII), { "x-tenant": "strict", "x-redact-mode": "reversible" });
+  ok("header reversible under a strip tenant: 403", res.status === 403, String(res.status));
+  ok("header reversible under a strip tenant: upstream NOT called", (await calls()).total === 0);
+
+  // ---- off (passthrough), for a tenant allowed to loosen ----
+  await reset();
+  res = await post("/v1/messages", aBody(PII), { "x-tenant": "loose", "x-redact-mode": "off" });
   text = (await res.json())?.content?.[0]?.text || "";
   ok("off: reply echoes raw (nothing redacted)", text.includes("john@acme.com"));
   ok("off: X-Redacted is 0", res.headers.get("x-redacted") === "0");
@@ -152,7 +170,7 @@ const setTenant2 = setTenantOn(BASE2);
   sent = JSON.stringify(await calls());
   ok("responses/strip: upstream saw [EMAIL], not raw", sent.includes("[EMAIL]") && !sent.includes("john@acme.com"));
   await reset();
-  res = await post("/v1/responses", rBody(PII), { "x-redact-mode": "off" });
+  res = await post("/v1/responses", rBody(PII), { "x-tenant": "loose", "x-redact-mode": "off" });
   text = rText(await res.json());
   ok("responses/off: reply echoes raw (nothing redacted)", text.includes("john@acme.com"));
   ok("responses/off: X-Redacted 0", res.headers.get("x-redacted") === "0");
@@ -177,7 +195,17 @@ const setTenant2 = setTenantOn(BASE2);
   ok("unknown set: upstream NOT called (PII never forwarded)", (await calls()).total === 0);
   await reset();
   res = await post("/v1/messages", aBody(PII), { "x-redact-sets": "pii,pci" });
-  ok("valid sets: accepted (200, not over-rejected)", res.status === 200, String(res.status));
+  ok("narrowing sets without permission: 403", res.status === 403, String(res.status));
+  ok("narrowing sets without permission: error names the dropped sets", /phi, secrets/.test(JSON.stringify(await res.json().catch(() => ({})))));
+  ok("narrowing sets without permission: upstream NOT called", (await calls()).total === 0);
+  await reset();
+  res = await post("/v1/messages", aBody(PII), { "x-tenant": "loose", "x-redact-sets": "pii,pci" });
+  ok("valid sets: accepted for a tenant allowed to loosen (200)", res.status === 200, String(res.status));
+  await setTenant({ tenant: "narrow", activeSets: ["pii"] });
+  await reset();
+  res = await post("/v1/messages", aBody(PII), { "x-tenant": "narrow", "x-redact-sets": "pii,pci" });
+  ok("widening sets: always allowed (200)", res.status === 200, String(res.status));
+  ok("widening sets: the added set applies", /CREDIT_CARD/.test(res.headers.get("x-redacted-types") || ""), res.headers.get("x-redacted-types"));
 
   // ---- passthrough (count_tokens) ----
   await reset();
@@ -188,6 +216,10 @@ const setTenant2 = setTenantOn(BASE2);
   // ---- admin auth ----
   ok("admin: 403 without token", (await fetch(BASE + "/admin/stats")).status === 403);
   ok("admin: 200 with token", (await fetch(BASE + "/admin/stats", { headers: { "x-admin-token": ADMIN } })).status === 200);
+  ok("admin: 403 with a wrong token", (await fetch(BASE + "/admin/stats", { headers: { "x-admin-token": "nope" } })).status === 403);
+  ok("admin: disabled (403) when ADMIN_TOKEN is unset", (await fetch(BASE3 + "/admin/stats")).status === 403);
+  ok("admin: policy writes refused when ADMIN_TOKEN is unset",
+    (await fetch(BASE3 + "/admin/tenant", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tenant: "x", mode: "off" }) })).status === 403);
 
   // ---- admin activeSets validation (a typo'd set is rejected, not silently dropped) ----
   ok("admin: unknown activeSet rejected (400)", (await setTenant({ tenant: "t1", activeSets: ["pii", "scerets"] })).status === 400);
@@ -224,6 +256,24 @@ const setTenant2 = setTenantOn(BASE2);
   await setTenant({ tenant: "eu", upstreamOverride: { anthropic: "http://127.0.0.1:1" } });
   res = await post("/v1/messages", aBody("hi jane@corp.io"), { "x-tenant": "eu" });
   ok("residency: override routes away from stub (502)", res.status === 502, String(res.status));
+  {
+    const j = await res.json().catch(() => ({}));
+    ok("upstream error: carries a request id", !!j.requestId && res.headers.get("x-request-id") === j.requestId, JSON.stringify(j));
+    ok("upstream error: does not leak the upstream host", !JSON.stringify(j).includes("127.0.0.1"), JSON.stringify(j));
+  }
+
+  // ---- upstream that accepts but never answers: 504 after UPSTREAM_TIMEOUT_MS ----
+  {
+    const sockets = [];
+    const hang = createServer((sock) => sockets.push(sock)).listen(8901);
+    await new Promise((r) => hang.once("listening", r));
+    const t0 = Date.now();
+    res = await postTo(BASE3)("/v1/messages", aBody("hi"));
+    ok("timeout: hung upstream returns 504", res.status === 504, String(res.status));
+    ok("timeout: returns promptly (UPSTREAM_TIMEOUT_MS=500)", Date.now() - t0 < 5000, `${Date.now() - t0}ms`);
+    for (const s of sockets) s.destroy();
+    hang.close();
+  }
 
   // ---- audit chain + no values ----
   const v = await (await fetch(BASE + "/admin/audit/verify", { headers: { "x-admin-token": ADMIN } })).json();
