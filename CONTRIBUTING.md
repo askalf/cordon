@@ -3,7 +3,7 @@
 Thanks for your interest in improving **cordon** — a PII-redacting LLM
 compliance gateway. It's OpenAI/Anthropic-compatible and sits in front of your
 model so PII never leaves your perimeter: own your prompts. Part of
-[Own Your Stack](https://sprayberrylabs.com).
+Own Your Stack.
 
 ## Ground rules
 
