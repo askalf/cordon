@@ -15,12 +15,14 @@ export const parseSets = (csv: string | undefined, fallback: RedactSet[]): Redac
 };
 
 export const DEFAULT_UPSTREAM_TIMEOUT_MS = 600_000;
+// Node's largest timer delay (a signed 32-bit int). Above it, setTimeout fires at once.
+export const MAX_TIMEOUT_MS = 2_147_483_647;
 
-// A positive, finite number of milliseconds, else the default. Number("ten-minutes") is NaN,
-// and a NaN timer delay fires at once, which would 504 every forwarded request.
+// A positive number of milliseconds up to MAX_TIMEOUT_MS, else the default. Number("ten-minutes")
+// is NaN, and a NaN or overflowing timer delay fires at once, which would 504 every request.
 export const parseTimeoutMs = (raw: string | undefined, fallback = DEFAULT_UPSTREAM_TIMEOUT_MS): number => {
   const n = Number(raw);
-  return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n > 0 ? n : fallback;
+  return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n > 0 && n <= MAX_TIMEOUT_MS ? n : fallback;
 };
 
 export const config = {

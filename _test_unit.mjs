@@ -5,7 +5,7 @@ import { luhn, ibanMod97, abaRouting, ssnValid } from "./src/detect/validators.t
 import { Vault } from "./src/redact/vault.ts";
 import { applyRedaction, tally } from "./src/redact/apply.ts";
 import { reidentifyBody, StreamReidentifier } from "./src/redact/reidentify.ts";
-import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN, parseTimeoutMs, DEFAULT_UPSTREAM_TIMEOUT_MS } from "./src/config.ts";
+import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN, parseTimeoutMs, DEFAULT_UPSTREAM_TIMEOUT_MS, MAX_TIMEOUT_MS } from "./src/config.ts";
 import { setPolicy, getPolicy, allPolicies, save as savePolicy, load as loadPolicy } from "./src/policy.ts";
 
 let pass = 0, fail = 0;
@@ -263,6 +263,8 @@ ok("adequatePseudonymSecret threshold", !adequatePseudonymSecret("short") && ade
 ok("timeout: unset -> default", parseTimeoutMs(undefined) === DEFAULT_UPSTREAM_TIMEOUT_MS);
 ok("timeout: a positive number is used", parseTimeoutMs("1500") === 1500);
 ok("timeout: non-numeric -> default, not NaN (NaN would 504 every request)", parseTimeoutMs("ten-minutes") === DEFAULT_UPSTREAM_TIMEOUT_MS);
+ok("timeout: the largest Node timer delay is accepted", parseTimeoutMs(String(MAX_TIMEOUT_MS)) === MAX_TIMEOUT_MS);
+ok("timeout: above 2^31-1 -> default (an overflowing delay fires at once)", parseTimeoutMs(String(MAX_TIMEOUT_MS + 1)) === DEFAULT_UPSTREAM_TIMEOUT_MS && parseTimeoutMs("1e12") === DEFAULT_UPSTREAM_TIMEOUT_MS);
 ok("timeout: empty, zero, negative and Infinity -> default",
   ["", "  ", "0", "-5", "Infinity"].every((v) => parseTimeoutMs(v) === DEFAULT_UPSTREAM_TIMEOUT_MS));
 
