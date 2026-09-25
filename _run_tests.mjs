@@ -16,9 +16,8 @@ const instances = {
   // Secret-less instance: consistent pseudonyms enabled per-tenant here must FAIL CLOSED
   // (no ALLOW_WEAK_PSEUDONYM_SECRET) — exercises the per-request pseudonym-secret guard.
   8811: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test_nosecret.jsonl" },
-  // No ADMIN_TOKEN (admin API must be disabled, not open) and an Anthropic upstream that
-  // accepts connections but never answers (the proxy suite opens it on :8901), with a
-  // short timeout, exercises the 504 path.
+  // No ADMIN_TOKEN; an Anthropic upstream accepts connections but never answers.
+  // The proxy suite opens it on :8901 with a short timeout for the 504 path.
   8812: {
     AUDIT_LOG: "./_audit_test_noadmin.jsonl",
     ANTHROPIC_BASE: "http://127.0.0.1:8901",

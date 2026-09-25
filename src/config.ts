@@ -14,6 +14,15 @@ export const parseSets = (csv: string | undefined, fallback: RedactSet[]): Redac
   return out.length ? out : fallback;
 };
 
+export const DEFAULT_UPSTREAM_TIMEOUT_MS = 600_000;
+
+// A positive, finite number of milliseconds, else the default. Number("ten-minutes") is NaN,
+// and a NaN timer delay fires at once, which would 504 every forwarded request.
+export const parseTimeoutMs = (raw: string | undefined, fallback = DEFAULT_UPSTREAM_TIMEOUT_MS): number => {
+  const n = Number(raw);
+  return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
 export const config = {
   port: Number(env.PORT ?? 8080),
   /** Centralised brand string — never hardcode the name elsewhere. */
@@ -72,7 +81,7 @@ export const config = {
   // How long to wait for the provider's response headers before giving up (504). Covers
   // a hung connection; once headers arrive the body (incl. a long stream) is not timed.
   // Generous by default: non-streaming completions only send headers when they finish.
-  upstreamTimeoutMs: Number(env.UPSTREAM_TIMEOUT_MS ?? 600_000),
+  upstreamTimeoutMs: parseTimeoutMs(env.UPSTREAM_TIMEOUT_MS),
 
   upstream: {
     openai: env.OPENAI_BASE ?? "https://api.openai.com",
