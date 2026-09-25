@@ -1,0 +1,94 @@
+name: claude-review
+
+# Automated first-pass review on every PR: Claude reads the diff against cordon's
+# invariants (CLAUDE.md) and posts inline findings plus one summary comment, so a PR
+# gets reviewer attention the moment it opens instead of waiting in the queue.
+#
+# Needs ONE repo secret: ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN. With neither
+# set the job logs a notice and passes, so CI never goes red over a missing key.
+# Fork and Dependabot PRs get no secrets on `pull_request`, so they are skipped.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Check for a Claude credential
+        id: auth
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::claude-review skipped: set the ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN repo secret to enable it"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.auth.outputs.ok == 'true'
+        with:
+          fetch-depth: 1
+
+      - name: Review
+        if: steps.auth.outputs.ok == 'true'
+        uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are reviewing a pull request to cordon, a PII-redacting compliance gateway
+            in front of the OpenAI and Anthropic APIs. Read CLAUDE.md first; it is the
+            source of truth for the invariants below. Review only what this PR changes.
+
+            Blocking (a bug here leaks PII or breaks the compliance promise):
+            - Fail closed: a detection, redaction, pseudonym-secret or audit error must
+              block the request (422) and never call the upstream, unless failMode is
+              explicitly "open".
+            - Only the de-identified copy is forwarded on the redacted endpoints; raw
+              values never reach the upstream in reversible or strip mode.
+            - Caller headers (X-Redact-Mode, X-Redact-Sets, X-Tenant) must not loosen the
+              operator's policy unless allowHeaderOverride / ALLOW_HEADER_OVERRIDE is set.
+            - Audit records and logs carry counts and types only, never values. The vault
+              is per request and never persisted.
+            - Reversible restore uses only the vault's reverse map; streaming
+              re-identification must not leak a partial placeholder or a raw value.
+            - Non-generation /v1/* paths are forwarded verbatim and never normalized.
+
+            Also flag: correctness bugs, missing tests for changed behaviour (the suites
+            are _test_unit.mjs, _test_proxy.mjs, _test_stream.mjs), a new datastore or
+            cache dependency, hardcoded "cordon" in user-facing strings instead of
+            config.brand, and docs, .env.example or CHANGELOG drift from the code.
+
+            Post each concrete finding as an inline comment on the line it concerns,
+            starting with a severity: **blocker**, **major**, **minor** or **nit**. Only
+            report findings you can support from the diff and the code; do not restate
+            what the PR does. Then post one summary comment with `gh pr comment` listing
+            the findings by severity, or saying plainly that none were found.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
