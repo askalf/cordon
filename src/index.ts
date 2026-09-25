@@ -1,6 +1,7 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import Fastify from "fastify";
-import { normalize, passthroughBase, forwardVerbatim } from "./providers";
-import { handle } from "./proxy";
+import { normalize, passthroughBase, forwardVerbatim, headerOverrideViolation } from "./providers";
+import { handle, safeUpstreamError } from "./proxy";
 import { config, pseudonymSecretGuard, adequatePseudonymSecret, allowWeakPseudonymSecret } from "./config";
 import { metrics } from "./metrics";
 import { setPolicy, allPolicies, load as loadPolicies } from "./policy";
@@ -27,9 +28,20 @@ app.get("/metrics", async () => metrics.snapshot());
 app.get("/metrics.prom", async (_req, reply) => reply.type("text/plain").send(metrics.prometheus()));
 
 // ---- admin API ----
+const tokenMatches = (given: unknown, want: string): boolean => {
+  if (typeof given !== "string") return false;
+  const a = createHash("sha256").update(given).digest();
+  const b = createHash("sha256").update(want).digest();
+  return timingSafeEqual(a, b);
+};
+
 function adminOk(req: any, reply: any): boolean {
-  if (!config.admin.token) return true; // dev: open
-  if (req.headers["x-admin-token"] !== config.admin.token) {
+  if (!config.admin.token) {
+    if (config.admin.allowOpen) return true; // dev escape hatch: ALLOW_OPEN_ADMIN=1
+    reply.code(403).send({ error: `${config.brand}: admin API disabled, set ADMIN_TOKEN to enable it` });
+    return false;
+  }
+  if (!tokenMatches(req.headers["x-admin-token"], config.admin.token)) {
     reply.code(403).send({ error: `${config.brand}: invalid admin token` });
     return false;
   }
@@ -50,7 +62,8 @@ app.get("/admin/audit/verify", async (req, reply) => {
 const VALID_MODES = new Set<RedactMode>(["reversible", "strip", "off"]);
 const VALID_SETS = new Set<RedactSet>(["pii", "phi", "pci", "secrets"]);
 
-// Set tenant policy. Body: { tenant, mode?, activeSets?, failMode?, consistentPseudonyms?, upstreamOverride? }
+// Set tenant policy. Body: { tenant, mode?, activeSets?, failMode?, consistentPseudonyms?,
+//   redactSystem?, upstreamOverride?, allowHeaderOverride? }
 app.post("/admin/tenant", async (req, reply) => {
   if (!adminOk(req, reply)) return reply;
   const b = (req.body as any) ?? {};
@@ -85,18 +98,13 @@ app.post("/admin/tenant", async (req, reply) => {
   if (typeof b.consistentPseudonyms === "boolean") patch.consistentPseudonyms = b.consistentPseudonyms;
   if (typeof b.redactSystem === "boolean") patch.redactSystem = b.redactSystem;
   if (b.upstreamOverride && typeof b.upstreamOverride === "object") patch.upstreamOverride = b.upstreamOverride;
+  if (typeof b.allowHeaderOverride === "boolean") patch.allowHeaderOverride = b.allowHeaderOverride;
   return setPolicy(b.tenant, patch);
 });
 
 // ---- the proxy: OpenAI + Anthropic ----
 function safeError(reply: any, e: unknown) {
-  try {
-    reply.raw.statusCode = 502;
-    reply.raw.setHeader("content-type", "application/json");
-    reply.raw.end(JSON.stringify({ error: `${config.brand} upstream error: ${String(e)}` }));
-  } catch {
-    /* socket already gone */
-  }
+  safeUpstreamError(reply.raw, e);
 }
 
 /** Headers lower-cased; path split from query (preserved verbatim on every forward). */
@@ -164,6 +172,16 @@ app.post("/v1/*", async (req, reply) => {
     }
   }
 
+  // Policy is the floor: a caller header may tighten redaction, never loosen it (unless the
+  // operator allowed header override). Refused pre-hijack, upstream never called.
+  const loosens = headerOverrideViolation(headers);
+  if (loosens) {
+    reply.code(403);
+    return {
+      error: `${config.brand}: ${loosens}, per-request loosening is not allowed for this tenant (set allowHeaderOverride)`,
+    };
+  }
+
   // Normalize first so a bad request 400s cleanly (pre-hijack).
   const creq = normalize(path, req.body, headers);
   if (!creq || !creq.model) {
@@ -206,7 +224,14 @@ app.listen({ port: config.port, host: "0.0.0.0" }).then(() => {
       `${config.tenantFromAuth ? ", tenant=from-auth" : ""}` +
       `${config.policyStore ? ", policy=persisted" : ""}]`,
   );
-  if (!config.admin.token) console.warn("[admin] ADMIN_TOKEN unset — /admin/* endpoints are OPEN (dev only)");
+  if (!config.admin.token)
+    console.warn(
+      config.admin.allowOpen
+        ? "[admin] ADMIN_TOKEN unset and ALLOW_OPEN_ADMIN=1, /admin/* endpoints are OPEN (dev only)"
+        : "[admin] ADMIN_TOKEN unset, /admin/* endpoints are disabled",
+    );
+  if (config.allowHeaderOverride)
+    console.warn("[policy] ALLOW_HEADER_OVERRIDE=true, callers can loosen redaction per request (X-Redact-Mode: off)");
   if (config.consistentPseudonyms && !adequatePseudonymSecret(config.tenantSecret))
     console.warn("[pseudonyms] weak/empty TENANT_SECRET but ALLOW_WEAK_PSEUDONYM_SECRET=1 — tokens are guessable (dev only)");
   if (config.failMode === "open")

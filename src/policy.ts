@@ -12,10 +12,14 @@ import { config } from "./config";
 import type { Provider, RedactMode, RedactSet } from "./types";
 
 export interface TenantPolicy {
-  /** Default redact mode for this tenant (X-Redact-Mode still overrides per-request). */
+  /** Default redact mode for this tenant (X-Redact-Mode may only tighten it, unless
+   *  `allowHeaderOverride`). */
   mode?: RedactMode;
-  /** Active entity sets for this tenant (X-Redact-Sets still overrides per-request). */
+  /** Active entity sets for this tenant (X-Redact-Sets may only add to them, unless
+   *  `allowHeaderOverride`). */
   activeSets?: RedactSet[];
+  /** Let this tenant's callers loosen mode/sets per request via headers. */
+  allowHeaderOverride?: boolean;
   /** Per-tenant fail-mode override. */
   failMode?: "closed" | "open";
   /** Stable HMAC pseudonyms instead of per-request counters. */

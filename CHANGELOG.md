@@ -13,6 +13,17 @@ image and creates the GitHub release from this file.
 
 ## [Unreleased]
 
+### Security
+
+- Per-request headers can no longer weaken redaction. `X-Redact-Mode` may only be as strong as or stronger than the tenant/global mode (`off` < `reversible` < `strip`), and `X-Redact-Sets` must include every policy set; `X-Redact-Mode: off` or a narrower set list is refused with 403 and the upstream is never called. Until now any caller could send `X-Redact-Mode: off` and forward raw PII. Opt back in per tenant (`"allowHeaderOverride": true`) or globally (`ALLOW_HEADER_OVERRIDE=true`). **Breaking** for clients that relied on loosening headers.
+- The admin API is disabled (403) when `ADMIN_TOKEN` is unset, instead of open to anyone who can reach the port. `ALLOW_OPEN_ADMIN=1` restores the open dev behaviour. The token is compared in constant time. **Breaking** for deployments that ran `/admin/*` without a token.
+- Upstream failures return a fixed message and a `requestId` (also `X-Request-Id`) instead of the raw exception, which could name internal hosts such as a residency upstream; the detail is logged server-side.
+
+### Added
+
+- `UPSTREAM_TIMEOUT_MS` (default 600000): a provider that sends no response headers in time gets a 504 instead of holding the connection forever. Once headers arrive the body, including a long stream, is not timed.
+- `TRUST_TENANT_HEADER` (default `true`): set `false` to ignore `X-Tenant` and always derive the tenant from the API key, so callers can't select another tenant's policy.
+
 ## [0.3.0] - 2026-09-22
 
 The first image since 0.2.0: it also carries 0.2.1's dependency update, which was never tagged or published as an image.

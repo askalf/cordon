@@ -16,6 +16,14 @@ const instances = {
   // Secret-less instance: consistent pseudonyms enabled per-tenant here must FAIL CLOSED
   // (no ALLOW_WEAK_PSEUDONYM_SECRET) — exercises the per-request pseudonym-secret guard.
   8811: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test_nosecret.jsonl" },
+  // No ADMIN_TOKEN (admin API must be disabled, not open) and an Anthropic upstream that
+  // accepts connections but never answers (the proxy suite opens it on :8901), with a
+  // short timeout, exercises the 504 path.
+  8812: {
+    AUDIT_LOG: "./_audit_test_noadmin.jsonl",
+    ANTHROPIC_BASE: "http://127.0.0.1:8901",
+    UPSTREAM_TIMEOUT_MS: "500",
+  },
 };
 
 // Suites importing TS modules directly run under the tsx loader.
@@ -23,7 +31,7 @@ const TSX_SUITES = new Set(["_test_unit.mjs", "_test_fuzz.js"]);
 const suites = ["_test_unit.mjs", "_test_fuzz.js", "_test_proxy.mjs", "_test_stream.mjs", "_test_labeler_config.mjs", "_test_release_notes.mjs"];
 
 // Fresh audit chains + scratch files each run.
-for (const f of ["./_audit_test.jsonl", "./_audit_test_nosecret.jsonl", "./_policy_unit.json", "./_policy_bad.json"])
+for (const f of ["./_audit_test.jsonl", "./_audit_test_nosecret.jsonl", "./_audit_test_noadmin.jsonl", "./_policy_unit.json", "./_policy_bad.json"])
   try { rmSync(f, { force: true }); } catch {}
 
 /**
@@ -85,13 +93,13 @@ async function waitUp(url, label, tries = 50) {
 
 (async () => {
   // Reclaim any port a prior run left occupied before we try to bind it.
-  for (const port of [STUB_PORT, ...Object.keys(instances).map(Number)]) freePort(port);
+  for (const port of [STUB_PORT, 8901, ...Object.keys(instances).map(Number)]) freePort(port);
 
   launch(["_stub-upstream.mjs"]);
   await waitUp(`${STUB}/__calls`, "stub");
 
   for (const [port, env] of Object.entries(instances)) {
-    launch(["--import", "tsx", "src/index.ts"], { PORT: port, ...base, ...env });
+    launch(["--import", "tsx", "src/index.ts"], { PORT: port, ...base, ADMIN_TOKEN: "", ...env });
   }
   await Promise.all(Object.keys(instances).map((p) => waitUp(`http://localhost:${p}/healthz`, `cordon:${p}`)));
 

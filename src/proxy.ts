@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { config, adequatePseudonymSecret, allowWeakPseudonymSecret } from "./config";
 import { metrics } from "./metrics";
 import { getPolicy } from "./policy";
-import { adapterFor, forwardUpstream } from "./providers";
+import { adapterFor, forwardUpstream, UpstreamTimeout } from "./providers";
 import { detector } from "./detect";
 import { applyRedaction, tally } from "./redact/apply";
 import { reidentifyBody } from "./redact/reidentify";
@@ -171,12 +172,26 @@ async function onRedactionError(
   metrics.timing("fail-closed", t0);
 }
 
-function safeUpstreamError(res: HttpRes, e: unknown) {
+/**
+ * The provider could not be reached (or timed out). The caller gets a fixed message and a
+ * request id; the detail (which can name internal hosts, e.g. a residency upstream) goes
+ * to the server log only.
+ */
+export function safeUpstreamError(res: HttpRes, e: unknown) {
   metrics.upstreamError();
+  const id = randomUUID();
+  const timeout = e instanceof UpstreamTimeout;
+  console.error(`[upstream] ${id}: ${String((e as any)?.message ?? e)}`);
   try {
-    res.statusCode = 502;
+    res.statusCode = timeout ? 504 : 502;
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ error: `${config.brand} upstream error: ${String((e as any)?.message ?? e)}` }));
+    res.setHeader("X-Request-Id", id);
+    res.end(
+      JSON.stringify({
+        error: `${config.brand}: ${timeout ? "upstream timed out" : "upstream unreachable"}`,
+        requestId: id,
+      }),
+    );
   } catch {
     /* socket already gone */
   }

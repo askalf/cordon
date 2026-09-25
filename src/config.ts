@@ -48,12 +48,31 @@ export const config = {
   policyStore: env.POLICY_STORE || "",
 
   admin: {
-    token: env.ADMIN_TOKEN || "", // empty = admin endpoints open (dev only)
+    // Empty = the admin API is DISABLED (403), not open. Fail closed: an operator who
+    // forgot the token must not expose policy writes to anyone who can reach the port.
+    token: env.ADMIN_TOKEN || "",
+    // Dev-only escape hatch: with no ADMIN_TOKEN, serve /admin/* with no auth at all.
+    allowOpen: env.ALLOW_OPEN_ADMIN === "1",
   },
+
+  // Caller headers (X-Redact-Mode, X-Redact-Sets) may only make redaction STRICTER than
+  // the tenant/global policy: a header can't turn redaction off or drop a set. true
+  // restores the old "header always wins" behaviour globally; a tenant can opt in with
+  // `allowHeaderOverride`.
+  allowHeaderOverride: (env.ALLOW_HEADER_OVERRIDE ?? "false") === "true",
+
+  // Honour the caller's X-Tenant header. false = ignore it and derive the tenant from the
+  // API key (TENANT_FROM_AUTH), so a caller can't pick another tenant's policy.
+  trustTenantHeader: (env.TRUST_TENANT_HEADER ?? "true") === "true",
 
   // When no X-Tenant is sent, derive the tenant from the API key so different
   // callers get isolated policy / pseudonym namespaces.
   tenantFromAuth: (env.TENANT_FROM_AUTH ?? "true") === "true",
+
+  // How long to wait for the provider's response headers before giving up (504). Covers
+  // a hung connection; once headers arrive the body (incl. a long stream) is not timed.
+  // Generous by default: non-streaming completions only send headers when they finish.
+  upstreamTimeoutMs: Number(env.UPSTREAM_TIMEOUT_MS ?? 600_000),
 
   upstream: {
     openai: env.OPENAI_BASE ?? "https://api.openai.com",
