@@ -175,22 +175,49 @@ function resolveSets(headers: Record<string, string>, tenant: string): RedactSet
   return getPolicy(tenant).activeSets ?? config.activeSets;
 }
 
+/** The three redacted generation endpoints, keyed by canonical path. */
+const GENERATION_ROUTES = new Map<string, [Provider, Dialect]>([
+  ["/v1/chat/completions", ["openai", "chat"]],
+  ["/v1/responses", ["openai", "responses"]],
+  ["/v1/messages", ["anthropic", "messages"]],
+]);
+
+/**
+ * The generation endpoint a request path can reach upstream, or null for any other path.
+ * The path is forwarded as the caller sent it, and the upstream does not read those bytes
+ * literally: fetch resolves "." and ".." segments (%2e forms too) and treats "\" as "/",
+ * and a server may decode percent-escapes, ignore case, or drop a trailing or doubled
+ * slash. Any of those can turn a spelling that is not literally a generation endpoint
+ * (`/v1/chat/completions/`) into one, so the path is classified on the most lenient of
+ * those readings; classifying on the literal bytes sent such a request down the verbatim
+ * passthrough with its body unread. A sub-path (/v1/messages/count_tokens) is still not a
+ * generation endpoint.
+ */
+export function generationRoute(bare: string): [Provider, Dialect] | null {
+  let p = bare;
+  try {
+    p = decodeURIComponent(p);
+  } catch {
+    /* a malformed escape: classify the undecoded bytes */
+  }
+  const segs: string[] = [];
+  for (const s of p.toLowerCase().split(/[\\/]+/)) {
+    if (s === "" || s === ".") continue;
+    if (s === "..") segs.pop();
+    else segs.push(s);
+  }
+  return GENERATION_ROUTES.get("/" + segs.join("/")) ?? null;
+}
+
 export function normalize(
   path: string,
   body: any,
   headers: Record<string, string>,
 ): CanonicalRequest | null {
-  // EXACT endpoint match — sub-paths (e.g. /v1/messages/count_tokens) are NOT
-  // generation requests and must take the transparent-passthrough route instead.
+  // Sub-paths (e.g. /v1/messages/count_tokens) are NOT generation requests and take the
+  // transparent-passthrough route instead; see generationRoute for what counts as a match.
   const bare = path.split("?")[0];
-  const route: [Provider, Dialect] | null =
-    bare === "/v1/chat/completions"
-      ? ["openai", "chat"]
-      : bare === "/v1/responses"
-        ? ["openai", "responses"]
-        : bare === "/v1/messages"
-          ? ["anthropic", "messages"]
-          : null;
+  const route = generationRoute(bare);
   if (!route || !body || typeof body !== "object") return null;
   const [provider, dialect] = route;
 
@@ -220,15 +247,68 @@ export function authHeaders(headers: Record<string, string>): Record<string, str
   return fwd;
 }
 
-/** Tenant resolution: explicit X-Tenant (when trusted), else (optionally) derived from the
- *  API key. */
-export function resolveTenant(headers: Record<string, string>): string {
-  if (config.trustTenantHeader && headers["x-tenant"]) return headers["x-tenant"];
+/** The tenant a request's credentials alone give it: derived from the API key
+ *  (TENANT_FROM_AUTH), else "public". */
+function credentialTenant(headers: Record<string, string>): string {
   if (config.tenantFromAuth) {
     const auth = headers["authorization"] || headers["x-api-key"] || "";
     if (auth) return "auth:" + sha256(auth).slice(0, 16);
   }
   return "public";
+}
+
+/** Tenant resolution: X-Tenant only when TRUST_TENANT_HEADER is on (index.ts refuses a
+ *  selection tenantSelectionViolation rejects before this is used), else the credential
+ *  tenant. */
+export function resolveTenant(headers: Record<string, string>): string {
+  if (config.trustTenantHeader && headers["x-tenant"]) return headers["x-tenant"];
+  return credentialTenant(headers);
+}
+
+/** Every policy knob a tenant resolves to, global config filling the unset ones. */
+function effectivePolicy(tenant: string) {
+  const p = getPolicy(tenant);
+  return {
+    mode: p.mode && VALID_MODES.has(p.mode) ? p.mode : config.defaultMode,
+    activeSets: p.activeSets ?? config.activeSets,
+    failMode: p.failMode ?? config.failMode,
+    redactSystem: p.redactSystem ?? config.redactSystem,
+    consistentPseudonyms: p.consistentPseudonyms ?? config.consistentPseudonyms,
+    allowHeaderOverride: p.allowHeaderOverride ?? config.allowHeaderOverride,
+  };
+}
+
+/**
+ * With TRUST_TENANT_HEADER on, X-Tenant may only select a policy at least as strict as the
+ * one the caller's credentials already give it, on every knob:
+ *   mode                  off < reversible < strip
+ *   activeSets            must include every set of the credential tenant
+ *   failMode              open < closed
+ *   redactSystem          false < true
+ *   consistentPseudonyms  true < false (a stable token lets the upstream link one value
+ *                         across requests; a per-request token does not)
+ *   allowHeaderOverride   true < false
+ *   upstream bases        must be identical: a residency route has no stricter direction
+ * Returns why the selection loosens policy, or null. The header still picks the audit and
+ * metrics label freely; that is the trust the operator grants by turning it on.
+ */
+export function tenantSelectionViolation(headers: Record<string, string>): string | null {
+  const asked = headers["x-tenant"];
+  if (!config.trustTenantHeader || !asked) return null;
+  const home = credentialTenant(headers);
+  if (asked === home) return null;
+  const a = effectivePolicy(asked);
+  const h = effectivePolicy(home);
+  const looser: string[] = [];
+  if (MODE_STRENGTH[a.mode] < MODE_STRENGTH[h.mode]) looser.push("mode");
+  if (h.activeSets.some((s) => !a.activeSets.includes(s))) looser.push("activeSets");
+  if (a.failMode === "open" && h.failMode !== "open") looser.push("failMode");
+  if (!a.redactSystem && h.redactSystem) looser.push("redactSystem");
+  if (a.consistentPseudonyms && !h.consistentPseudonyms) looser.push("consistentPseudonyms");
+  if (a.allowHeaderOverride && !h.allowHeaderOverride) looser.push("allowHeaderOverride");
+  if (baseFor("openai", asked) !== baseFor("openai", home) || baseFor("anthropic", asked) !== baseFor("anthropic", home))
+    looser.push("upstreamOverride");
+  return looser.length ? `X-Tenant selects a policy that is not at least as strict as this caller's own (${looser.join(", ")})` : null;
 }
 
 /** Upstream base for a provider, honouring a per-tenant data-residency override. */

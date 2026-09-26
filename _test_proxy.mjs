@@ -1,7 +1,9 @@
 // Integration: cordon (:8810) in front of the echo stub (:8900). Proves the model
 // never sees raw PII, reversible restores it, strip/off behave, fail-closed blocks,
 // and the audit log verifies and holds no values. Run with: node _test_proxy.mjs
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import http from "node:http";
 import { createServer } from "node:net";
 
 const BASE = "http://localhost:8810";
@@ -32,11 +34,29 @@ const setTenantOn = (base) => (patch) =>
   fetch(base + "/admin/tenant", { method: "POST", headers: { "content-type": "application/json", "x-admin-token": ADMIN }, body: JSON.stringify(patch) });
 const setTenant = setTenantOn(BASE);
 const setTenant2 = setTenantOn(BASE2);
+// The tenant cordon derives from an API key (TENANT_FROM_AUTH). A policy that is looser than
+// the default can only be reached this way: X-Tenant may not select one.
+const keyTenant = (key) => "auth:" + createHash("sha256").update(key).digest("hex").slice(0, 16);
+const asKey = (key) => ({ "x-api-key": key });
+// POST with the path sent byte-for-byte: fetch would resolve dot segments before sending.
+const rawPost = (path, body) =>
+  new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: "localhost", port: 8810, path, method: "POST", headers: { "content-type": "application/json", "x-api-key": "test-key" } },
+      (res) => {
+        let b = "";
+        res.on("data", (c) => (b += c));
+        res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, json: () => JSON.parse(b) }));
+      },
+    );
+    req.on("error", reject);
+    req.end(JSON.stringify(body));
+  });
 
 (async () => {
   // A tenant whose callers may loosen policy per request (X-Redact-Mode: off, narrower
   // X-Redact-Sets). Everyone else can only tighten it.
-  await setTenant({ tenant: "loose", allowHeaderOverride: true });
+  await setTenant({ tenant: keyTenant("loose-key"), allowHeaderOverride: true });
 
   // ---- reversible (Anthropic) ----
   await reset();
@@ -95,7 +115,7 @@ const setTenant2 = setTenantOn(BASE2);
 
   // ---- off (passthrough), for a tenant allowed to loosen ----
   await reset();
-  res = await post("/v1/messages", aBody(PII), { "x-tenant": "loose", "x-redact-mode": "off" });
+  res = await post("/v1/messages", aBody(PII), { ...asKey("loose-key"), "x-redact-mode": "off" });
   text = (await res.json())?.content?.[0]?.text || "";
   ok("off: reply echoes raw (nothing redacted)", text.includes("john@acme.com"));
   ok("off: X-Redacted is 0", res.headers.get("x-redacted") === "0");
@@ -140,6 +160,26 @@ const setTenant2 = setTenantOn(BASE2);
   }
   ok("responses/items: X-Redacted counts every field", Number(res.headers.get("x-redacted")) >= 5, res.headers.get("x-redacted"));
 
+  // ---- reversible (Responses): tool outputs of every kind, custom tools, prompt variables ----
+  await reset();
+  res = await post("/v1/responses", rBody(
+    [
+      { role: "user", content: [{ type: "input_text", text: "summarise the tool results" }] },
+      { type: "function_call_output", call_id: "call_1", output: [{ type: "input_text", text: "owner john@acme.com" }] },
+      { type: "custom_tool_call", call_id: "call_2", name: "send_mail", input: "to: jane@corp.io" },
+      { type: "custom_tool_call_output", call_id: "call_2", output: "queued for jane@corp.io" },
+      { type: "local_shell_call_output", id: "lsh_1", call_id: "call_3", output: "users.csv: ops@acme.com" },
+      { type: "future_item_v9", id: "fi_1", text: "card 4012888888881881" },
+    ],
+    { tools: [{ type: "custom", name: "send_mail", description: "escalate to help@acme.com" }], prompt: { id: "pmpt_1", variables: { customer: "bob@corp.io" } } },
+  ));
+  text = rText(await res.json());
+  sent = JSON.stringify(await calls());
+  ok("responses/tools: upstream NEVER saw raw PII in any tool item, tool or variable",
+    !["john@acme.com", "jane@corp.io", "ops@acme.com", "4012888888881881", "help@acme.com", "bob@corp.io"].some((x) => sent.includes(x)), sent.slice(0, 300));
+  ok("responses/tools: the echoed tool text is restored in the reply",
+    text.includes("john@acme.com") && text.includes("jane@corp.io") && text.includes("ops@acme.com") && !/<[A-Z_]+_[0-9A-F]+_\d+>/.test(text), text);
+
   // ---- reversible (Responses): a prior assistant turn fed back as input ----
   // The reply cordon restores carries real values, and a stateless client appends it to
   // the next request's input. Those parts are output_text/refusal, not input_text.
@@ -170,7 +210,7 @@ const setTenant2 = setTenantOn(BASE2);
   sent = JSON.stringify(await calls());
   ok("responses/strip: upstream saw [EMAIL], not raw", sent.includes("[EMAIL]") && !sent.includes("john@acme.com"));
   await reset();
-  res = await post("/v1/responses", rBody(PII), { "x-tenant": "loose", "x-redact-mode": "off" });
+  res = await post("/v1/responses", rBody(PII), { ...asKey("loose-key"), "x-redact-mode": "off" });
   text = rText(await res.json());
   ok("responses/off: reply echoes raw (nothing redacted)", text.includes("john@acme.com"));
   ok("responses/off: X-Redacted 0", res.headers.get("x-redacted") === "0");
@@ -199,13 +239,73 @@ const setTenant2 = setTenantOn(BASE2);
   ok("narrowing sets without permission: error names the dropped sets", /phi, secrets/.test(JSON.stringify(await res.json().catch(() => ({})))));
   ok("narrowing sets without permission: upstream NOT called", (await calls()).total === 0);
   await reset();
-  res = await post("/v1/messages", aBody(PII), { "x-tenant": "loose", "x-redact-sets": "pii,pci" });
+  res = await post("/v1/messages", aBody(PII), { ...asKey("loose-key"), "x-redact-sets": "pii,pci" });
   ok("valid sets: accepted for a tenant allowed to loosen (200)", res.status === 200, String(res.status));
-  await setTenant({ tenant: "narrow", activeSets: ["pii"] });
+  await setTenant({ tenant: keyTenant("narrow-key"), activeSets: ["pii"] });
   await reset();
-  res = await post("/v1/messages", aBody(PII), { "x-tenant": "narrow", "x-redact-sets": "pii,pci" });
+  res = await post("/v1/messages", aBody(PII), { ...asKey("narrow-key"), "x-redact-sets": "pii,pci" });
   ok("widening sets: always allowed (200)", res.status === 200, String(res.status));
   ok("widening sets: the added set applies", /CREDIT_CARD/.test(res.headers.get("x-redacted-types") || ""), res.headers.get("x-redacted-types"));
+
+  // ---- X-Tenant: ignored by default, and when trusted it can only select a stricter policy ----
+  // :8811 runs with TRUST_TENANT_HEADER unset. A strip tenant named in X-Tenant must not
+  // apply there: the reply comes back restored (reversible, the credential tenant's mode).
+  await setTenant2({ tenant: "strict", mode: "strip" });
+  await reset();
+  res = await post2("/v1/messages", aBody(PII), { "x-tenant": "strict" });
+  text = (await res.json())?.content?.[0]?.text || "";
+  ok("x-tenant default: header ignored (credential tenant's reversible mode applies)",
+    res.status === 200 && text.includes("john@acme.com") && !text.includes("[EMAIL]"), text);
+  await setTenant2({ tenant: "loose", allowHeaderOverride: true });
+  await reset();
+  res = await post2("/v1/messages", aBody(PII), { "x-tenant": "loose", "x-redact-mode": "off" });
+  ok("x-tenant default: a loose tenant's override does not apply (403)", res.status === 403, String(res.status));
+  ok("x-tenant default: upstream NOT called", (await calls()).total === 0);
+  // :8810 opts in (TRUST_TENANT_HEADER=true): a stricter tenant is honoured.
+  await reset();
+  res = await post("/v1/messages", aBody(PII), { "x-tenant": "strict" });
+  text = (await res.json())?.content?.[0]?.text || "";
+  ok("x-tenant trusted: a stricter tenant's policy applies (strip)", res.status === 200 && text.includes("[EMAIL]") && !text.includes("john@acme.com"), text);
+  // ...and every looser selection is refused before the upstream is called.
+  await setTenant({ tenant: "hdr-loose", allowHeaderOverride: true });
+  await setTenant({ tenant: "hdr-off", mode: "off" });
+  await setTenant({ tenant: "hdr-narrow", activeSets: ["pii"] });
+  await setTenant({ tenant: "hdr-open", failMode: "open" });
+  await setTenant({ tenant: "hdr-nosystem", redactSystem: false });
+  await setTenant({ tenant: "hdr-pseudo", consistentPseudonyms: true });
+  await setTenant({ tenant: "hdr-eu", upstreamOverride: { anthropic: "http://127.0.0.1:1" } });
+  for (const [tenant, knob] of [["hdr-loose", "allowHeaderOverride"], ["hdr-off", "mode"], ["hdr-narrow", "activeSets"], ["hdr-open", "failMode"],
+    ["hdr-nosystem", "redactSystem"], ["hdr-pseudo", "consistentPseudonyms"], ["hdr-eu", "upstreamOverride"]]) {
+    await reset();
+    res = await post("/v1/messages", aBody(PII), { "x-tenant": tenant });
+    const err = JSON.stringify(await res.json().catch(() => ({})));
+    ok(`x-tenant trusted: looser ${knob} refused (403, names the knob)`, res.status === 403 && err.includes(knob), `${res.status} ${err}`);
+    ok(`x-tenant trusted: looser ${knob} never reaches upstream`, (await calls()).total === 0);
+  }
+  // A tenant no policy names resolves to the global defaults, the same as the caller's own.
+  await reset();
+  res = await post("/v1/messages", aBody(PII), { "x-tenant": "unconfigured-team" });
+  ok("x-tenant trusted: an unconfigured tenant (same defaults) is accepted", res.status === 200, String(res.status));
+
+  // ---- near-miss generation paths are redacted, not passed through verbatim ----
+  for (const path of ["/v1/chat/completions/", "/v1/Chat/Completions", "/v1/chat/completion%73"]) {
+    await reset();
+    res = await post(path, oBody(PII));
+    text = (await res.json().catch(() => ({})))?.choices?.[0]?.message?.content || "";
+    sent = JSON.stringify(await calls());
+    ok(`near-miss ${path}: upstream NEVER saw raw PII`, !sent.includes("john@acme.com") && !sent.includes("4012888888881881"), sent.slice(0, 200));
+    ok(`near-miss ${path}: redacted (X-Redacted >= 2)`, Number(res.headers.get("x-redacted")) >= 2, res.headers.get("x-redacted"));
+  }
+  for (const path of ["/v1/x/../responses", "/v1/x/%2e%2e/responses", "/v1/./messages"]) {
+    await reset();
+    res = await rawPost(path, path.endsWith("responses") ? rBody(PII) : aBody(PII));
+    sent = JSON.stringify(await calls());
+    ok(`near-miss ${path}: upstream NEVER saw raw PII`, !sent.includes("john@acme.com") && !sent.includes("4012888888881881"), sent.slice(0, 200));
+    ok(`near-miss ${path}: redacted (X-Redacted >= 2)`, Number(res.headers["x-redacted"]) >= 2, String(res.headers["x-redacted"]));
+  }
+  await reset();
+  res = await post("/v1/messages/count_tokens/", aBody("hello"));
+  ok("near-miss: a count_tokens sub-path still passes through", (await res.json())?.input_tokens === 42);
 
   // ---- passthrough (count_tokens) ----
   await reset();
@@ -226,10 +326,10 @@ const setTenant2 = setTenantOn(BASE2);
   ok("admin: valid activeSets accepted (200)", (await setTenant({ tenant: "t2", activeSets: ["pii", "pci"] })).status === 200);
 
   // ---- consistent pseudonyms via tenant policy ----
-  await setTenant({ tenant: "acme", consistentPseudonyms: true, mode: "reversible" });
+  await setTenant({ tenant: keyTenant("acme-key"), consistentPseudonyms: true, mode: "reversible" });
   await reset();
-  await post("/v1/messages", aBody("mail john@acme.com"), { "x-tenant": "acme" });
-  await post("/v1/messages", aBody("again john@acme.com"), { "x-tenant": "acme" });
+  await post("/v1/messages", aBody("mail john@acme.com"), asKey("acme-key"));
+  await post("/v1/messages", aBody("again john@acme.com"), asKey("acme-key"));
   {
     const bodies = (await calls()).bodies;
     const t1 = bodies[0]?.body?.messages?.[0]?.content?.match(/<EMAIL_[0-9A-F]{8}>/)?.[0];
@@ -241,8 +341,8 @@ const setTenant2 = setTenantOn(BASE2);
   // :8811 runs with an empty TENANT_SECRET and no ALLOW_WEAK_PSEUDONYM_SECRET escape hatch,
   // so a tenant that turns on consistentPseudonyms there can't mint guessable tokens.
   await reset();
-  await setTenant2({ tenant: "leaky", consistentPseudonyms: true, mode: "reversible" });
-  res = await post2("/v1/messages", aBody("mail john@acme.com"), { "x-tenant": "leaky" });
+  await setTenant2({ tenant: keyTenant("leaky-key"), consistentPseudonyms: true, mode: "reversible" });
+  res = await post2("/v1/messages", aBody("mail john@acme.com"), asKey("leaky-key"));
   ok("pseudonym-no-secret: fails closed (422)", res.status === 422, String(res.status));
   ok("pseudonym-no-secret: upstream NOT called (PII never forwarded)", (await calls()).total === 0);
   ok("pseudonym-no-secret: error names the pseudonym-secret stage",
@@ -253,8 +353,8 @@ const setTenant2 = setTenantOn(BASE2);
   ok("pseudonym-no-secret: non-pseudonym request still works (200)", res.status === 200, String(res.status));
 
   // ---- data-residency upstream override ----
-  await setTenant({ tenant: "eu", upstreamOverride: { anthropic: "http://127.0.0.1:1" } });
-  res = await post("/v1/messages", aBody("hi jane@corp.io"), { "x-tenant": "eu" });
+  await setTenant({ tenant: keyTenant("eu-key"), upstreamOverride: { anthropic: "http://127.0.0.1:1" } });
+  res = await post("/v1/messages", aBody("hi jane@corp.io"), asKey("eu-key"));
   ok("residency: override routes away from stub (502)", res.status === 502, String(res.status));
   {
     const j = await res.json().catch(() => ({}));

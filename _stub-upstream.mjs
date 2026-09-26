@@ -30,7 +30,9 @@ function collectText(body, provider) {
   if (typeof body.input === "string") parts.push(body.input);
   else for (const item of body.input || []) {
     if (item?.role === "user") pushContent(item.content);
-    if (item?.type === "function_call_output" && typeof item.output === "string") parts.push(item.output);
+    // Tool outputs of every kind (a string, or input_text parts) and a custom tool's input.
+    if (/_call_output$/.test(item?.type ?? "")) pushContent(item.output);
+    if (item?.type === "custom_tool_call" && typeof item.input === "string") parts.push(item.input);
   }
   return parts.join(" ");
 }

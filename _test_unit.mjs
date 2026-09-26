@@ -218,6 +218,90 @@ const noRaw = (body, raw) => !JSON.stringify(body).includes(raw);
   ok("stream: truncated trailing placeholder restored (not leaked)", out === "see john@acme.com", out);
 }
 
+// ---------------- Responses API: every request shape reaches the detector ----------------
+{
+  const RAW = "john.doe@acme.com";
+  const rRedact = (body, v = new Vault("reversible"), redactSystem = true) =>
+    applyRedaction({ model: "gpt-4o-mini", ...body }, "openai", v, ALL, detector, redactSystem, "responses");
+  const cases = [
+    ["function_call_output.output as input_text parts",
+      { input: [{ type: "function_call_output", call_id: "call_1", output: [{ type: "input_text", text: `owner ${RAW}` }] }] }],
+    ["custom_tool_call.input",
+      { input: [{ type: "custom_tool_call", call_id: "call_2", name: "send_mail", input: `to: ${RAW}` }] }],
+    ["custom_tool_call_output.output (string)",
+      { input: [{ type: "custom_tool_call_output", call_id: "call_2", output: `sent to ${RAW}` }] }],
+    ["custom_tool_call_output.output (input_text parts)",
+      { input: [{ type: "custom_tool_call_output", call_id: "call_2", output: [{ type: "input_text", text: `sent to ${RAW}` }] }] }],
+    ["local_shell_call_output.output",
+      { input: [{ type: "local_shell_call_output", id: "lsh_1", call_id: "call_3", output: `users.csv: ${RAW}` }] }],
+    ["custom tool description",
+      { input: "hi", tools: [{ type: "custom", name: "lookup", description: `escalations go to ${RAW}` }] }],
+    // The variable is deliberately called `name`: variable names are the caller's own
+    // keys, so the structural-key exemption must not apply to them.
+    ["prompt.variables string value",
+      { prompt: { id: "pmpt_1", variables: { name: RAW } } }],
+    ["prompt.variables input_text value",
+      { prompt: { id: "pmpt_1", variables: { customer: { type: "input_text", text: RAW } } } }],
+    ["an unknown future item type with a text field",
+      { input: [{ type: "future_item_v9", id: "fi_1", text: `note ${RAW}` }] }],
+  ];
+  for (const [name, body] of cases) {
+    const { deidBody, spans } = rRedact(body);
+    ok(`responses: ${name} redacted`, noRaw(deidBody, RAW) && spans.some((s) => s.type === "EMAIL"), JSON.stringify(deidBody));
+  }
+
+  // Structural fields and media payloads reach the upstream byte-exact.
+  const struct = {
+    input: [
+      { type: "function_call_output", call_id: "call_555-123-4567", output: [
+        { type: "input_text", text: `owner ${RAW}` },
+        { type: "input_image", image_url: "data:image/png;base64,QUtJQUlPU0ZPRE5ON0VYQU1QTEU=" },
+      ] },
+      { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: `asked about ${RAW}` }], encrypted_content: "gAAAA555-123-4567" },
+      { type: "future_item_v9", id: "fi_1", status: "completed", arguments: JSON.stringify({ to: RAW, qty: 3 }) },
+    ],
+  };
+  const { deidBody: sd } = rRedact(struct);
+  ok("responses: call_id, encrypted_content and input_image forwarded untouched",
+    sd.input[0].call_id === "call_555-123-4567" && sd.input[1].encrypted_content === "gAAAA555-123-4567" &&
+      sd.input[0].output[1].image_url === struct.input[0].output[1].image_url, JSON.stringify(sd));
+  ok("responses: reasoning summary text redacted", noRaw(sd.input[1], RAW), JSON.stringify(sd.input[1]));
+  {
+    let args;
+    try { args = JSON.parse(sd.input[2].arguments); } catch {}
+    ok("responses: an unknown item's arguments stay valid JSON with a placeholder",
+      /^<EMAIL_/.test(args?.to ?? "") && args?.qty === 3, sd.input[2].arguments);
+  }
+
+  // A shape nested past the walk's depth cap is refused (the proxy turns the throw into a
+  // fail-closed 422), never forwarded with its deep leaves unread.
+  {
+    let deep = { text: RAW };
+    for (let i = 0; i < 40; i++) deep = { nested: deep };
+    let threw = false;
+    try { rRedact({ input: [{ type: "future_item_v9", payload: deep }] }); } catch { threw = true; }
+    ok("responses: an item nested past the depth cap throws (fail closed)", threw);
+  }
+
+  // redactSystem=false still exempts system/developer items, whatever their shape.
+  {
+    const { deidBody } = rRedact({ input: [{ role: "developer", type: "future_item_v9", text: `ops ${RAW}` }] }, new Vault("reversible"), false);
+    ok("responses: redactSystem=false leaves developer items alone", deidBody.input[0].text === `ops ${RAW}`);
+  }
+
+  // Round trip: a reply echoing any of these placeholders comes back with the real value.
+  {
+    const v = new Vault("reversible");
+    const all = { input: cases.flatMap(([, b]) => b.input && Array.isArray(b.input) ? b.input : []), tools: cases[5][1].tools, prompt: cases[6][1].prompt };
+    const { deidBody } = rRedact(all, v);
+    const toks = [...new Set(JSON.stringify(deidBody).match(/<EMAIL_[0-9A-F]+_\d+>/g) ?? [])];
+    const resp = { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: `saw ${toks.join(" ")}` }] }] };
+    const back = reidentifyBody(resp, "openai", v, "responses").output[0].content[0].text;
+    ok("responses: placeholders from the new shapes restore on the way back",
+      toks.length === 1 && back === `saw ${RAW}`, `${toks.join(",")} -> ${back}`);
+  }
+}
+
 // ---------------- Class 2: unicode / zero-width / full-width evasion ----------------
 ok("Class2: zero-width email detected", types(runAll("mail john​@acme.com now", ["pii"])).includes("EMAIL"));
 ok("Class2: full-width card detected", types(runAll("card ４０１２８８８８８８８８１８８１", ["pci"])).includes("CREDIT_CARD"));
