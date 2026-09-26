@@ -1,6 +1,13 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import Fastify from "fastify";
-import { normalize, passthroughBase, forwardVerbatim, headerOverrideViolation } from "./providers";
+import {
+  normalize,
+  passthroughBase,
+  forwardVerbatim,
+  headerOverrideViolation,
+  tenantSelectionViolation,
+  generationRoute,
+} from "./providers";
 import { handle, safeUpstreamError } from "./proxy";
 import { config, pseudonymSecretGuard, adequatePseudonymSecret, allowWeakPseudonymSecret } from "./config";
 import { metrics } from "./metrics";
@@ -147,8 +154,10 @@ app.post("/v1/*", async (req, reply) => {
   const { headers, bare, path } = reqParts(req);
 
   // Only the three generation endpoints are redacted; everything else (count_tokens,
-  // embeddings, …) forwards verbatim so it is never normalize-mangled.
-  if (bare !== "/v1/chat/completions" && bare !== "/v1/responses" && bare !== "/v1/messages") {
+  // embeddings, …) forwards verbatim so it is never normalize-mangled. A spelling the
+  // upstream can still resolve to a generation endpoint (trailing slash, dot segments,
+  // case, percent-escapes) counts as one: see generationRoute.
+  if (!generationRoute(bare)) {
     return passthroughUnknown(req, reply, "POST");
   }
 
@@ -170,6 +179,14 @@ app.post("/v1/*", async (req, reply) => {
         error: `${config.brand}: unknown redaction set(s): ${unknown.join(", ")} — valid sets are pii, phi, pci, secrets`,
       };
     }
+  }
+
+  // A trusted X-Tenant may only select a policy at least as strict as the caller's own.
+  // Checked before the header override below, which reads the policy of the selected tenant.
+  const tenantLoosens = tenantSelectionViolation(headers);
+  if (tenantLoosens) {
+    reply.code(403);
+    return { error: `${config.brand}: ${tenantLoosens}` };
   }
 
   // Policy is the floor: a caller header may tighten redaction, never loosen it (unless the

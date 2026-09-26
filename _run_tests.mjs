@@ -11,10 +11,12 @@ const base = { OPENAI_BASE: STUB, ANTHROPIC_BASE: STUB };
 
 // port → instance env
 const instances = {
-  // Primary instance: has a strong TENANT_SECRET, so consistent-pseudonym requests work.
-  8810: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test.jsonl", CORDON_TEST_HOOKS: "1", TENANT_SECRET: "test-secret-0123456789abcdef" },
+  // Primary instance: has a strong TENANT_SECRET, so consistent-pseudonym requests work, and
+  // opts in to X-Tenant (TRUST_TENANT_HEADER) so the tenant-selection rule is exercised.
+  8810: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test.jsonl", CORDON_TEST_HOOKS: "1", TENANT_SECRET: "test-secret-0123456789abcdef", TRUST_TENANT_HEADER: "true" },
   // Secret-less instance: consistent pseudonyms enabled per-tenant here must FAIL CLOSED
   // (no ALLOW_WEAK_PSEUDONYM_SECRET) — exercises the per-request pseudonym-secret guard.
+  // TRUST_TENANT_HEADER is left at its default, so X-Tenant is ignored here.
   8811: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test_nosecret.jsonl" },
   // No ADMIN_TOKEN; an Anthropic upstream accepts connections but never answers.
   // The proxy suite opens it on :8901 with a short timeout for the 504 path.

@@ -63,15 +63,63 @@ function pushJsonString(obj: any, key: string, slots: Slot[], finalizers: (() =>
   }
 }
 
+// Keys the Responses input walk never redacts, at any depth. The walk is fail-closed (every
+// other string leaf of an input item is redacted, whatever the item type), so a key belongs
+// here only when its value must reach the upstream byte-exact AND is not text the model
+// reads as content:
+//   type, role, status   enums the upstream validates against a fixed set
+//   id, call_id,         references the upstream resolves by exact match to an earlier
+//   approval_request_id  item or call; a rewritten id points at nothing
+//   name, model          tool and model identifiers matched against the request
+//   encrypted_content    an opaque reasoning blob only the upstream can decrypt
+//   image_url, file_id,  media references and base64 payloads, the same fields an
+//   file_url, file_data  input_image / input_file part carries (those parts are skipped)
+// A caller-named key (a prompt variable, a JSON key inside arguments) is never matched
+// against this list.
+const RESPONSES_STRUCTURAL_KEYS = new Set([
+  "type", "role", "status", "id", "call_id", "approval_request_id", "name", "model",
+  "encrypted_content", "image_url", "file_id", "file_url", "file_data",
+]);
+
+// Objects the Responses walk skips whole: media parts (image pixels and file bytes are not
+// text) and a generated image fed back as input (its `result` is base64 image data).
+const RESPONSES_MEDIA_TYPES = new Set(["input_image", "input_file", "image_generation_call"]);
+
+/**
+ * Push a slot for every non-structural string leaf (and numeric leaf) of a Responses
+ * input item, content part or prompt variable. This walk has no allow-list of item
+ * types: an item type added to the API after this code was written is redacted the same
+ * way as a known one, because an unread field would otherwise reach the model raw.
+ * `arguments` is a JSON string in every item that carries it (function_call, mcp_call,
+ * mcp_approval_request), so it is parsed and redacted leaf-wise to stay valid JSON.
+ * Past MAX_LEAF_DEPTH the walk throws rather than stop: stopping would forward the
+ * deeper leaves unread, and a throw is a fail-closed 422 in the proxy.
+ */
+function pushResponsesLeaves(node: any, slots: Slot[], finalizers: (() => void)[], depth = 0): void {
+  if (depth > MAX_LEAF_DEPTH)
+    throw new Error(`Responses input nested deeper than ${MAX_LEAF_DEPTH} levels; refusing to forward unread fields`);
+  if (!Array.isArray(node) && RESPONSES_MEDIA_TYPES.has(node.type)) return;
+  const keys = Array.isArray(node) ? node.map((_: any, i: number) => i) : Object.keys(node);
+  for (const k of keys) {
+    if (typeof k === "string" && RESPONSES_STRUCTURAL_KEYS.has(k)) continue;
+    const v = node[k];
+    if (typeof v === "string") {
+      if (k === "arguments") pushJsonString(node, k, slots, finalizers);
+      else slots.push(slot(node, k));
+    } else if (typeof v === "number" || typeof v === "bigint") slots.push(numSlot(node, k));
+    else if (v && typeof v === "object") pushResponsesLeaves(v, slots, finalizers, depth + 1);
+  }
+}
+
 /**
  * Collect every REDACTABLE text field in a provider REQUEST body. Walks message
  * content (string or content-part array), Anthropic system blocks + tool_result
- * content, Responses `instructions` + `input` items, AND every model-visible
- * structured field that can carry user data: OpenAI message `name` + assistant
- * `tool_calls[].function.arguments`, Responses `function_call` arguments and
- * `function_call_output` output, tool definitions (descriptions + parameter
- * schemas), and Anthropic `tool_use` inputs. Only image / file parts and raw
- * provider-auth headers are intentionally left untouched.
+ * content, Responses `instructions`, `input` items and `prompt.variables`, AND every
+ * model-visible structured field that can carry user data: OpenAI message `name` +
+ * assistant `tool_calls[].function.arguments`, tool definitions (descriptions +
+ * parameter schemas), and Anthropic `tool_use` inputs. Responses input items are walked
+ * fail-closed (see pushResponsesLeaves). Only image / file parts, the structural
+ * Responses keys above and raw provider-auth headers are intentionally left untouched.
  */
 function requestTextSlots(
   body: any,
@@ -127,25 +175,38 @@ function requestTextSlots(
         if (t && t.input_schema && typeof t.input_schema === "object") pushStringLeaves(t.input_schema, slots);
       }
   } else if (dialect === "responses") {
-    // Responses: `instructions` is the system prompt; tools are flat function objects.
+    // Responses: `instructions` is the system prompt; tools are flat objects.
     if (redactSystem && typeof body.instructions === "string") slots.push(slot(body, "instructions"));
     if (Array.isArray(body.tools))
       for (const t of body.tools) {
-        if (t?.type !== "function") continue;
+        if (!t || typeof t !== "object") continue;
+        // A description is model-visible prose on every tool type that has one (function,
+        // custom); an MCP server's description is shown to the model the same way. Other
+        // tool fields are config the upstream acts on (MCP auth headers, vector store ids,
+        // a custom tool's grammar) and are left as sent.
         if (typeof t.description === "string") slots.push(slot(t, "description"));
-        if (t.parameters && typeof t.parameters === "object") pushStringLeaves(t.parameters, slots);
+        if (typeof t.server_description === "string") slots.push(slot(t, "server_description"));
+        if (t.type === "function" && t.parameters && typeof t.parameters === "object") pushStringLeaves(t.parameters, slots);
       }
-    // `input` is a string, or a list of items: messages (string or part-array content),
-    // assistant function calls (JSON-string arguments) and their outputs.
+    // A stored prompt's variables are substituted into the prompt the model reads. The
+    // variable names are the caller's own keys, so each value is taken as content.
+    const vars = body.prompt?.variables;
+    if (vars && typeof vars === "object")
+      for (const k of Object.keys(vars)) {
+        if (typeof vars[k] === "string") slots.push(slot(vars, k));
+        else if (vars[k] && typeof vars[k] === "object") pushResponsesLeaves(vars[k], slots, finalizers);
+      }
+    // `input` is a string, or a list of items. Every item is walked fail-closed: messages,
+    // tool calls and tool outputs (string or part-array `output`) of every tool kind, and
+    // any item type this code does not know.
     if (typeof body.input === "string") slots.push(slot(body, "input"));
     else if (Array.isArray(body.input))
-      for (const item of body.input) {
+      for (let i = 0; i < body.input.length; i++) {
+        const item = body.input[i];
+        if (typeof item === "string") { slots.push(slot(body.input, i)); continue; }
         if (!item || typeof item !== "object") continue;
         if (!redactSystem && (item.role === "system" || item.role === "developer")) continue;
-        if (typeof item.content === "string" || Array.isArray(item.content)) pushContent(item, "content");
-        if (item.type === "function_call" && typeof item.arguments === "string")
-          pushJsonString(item, "arguments", slots, finalizers);
-        if (item.type === "function_call_output" && typeof item.output === "string") slots.push(slot(item, "output"));
+        pushResponsesLeaves(item, slots, finalizers);
       }
     return { slots, finalizers };
   } else {

@@ -49,6 +49,7 @@ All four sets are on by default. Narrow them per tenant; a request can add sets 
   - **`strip`**: irreversible placeholders (`[EMAIL]`); nothing is restored. For when the answer never needs the real value.
   - **`off`**: passthrough, still audited as a bypass.
 - **Policy is a floor.** A caller's `X-Redact-Mode` / `X-Redact-Sets` can only make redaction stricter than the tenant or global policy; `X-Redact-Mode: off` or a narrower set list is refused with 403 and never forwarded. Allow loosening per tenant (`allowHeaderOverride`) or globally (`ALLOW_HEADER_OVERRIDE=true`).
+- **The tenant comes from the API key.** `X-Tenant` is ignored unless you set `TRUST_TENANT_HEADER=true`, and even then it can only select a tenant whose policy is at least as strict as the one the caller's key already gets (403 otherwise). It does choose the tenant name recorded in the audit log and metrics.
 - **Admin API is off until you set `ADMIN_TOKEN`.** Without it `/admin/*` returns 403 rather than running open.
 - **Tamper-evident audit.** Every request appends a hash-chained record of counts and types, never values; `npm run audit` verifies the chain.
 - **Per-tenant policy**: consistent pseudonyms, data residency (regional upstreams), durable policy store.
@@ -61,7 +62,7 @@ X-Redact-Mode: strip   →   "text":"email [EMAIL] re card [CREDIT_CARD]"
 ## What it does not do
 
 - **Names, free-text addresses, medical conditions.** There is no NER. A person's name in prose passes through. The detector is an interface (`src/detect`), so a Presidio-style sidecar can be added; it is not included.
-- **Embeddings, `count_tokens`, images.** Only the three generation endpoints (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) are redacted; other `/v1/*` paths, including `/v1/responses/{id}`, pass through verbatim. Image and file parts are left untouched.
+- **Embeddings, `count_tokens`, images.** Only the three generation endpoints (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) are redacted; other `/v1/*` paths, including `/v1/responses/{id}`, pass through verbatim. A spelling of a generation endpoint the provider can still resolve (a trailing slash, `.`/`..` segments, a different case, percent-escapes) is redacted like the endpoint itself. Image and file parts are left untouched.
 - **Token counts.** Streaming usage figures are the provider's, computed on the de-identified text.
 
 If you need one of those, say so in an issue. The scope above is deliberate, not accidental.

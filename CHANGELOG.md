@@ -15,6 +15,9 @@ image and creates the GitHub release from this file.
 
 ### Security
 
+- The Responses API request walk reads every input item. `function_call_output` output in its part-array form, `custom_tool_call` input, `custom_tool_call_output` output, `local_shell_call_output` output, `custom` tool descriptions and `prompt.variables` (string and `input_text` values) used to reach the provider unredacted. Input items are now walked fail-closed: every string leaf of every item is redacted, including item types cordon does not know, except structural fields the provider needs byte-exact (`type`, `role`, `status`, `id`, `call_id`, `approval_request_id`, `name`, `model`, `encrypted_content`) and media (`input_image` / `input_file` parts, `image_generation_call` items, `image_url` / `file_id` / `file_url` / `file_data`). An item nested more than 16 levels deep is refused (422) rather than forwarded partly unread.
+- A near-miss spelling of a generation endpoint (`/v1/chat/completions/`, `/v1/x/../responses`, `/v1/./messages`, `/v1/Chat/Completions`, `/v1/chat/completion%73`) took the verbatim passthrough and forwarded the raw body; the upstream fetch resolves dot segments, so some of these reached the real endpoint with PII intact. The path is now classified the way the upstream can read it and such a request is redacted. It is still forwarded to the path the client sent.
+- `X-Tenant` is ignored unless `TRUST_TENANT_HEADER=true`. Before, any caller could name any tenant and get its policy, including one with `mode: off` or `allowHeaderOverride`, which made "headers can only tighten" untrue by default. When the header is trusted, it may only select a tenant whose policy is at least as strict as the caller's own (mode, sets, fail mode, `redactSystem`, `consistentPseudonyms`, `allowHeaderOverride`, and identical upstream bases); anything looser is refused with 403 before the upstream is called. **Breaking** for deployments that route callers to tenants with `X-Tenant`: set `TRUST_TENANT_HEADER=true`, and move tenants with a looser or residency policy to key-derived tenants.
 - Per-request headers can no longer weaken redaction. `X-Redact-Mode` may only be as strong as or stronger than the tenant/global mode (`off` < `reversible` < `strip`), and `X-Redact-Sets` must include every policy set; `X-Redact-Mode: off` or a narrower set list is refused with 403 and the upstream is never called. Until now any caller could send `X-Redact-Mode: off` and forward raw PII. Opt back in per tenant (`"allowHeaderOverride": true`) or globally (`ALLOW_HEADER_OVERRIDE=true`). **Breaking** for clients that relied on loosening headers.
 - The admin API is disabled (403) when `ADMIN_TOKEN` is unset, instead of open to anyone who can reach the port. `ALLOW_OPEN_ADMIN=1` restores the open dev behaviour. The token is compared in constant time. **Breaking** for deployments that ran `/admin/*` without a token.
 - Upstream failures return a fixed message and a `requestId` (also `X-Request-Id`) instead of the raw exception, which could name internal hosts such as a residency upstream; the detail is logged server-side.
@@ -22,7 +25,7 @@ image and creates the GitHub release from this file.
 ### Added
 
 - `UPSTREAM_TIMEOUT_MS` (default 600000): a provider that sends no response headers in time gets a 504 instead of holding the connection forever. Once headers arrive the body, including a long stream, is not timed.
-- `TRUST_TENANT_HEADER` (default `true`): set `false` to ignore `X-Tenant` and always derive the tenant from the API key, so callers can't select another tenant's policy.
+- `TRUST_TENANT_HEADER` (default `false`): set `true` to honour `X-Tenant`, limited to tenants at least as strict as the caller's own (see Security).
 
 ## [0.3.0] - 2026-09-22
 

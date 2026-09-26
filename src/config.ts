@@ -72,9 +72,11 @@ export const config = {
   // `allowHeaderOverride`.
   allowHeaderOverride: (env.ALLOW_HEADER_OVERRIDE ?? "false") === "true",
 
-  // Honour the caller's X-Tenant header. false = ignore it and derive the tenant from the
-  // API key (TENANT_FROM_AUTH), so a caller can't pick another tenant's policy.
-  trustTenantHeader: (env.TRUST_TENANT_HEADER ?? "true") === "true",
+  // Honour the caller's X-Tenant header. Off unless set to "true": the tenant then comes
+  // from the API key (TENANT_FROM_AUTH), so a caller can't pick another tenant's policy.
+  // When on, X-Tenant may still only select a policy at least as strict as the caller's
+  // own (providers.tenantSelectionViolation).
+  trustTenantHeader: (env.TRUST_TENANT_HEADER ?? "false") === "true",
 
   // When no X-Tenant is sent, derive the tenant from the API key so different
   // callers get isolated policy / pseudonym namespaces.

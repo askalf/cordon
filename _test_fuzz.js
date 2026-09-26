@@ -341,5 +341,65 @@ prop(
   ),
 );
 
+// ---------------- Responses API walk ----------------
+
+// Every Responses input shape a client can send text in, including an item type the walk
+// has no case for (a random name, so no allow-list can pass it by accident).
+const itemTypeName = fc.stringMatching(/^[a-z]{3,12}_(item|call|call_output)$/);
+const responsesBody = (t, unknownType) => ({
+  model: "m",
+  instructions: t,
+  input: [
+    { role: "user", content: t },
+    { role: "user", content: [{ type: "input_text", text: t }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: t, annotations: [] }] },
+    { type: "function_call", call_id: "c1", name: "f", arguments: JSON.stringify({ q: t }) },
+    { type: "function_call_output", call_id: "c1", output: t },
+    { type: "function_call_output", call_id: "c1", output: [{ type: "input_text", text: t }] },
+    { type: "custom_tool_call", call_id: "c2", name: "g", input: t },
+    { type: "custom_tool_call_output", call_id: "c2", output: [{ type: "input_text", text: t }] },
+    { type: "local_shell_call_output", call_id: "c3", output: t },
+    { type: unknownType, id: "x1", body: { text: t, lines: [t] } },
+  ],
+  tools: [{ type: "function", name: "f", description: t, parameters: { example: t } }, { type: "custom", name: "g", description: t }],
+  prompt: { id: "p1", variables: { name: t, v: { type: "input_text", text: t } } },
+});
+
+prop(
+  "Responses: seeded PII never survives in any input shape, known or unknown item type",
+  fc.property(seededText, itemTypeName, fc.constantFrom("reversible", "strip"), ({ text, seeds }, unknownType, mode) => {
+    const body = responsesBody(text, unknownType);
+    const before = JSON.stringify(body);
+    const { deidBody } = applyRedaction(body, "openai", new Vault(mode), ALL, detector, true, "responses");
+    const out = JSON.stringify(deidBody);
+    return !seeds.some((s) => out.includes(s.value)) && JSON.stringify(body) === before;
+  }),
+);
+
+prop(
+  "Responses: redact→re-identify round-trips to identity on arbitrary text",
+  fc.property(cleanText, itemTypeName, (text, unknownType) => {
+    const v = new Vault("reversible");
+    const { deidBody } = applyRedaction(responsesBody(text, unknownType), "openai", v, ALL, detector, true, "responses");
+    // Each field was de-identified on its own; every one must restore to the original.
+    const deids = [deidBody.input[0].content, deidBody.input[6].input, deidBody.input[9].body.text, deidBody.prompt.variables.name];
+    return deids.every((d) => {
+      const resp = { output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: d }] }] };
+      return reidentifyBody(resp, "openai", v, "responses").output[0].content[0].text === text;
+    });
+  }),
+);
+
+prop(
+  "Responses: applyRedaction is total on arbitrary input items and never mutates its input",
+  fc.property(fc.array(fc.jsonValue({ maxDepth: 8 }), { maxLength: 5 }), fc.jsonValue({ maxDepth: 4 }), (input, variables) => {
+    const body = { model: "m", input, prompt: { id: "p", variables } };
+    const before = JSON.stringify(body);
+    const { deidBody } = applyRedaction(body, "openai", new Vault("reversible"), ALL, detector, true, "responses");
+    JSON.stringify(deidBody);
+    return JSON.stringify(body) === before;
+  }),
+);
+
 console.log(`\nfuzz: ${pass} passed, ${fail} failed (${RUNS} runs/property)`);
 process.exit(fail ? 1 : 0);
