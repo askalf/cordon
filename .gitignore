@@ -34,4 +34,3 @@ fuzz/build/
 # fuzz.yml / fuzz/run.mjs working dirs
 fuzz/corpus/
 fuzz/crashes/
-fuzz/build/
