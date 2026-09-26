@@ -15,23 +15,27 @@ import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const targets = readdirSync(dir).filter((f) => f.endsWith('.fuzz.ts')).map((f) => f.replace(/\.fuzz\.ts$/, '')).sort();
 const secs = process.env.FUZZ_SECONDS || '30';
 const corpusRoot = process.env.FUZZ_CORPUS_DIR || '';
 const artifactDir = process.env.FUZZ_ARTIFACT_DIR || '';
-const require = createRequire(import.meta.url);
-// Run both CLIs directly under `node`: no .cmd wrapper, no shell.
-const jazzerCli = require.resolve('@jazzer.js/core/dist/cli.js');
-const esbuildCli = require.resolve('esbuild/bin/esbuild');
+// Run Jazzer's JS CLI directly under `node`: no .cmd wrapper, no shell. esbuild is called through
+// its JS API (its bin/ entry is the native binary once installed, not a script).
+const jazzerCli = createRequire(import.meta.url).resolve('@jazzer.js/core/dist/cli.js');
 mkdirSync(path.join(dir, 'build'), { recursive: true });
 if (artifactDir) mkdirSync(artifactDir, { recursive: true });
 
 for (const name of targets) {
   const bundle = `fuzz/build/${name}.fuzz.js`;
-  const b = spawnSync(process.execPath, [esbuildCli, `fuzz/${name}.fuzz.ts`, '--bundle', '--format=esm', '--platform=node', '--target=node20', `--outfile=${bundle}`], { stdio: 'inherit' });
-  if (b.status !== 0) { console.error(`\n${name}: esbuild exited with ${b.status ?? b.signal}`); process.exit(b.status || 1); }
+  try {
+    await build({ entryPoints: [`fuzz/${name}.fuzz.ts`], bundle: true, format: 'esm', platform: 'node', target: 'node20', outfile: bundle, logLevel: 'warning' });
+  } catch (err) {
+    console.error(`\n${name}: esbuild failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
   // The targets are synchronous (they never return a promise), so Jazzer runs in --sync mode.
   const args = [jazzerCli, `fuzz/build/${name}.fuzz`, '--sync'];
   if (corpusRoot) {
