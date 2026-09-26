@@ -103,7 +103,11 @@ jobs:
             // 42-some-fix); a bare digit anywhere in a branch name is a
             // version or a retry counter far more often than an issue.
             const body = pr.body || '';
-            const closes = /\b(clos(e[sd]?)?|fix(e[sd])?|resolv(e[sd]?))\s+#\d+/i;
+            // Any reference form GitHub honours after a closing keyword: #N,
+            // owner/repo#N, or the full issue URL. Missing one here means a
+            // second Closes line gets appended below.
+            const closes =
+              /\b(clos(e[sd]?)?|fix(e[sd])?|resolv(e[sd]?))\s+(?:https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+|(?:[\w.-]+\/[\w.-]+)?#\d+)\b/i;
             const branch = pr.head.ref;
             const ref = branch.match(/(?:^|[/_-])(?:issue|issues|gh)[-_]?(\d+)(?:[/_-]|$)/i)
               || branch.match(/^(\d+)-/);
