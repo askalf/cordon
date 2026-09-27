@@ -291,7 +291,6 @@ const rawPost = (path, body) =>
   for (const path of ["/v1/chat/completions/", "/v1/Chat/Completions", "/v1/chat/completion%73"]) {
     await reset();
     res = await post(path, oBody(PII));
-    text = (await res.json().catch(() => ({})))?.choices?.[0]?.message?.content || "";
     sent = JSON.stringify(await calls());
     ok(`near-miss ${path}: upstream NEVER saw raw PII`, !sent.includes("john@acme.com") && !sent.includes("4012888888881881"), sent.slice(0, 200));
     ok(`near-miss ${path}: redacted (X-Redacted >= 2)`, Number(res.headers.get("x-redacted")) >= 2, res.headers.get("x-redacted"));
