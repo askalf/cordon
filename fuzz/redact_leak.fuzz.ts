@@ -24,6 +24,7 @@ import { detector } from '../src/detect/index';
 import { applyRedaction } from '../src/redact/apply';
 import { reidentifyBody } from '../src/redact/reidentify';
 import { Vault } from '../src/redact/vault';
+import { allLeafText } from './leaf-text';
 import type { Dialect, Provider, RedactMode, RedactSet } from '../src/types';
 
 const ALL_SETS: RedactSet[] = ['pii', 'phi', 'pci', 'secrets'];
@@ -33,21 +34,6 @@ const MODES: RedactMode[] = ['reversible', 'strip'];
 function fields(text: string): string[] {
   const parts = text.split('\u0000');
   return parts.length >= 2 ? parts : [text, text.slice(Math.floor(text.length / 2))];
-}
-
-/**
- * Every string/number leaf of a body, joined. Comparing leaves directly (rather
- * than JSON.stringify output) keeps the count exact: JSON escaping would rewrite
- * quotes, backslashes and control characters, so a value containing them would
- * silently never be found and the check would pass vacuously.
- */
-function allLeafText(node: any, out: string[] = [], depth = 0): string[] {
-  if (depth > 20 || node == null) return out;
-  if (typeof node === 'string') out.push(node);
-  else if (typeof node === 'number' || typeof node === 'bigint') out.push(String(node));
-  else if (typeof node === 'object')
-    for (const k of Object.keys(node)) allLeafText((node as any)[k], out, depth + 1);
-  return out;
 }
 
 /** Occurrences of `needle` in `hay`, INCLUDING overlapping ones — repeated text
@@ -142,7 +128,7 @@ export function fuzz(data: Buffer): void {
           tools: [{ function: { name: 'f', description: b, parameters: { example: c } } }],
         };
 
-  const beforeText = allLeafText(body).join('\u0000');
+  const beforeText = allLeafText(body, dialect).join('\u0000');
   const vault = new Vault(mode);
   const { deidBody, spans } = applyRedaction(body, provider, vault, ALL_SETS, detector, true, dialect);
 
@@ -200,7 +186,7 @@ export function fuzz(data: Buffer): void {
   // This still catches the real fail-open mechanism — stale or overlapping
   // offsets making the right-to-left splice miss one of several occurrences —
   // because that shows up as a count that failed to drop by the claimed amount.
-  const afterText = allLeafText(deidBody).join('\u0000');
+  const afterText = allLeafText(deidBody, dialect).join('\u0000');
   const claimed = new Map<string, number>();
   for (const s of spans) claimed.set(s.value, (claimed.get(s.value) ?? 0) + 1);
 
