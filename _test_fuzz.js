@@ -403,3 +403,6 @@ prop(
 
 console.log(`\nfuzz: ${pass} passed, ${fail} failed (${RUNS} runs/property)`);
 process.exit(fail ? 1 : 0);
+
+// Deterministic regressions for the coverage-guided redaction leak oracle.
+import './fuzz/leaf-text.test.mjs';
