@@ -21,7 +21,7 @@ concurrency:
 jobs:
   # docker-build needs a Docker daemon, and cordon-exec has none (Docker on our host is root). So the
   # image job runs on GitHub's runners, on every push to the default branch and on a PR that
-  # changes what the image is built from: the Dockerfile, .dockerignore, the package files,
+  # changes what the image is built from: the Dockerfile, .dockerignore or Dockerfile.dockerignore, the package files,
   # tsconfig.json, src/, or this file. The required check docker-build runs on our runner and passes only when that
   # job passed or was not owed, so a PR that changes none of them never waits on GitHub's queue.
   docker-build-inputs:
@@ -57,7 +57,7 @@ jobs:
           while IFS= read -r -d '' f; do
             printf '%s\n' "$f"
             case "$f" in
-              Dockerfile|.dockerignore|package.json|package-lock.json|tsconfig.json|src/*|.github/workflows/build.yml)
+              Dockerfile|.dockerignore|Dockerfile.dockerignore|package.json|package-lock.json|tsconfig.json|src/*|.github/workflows/build.yml)
                 changed=true ;;
             esac
           done < "$list"
