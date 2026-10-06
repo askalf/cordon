@@ -19,7 +19,54 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  docker-build:
+  # docker-build needs a Docker daemon, and cordon-exec has none (Docker on our host is root). So the
+  # image job runs on GitHub's runners, on every push to the default branch and on a PR that
+  # changes what the image is built from: the Dockerfile, .dockerignore, the package files,
+  # tsconfig.json, src/, or this file. The required check docker-build runs on our runner and passes only when that
+  # job passed or was not owed, so a PR that changes none of them never waits on GitHub's queue.
+  docker-build-inputs:
+    runs-on: ${{ github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'ubuntu-latest' || fromJSON('["self-hosted","cordon-exec"]') }}
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: diff
+        name: does the image depend on a changed file
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # _test_build_inputs.mjs runs this script against a scratch repository.
+        run: |
+          set -eo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          # -z gives each path whole and NUL-terminated. Without it Git quotes a path holding a
+          # non-ASCII byte, a tab or a newline ("src/caf\303\251.ts"), and the quoted form
+          # would not match src/*. --no-renames lists a moved file at both its old and its new
+          # path, so moving a file out of src/ still counts as a change to src/.
+          list=$(mktemp)
+          git diff --no-renames --name-only -z "$BASE_SHA" HEAD > "$list"
+          changed=false
+          while IFS= read -r -d '' f; do
+            printf '%s\n' "$f"
+            case "$f" in
+              Dockerfile|.dockerignore|package.json|package-lock.json|tsconfig.json|src/*|.github/workflows/build.yml)
+                changed=true ;;
+            esac
+          done < "$list"
+          rm -f "$list"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+  docker-build-image:
+    needs: docker-build-inputs
+    if: needs.docker-build-inputs.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -67,3 +114,19 @@ jobs:
       - name: Teardown
         if: always()
         run: docker rm -f cordon || true
+
+  docker-build:
+    needs: [docker-build-inputs, docker-build-image]
+    if: always()
+    runs-on: ${{ github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'ubuntu-latest' || fromJSON('["self-hosted","cordon-exec"]') }}
+    timeout-minutes: 5
+    steps:
+      - name: the image job passed, or no change owed one
+        env:
+          INPUTS: ${{ needs.docker-build-inputs.result }}
+          CHANGED: ${{ needs.docker-build-inputs.outputs.changed }}
+          IMAGE: ${{ needs.docker-build-image.result }}
+        run: |
+          echo "docker-build-inputs: $INPUTS (changed=$CHANGED), docker-build-image: $IMAGE"
+          test "$INPUTS" = success
+          if [ "$CHANGED" = true ]; then test "$IMAGE" = success; fi
