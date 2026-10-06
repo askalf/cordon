@@ -49,9 +49,10 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           # -z gives each path whole and NUL-terminated. Without it Git quotes a path holding a
           # non-ASCII byte, a tab or a newline ("src/caf\303\251.ts"), and the quoted form
-          # would not match src/*.
+          # would not match src/*. --no-renames lists a moved file at both its old and its new
+          # path, so moving a file out of src/ still counts as a change to src/.
           list=$(mktemp)
-          git diff --name-only -z "$BASE_SHA" HEAD > "$list"
+          git diff --no-renames --name-only -z "$BASE_SHA" HEAD > "$list"
           changed=false
           while IFS= read -r -d '' f; do
             printf '%s\n' "$f"
