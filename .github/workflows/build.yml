@@ -25,7 +25,7 @@ jobs:
   # tsconfig.json, src/, or this file. The required check docker-build runs on our runner and passes only when that
   # job passed or was not owed, so a PR that changes none of them never waits on GitHub's queue.
   docker-build-inputs:
-    runs-on: ${{ github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'ubuntu-latest' || fromJSON('["self-hosted","cordon-exec"]') }}
+    runs-on: ${{ (github.repository != 'askalf/cordon' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","cordon-exec"]') }}
     timeout-minutes: 5
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
@@ -118,7 +118,7 @@ jobs:
   docker-build:
     needs: [docker-build-inputs, docker-build-image]
     if: always()
-    runs-on: ${{ github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'ubuntu-latest' || fromJSON('["self-hosted","cordon-exec"]') }}
+    runs-on: ${{ (github.repository != 'askalf/cordon' || github.event.pull_request && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && 'ubuntu-latest' || fromJSON('["self-hosted","cordon-exec"]') }}
     timeout-minutes: 5
     steps:
       - name: the image job passed, or no change owed one
