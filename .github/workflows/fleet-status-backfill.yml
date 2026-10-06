@@ -11,7 +11,8 @@ jobs:
   backfill:
     # Our own script on its own trigger, never PR code: on our runner, so GitHub's hosted
     # queue going down does not stop it.
-    runs-on: [self-hosted, cordon-exec]
+    # A fork repository has no cordon-exec runners, so there it runs on GitHub's.
+    runs-on: ${{ github.repository == 'askalf/cordon' && fromJSON('["self-hosted","cordon-exec"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
