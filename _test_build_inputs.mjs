@@ -38,20 +38,28 @@ const git = (cwd, ...args) => execFileSync('git', args, {
   env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' },
 }).trim();
 
-// A base commit, then a commit adding `files`; origin points at the repository itself so the
-// script's fetch of the base sha resolves. Returns the script's changed= output.
-function decide(files, event = 'pull_request') {
+const put = (dir, f, body) => {
+  mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+  writeFileSync(path.join(dir, f), body);
+};
+
+// A base commit holding README.md and `existing`, then a commit that adds `files` and makes each
+// [from, to] in `moves` with git mv. origin points at the repository itself so the script's fetch
+// of the base sha resolves. Returns the script's changed= output.
+function decide(files, { event = 'pull_request', existing = [], moves = [] } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'cordon-build-inputs-'));
   try {
     git(dir, 'init', '-q', '-b', 'main');
     git(dir, 'config', 'core.quotePath', 'true');
-    writeFileSync(path.join(dir, 'README.md'), 'base\n');
+    put(dir, 'README.md', 'base\n');
+    for (const f of existing) put(dir, f, `export const body = ${JSON.stringify(f)};\n`);
     git(dir, 'add', '-A');
     git(dir, 'commit', '-qm', 'base');
     const base = git(dir, 'rev-parse', 'HEAD');
-    for (const f of files) {
-      mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
-      writeFileSync(path.join(dir, f), 'x\n');
+    for (const f of files) put(dir, f, 'x\n');
+    for (const [from, to] of moves) {
+      mkdirSync(path.dirname(path.join(dir, to)), { recursive: true });
+      git(dir, 'mv', from, to);
     }
     git(dir, 'add', '-A');
     git(dir, 'commit', '-qm', 'change');
@@ -89,9 +97,18 @@ test('each image input owes the build', () => {
     assert.equal(decide([f]), 'true', f);
 });
 
+test('moving an unchanged file out of src/ owes the image build', () => {
+  assert.equal(decide([], { existing: ['src/a.ts'], moves: [['src/a.ts', 'docs/a.ts']] }), 'true');
+});
+
+test('moving an unchanged file into src/ owes the image build', () => {
+  assert.equal(decide([], { existing: ['docs/a.ts'], moves: [['docs/a.ts', 'src/a.ts']] }), 'true');
+});
+
 test('a docs-only change owes nothing, non-ASCII name or not', () => {
   assert.equal(decide(['docs/guide.md', 'README.md']), 'false');
   assert.equal(decide(['docs/café.md']), 'false');
+  assert.equal(decide([], { existing: ['docs/a.md'], moves: [['docs/a.md', 'docs/b.md']] }), 'false');
 });
 
 test('a path that only contains an input name is not one', () => {
@@ -99,5 +116,5 @@ test('a path that only contains an input name is not one', () => {
 });
 
 test('a push always owes the image build', () => {
-  assert.equal(decide(['docs/guide.md'], 'push'), 'true');
+  assert.equal(decide(['docs/guide.md'], { event: 'push' }), 'true');
 });
