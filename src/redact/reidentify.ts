@@ -30,7 +30,14 @@ export const isMintedPlaceholder = (token: string): boolean =>
 /** A placeholder inside JSON text. In valid JSON `<` only occurs inside a string literal,
  *  and a serializer may write it as `<` (and `>` as `>`), so both spellings are
  *  one placeholder. */
-const JSON_PLACEHOLDER_RE = /(?:<|\\u003[cC])([A-Z][A-Z0-9_]*)(?:>|\\u003[eE])/g;
+// A name character may itself be written as a JSON escape (\u0041 for A): only the
+// escapes of [0-9A-Z_] count, so an escaped < or > never becomes part of a name.
+const NAME_ESCAPE = String.raw`\\u00(?:3[0-9]|4[1-9A-Fa-f]|5[0-9Aa]|5[Ff])`;
+const JSON_PLACEHOLDER_RE = new RegExp(String.raw`(?:<|\\u003[cC])((?:[A-Z0-9_]|${NAME_ESCAPE})+)(?:>|\\u003[eE])`, "g");
+/** A placeholder name as the vault spells it, its JSON escapes decoded. */
+const decodeName = (raw: string): string => raw.replace(/\\u00([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+/** The strip form of a placeholder: its type without the per-request suffix. */
+const stripForm = (name: string): string => `[${name.replace(/_(?:[0-9A-F]{6}_\d+|[0-9A-F]{8})$/, "")}]`;
 const TEXT_PLACEHOLDER_RE = /<([A-Z][A-Z0-9_]*)>/g;
 
 /** A real value as it must appear INSIDE a JSON string literal: JSON.stringify's own
@@ -120,6 +127,16 @@ export class TopKeyTracker {
   }
 }
 
+/** What a call's arguments did that must stop it: placeholders this vault cannot resolve
+ *  (counted), and the first reason the arguments could not be restored safely at all. */
+export interface ArgStats {
+  unresolved: number;
+  rejected?: string;
+}
+
+/** Whether a call must not be delivered. */
+export const argsFailed = (s: ArgStats): boolean => s.unresolved > 0 || s.rejected !== undefined;
+
 /** What restoring one tool call's arguments needs. One per call, shared by its fragments. */
 export interface ArgContext {
   vault: Vault;
@@ -130,22 +147,32 @@ export interface ArgContext {
   allowKey: (key: string | undefined) => boolean;
   /** Tracks the top-level key across fragments; JSON arguments only. */
   keys?: TopKeyTracker;
-  /** Minted-shape placeholders this vault cannot resolve, counted for the caller. */
-  stats: { unresolved: number };
+  /** The run of backslashes that ended the text restored so far: whether the next
+   *  `<` is an escape (an even run before it) or text (an odd run escapes it). */
+  backslashes?: number;
+  stats: ArgStats;
 }
 
 export function argContext(
   vault: Vault,
   json: boolean,
   tool: string | undefined,
-  stats: { unresolved: number },
+  stats: ArgStats,
   policy: RestorePolicy = restorePolicy,
 ): ArgContext {
-  return { vault, json, allowKey: policy.forTool(tool), keys: json ? new TopKeyTracker() : undefined, stats };
+  return { vault, json, allowKey: policy.forTool(tool), keys: json ? new TopKeyTracker() : undefined, backslashes: 0, stats };
 }
 
+const trailingBackslashes = (s: string): number => {
+  let n = 0;
+  for (let i = s.length - 1; i >= 0 && s[i] === "\\"; i--) n++;
+  return n;
+};
+
 /** Restore the placeholders in one run of argument text (a whole document, or the part of
- *  a stream that cannot still be forming a placeholder). */
+ *  a stream that cannot still be forming a placeholder). In JSON text a `<` only opens
+ *  a placeholder when its backslash is not itself escaped: `\\u003c` is a backslash and
+ *  the letters u003c, so the count of backslashes before it (across fragments) decides. */
 export function restoreArgs(text: string, c: ArgContext): string {
   const re = c.json ? JSON_PLACEHOLDER_RE : TEXT_PLACEHOLDER_RE;
   re.lastIndex = 0;
@@ -153,10 +180,24 @@ export function restoreArgs(text: string, c: ArgContext): string {
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
+    if (c.json && m[0][0] === "\\") {
+      const head = text.slice(0, m.index);
+      let run = trailingBackslashes(head);
+      if (run === head.length) run += c.backslashes ?? 0;
+      if (run % 2 === 1) {
+        re.lastIndex = m.index + 1;
+        continue;
+      }
+    }
     const before = text.slice(last, m.index);
     c.keys?.feed(before);
     out += before;
-    const token = `<${m[1]}>`;
+    const name = c.json ? decodeName(m[1]) : m[1];
+    if (!/^[A-Z][A-Z0-9_]*$/.test(name)) {
+      re.lastIndex = m.index + 1;
+      continue;
+    }
+    const token = `<${name}>`;
     const value = c.vault.lookup(token);
     if (value === undefined) {
       if (isMintedPlaceholder(token)) c.stats.unresolved++;
@@ -164,36 +205,70 @@ export function restoreArgs(text: string, c: ArgContext): string {
     } else if (c.allowKey(c.keys?.key)) {
       out += c.json ? jsonFragment(value) : value;
     } else {
-      out += m[0];
+      // Withheld: the tool gets the strip form ([EMAIL]), not the minted token, which a
+      // later turn would carry back as a placeholder this vault no longer knows.
+      out += stripForm(name);
     }
     c.keys?.feed(m[0]);
     last = m.index + m[0].length;
   }
   const rest = text.slice(last);
   c.keys?.feed(rest);
+  if (c.json) {
+    const t = trailingBackslashes(text);
+    c.backslashes = t === text.length ? (c.backslashes ?? 0) + t : t;
+  }
   return out + rest;
 }
 
-/** Restore the string leaves of an already-parsed argument object (Anthropic
- *  `tool_use.input`), each judged by the top-level key it sits under. Returns whether
- *  anything changed. */
+/** How deep an argument object may nest before it is refused rather than walked. */
+export const MAX_ARG_DEPTH = 64;
+
+/**
+ * Restore an already-parsed argument object (Anthropic `tool_use.input`) the way the JSON
+ * text path restores the same document: string values and property names alike, each
+ * judged by the top-level key it sits under (a top-level property name by none, as a key
+ * string in JSON text is). Two names that restore to the same name, or nesting deeper than
+ * MAX_ARG_DEPTH, reject the call rather than drop or overwrite anything. Iterative, so a
+ * deep object cannot exhaust the stack. Returns whether anything changed.
+ */
 export function restoreArgObject(obj: any, c: ArgContext): boolean {
   let changed = false;
-  const walk = (node: any, key: string | undefined, depth: number) => {
-    if (depth > 16 || !node || typeof node !== "object") return;
+  const one = (s: string, top: string | undefined) =>
+    restoreArgs(s, { ...c, json: false, keys: undefined, allowKey: () => c.allowKey(top) });
+  const stack: Array<{ node: any; top: string | undefined; depth: number }> = [];
+  if (obj && typeof obj === "object") stack.push({ node: obj, top: undefined, depth: 0 });
+  while (stack.length) {
+    const { node, top, depth } = stack.pop()!;
+    if (depth > MAX_ARG_DEPTH) {
+      c.stats.rejected ??= `the arguments nest deeper than ${MAX_ARG_DEPTH} levels`;
+      return changed;
+    }
+    if (!Array.isArray(node)) {
+      const entries = Object.keys(node).map((k) => [k, node[k]] as [string, any]);
+      const names = entries.map(([k]) => one(k, depth === 0 ? undefined : top));
+      if (names.some((n, i) => n !== entries[i][0])) {
+        if (new Set(names).size !== names.length) {
+          c.stats.rejected ??= "two argument names restore to the same name";
+          return changed;
+        }
+        for (const [k] of entries) delete node[k];
+        entries.forEach(([, v], i) => Object.defineProperty(node, names[i], { value: v, writable: true, enumerable: true, configurable: true }));
+        changed = true;
+      }
+    }
     for (const k of Array.isArray(node) ? node.map((_: any, i: number) => i) : Object.keys(node)) {
       const v = node[k];
-      const top = depth === 0 && !Array.isArray(node) ? String(k) : key;
+      const below = depth === 0 && !Array.isArray(node) ? String(k) : top;
       if (typeof v === "string") {
-        const r = restoreArgs(v, { ...c, json: false, keys: undefined, allowKey: () => c.allowKey(top) });
+        const r = one(v, below);
         if (r !== v) {
           node[k] = r;
           changed = true;
         }
-      } else if (v && typeof v === "object") walk(v, top, depth + 1);
+      } else if (v && typeof v === "object") stack.push({ node: v, top: below, depth: depth + 1 });
     }
-  };
-  walk(obj, undefined, 0);
+  }
   return changed;
 }
 
@@ -215,20 +290,23 @@ function isForming(tail: string, json: boolean): boolean {
     if (tail.slice(0, 6).toLowerCase() !== "\\u003c") return false;
     rest = tail.slice(6);
   } else return false;
-  return json ? /^[A-Z0-9_]*(?:\\(?:u(?:0(?:0(?:3)?)?)?)?)?$/.test(rest) : /^[A-Z0-9_]*$/.test(rest);
+  return json
+    ? new RegExp(String.raw`^(?:[A-Z0-9_]|${NAME_ESCAPE})*(?:\\(?:u(?:0(?:0(?:[345])?)?)?)?)?$`).test(rest)
+    : /^[A-Z0-9_]*$/.test(rest);
 }
 
-/** A forming tail as the vault spells it: `<` and the name so far, open and partial close
- *  stripped. */
-function canonicalPartial(tail: string): string {
+/** The name part of a forming tail, open and partial close stripped. */
+function formingName(tail: string): string {
   const rest = tail.startsWith("<") ? tail.slice(1) : tail.slice(6);
-  return "<" + rest.replace(/\\.*$/, "");
+  return decodeName(rest.replace(/\\(?:u(?:0(?:0(?:[345])?)?)?)?$/, ""));
 }
 
 /**
  * A tool call's arguments as they stream, fragment by fragment. Like StreamReidentifier,
  * the part that may still be growing into a placeholder is held until it completes; unlike
- * it, values are restored by restoreArgs (policy, unresolved count, JSON escaping).
+ * it, values are restored by restoreArgs (policy, unresolved count, JSON escaping), and a
+ * stream that ends inside a placeholder is rejected rather than guessed at: the streamed
+ * arguments and the whole-document restore of the same text must agree.
  */
 export class ArgStream {
   private buf = "";
@@ -243,19 +321,37 @@ export class ArgStream {
     return restoreArgs(flush, this.c);
   }
 
-  /** The held remainder at the end of the call. A tail cut off mid-placeholder resolves by
-   *  unique prefix, as text does, so the runner is not handed a partial token. */
   end(): string {
     const tail = this.buf;
     this.buf = "";
     const p = formingStart(tail, this.c.json);
     if (p === -1) return restoreArgs(tail, this.c);
-    let out = restoreArgs(tail.slice(0, p), this.c);
+    const out = restoreArgs(tail.slice(0, p), this.c);
     const forming = tail.slice(p);
-    const real = this.c.vault.resolvePartial(canonicalPartial(forming));
-    out += real !== undefined && this.c.allowKey(this.c.keys?.key) ? (this.c.json ? jsonFragment(real) : real) : forming;
+    if (formingName(forming)) {
+      this.c.stats.unresolved++;
+      this.c.stats.rejected ??= "the arguments end inside a placeholder";
+    }
     this.c.keys?.feed(forming);
-    return out;
+    return out + forming;
+  }
+}
+
+/**
+ * A call's arguments held whole until the call ends, for when the restore policy depends
+ * on a tool name that may still be arriving in fragments (`send`, then `_email`): nothing
+ * is restored, and nothing emitted, under a name that is not final.
+ */
+export class DeferredArgs {
+  private buf = "";
+  constructor(private readonly make: () => ArgContext) {}
+  push(delta: string): string {
+    this.buf += delta;
+    return "";
+  }
+  end(): string {
+    const a = new ArgStream(this.make());
+    return a.push(this.buf) + a.end();
   }
 }
 
@@ -272,7 +368,7 @@ export function reidentifyBody(
   provider: Provider,
   vault: Vault,
   dialect?: Dialect,
-  stats: { unresolved: number } = { unresolved: 0 },
+  stats: ArgStats = { unresolved: 0 },
   policy: RestorePolicy = restorePolicy,
 ): any {
   const out = clone(body);
@@ -329,6 +425,9 @@ export class StreamReidentifier {
   }
 }
 
-/** What the caller is told when tool-call arguments hold placeholders it cannot restore. */
-export const unresolvedMessage = (n: number): string =>
-  `cordon: the model's tool-call arguments hold ${n} placeholder${n === 1 ? "" : "s"} this request did not mint and cannot restore; the call was not delivered`;
+/** What the caller is told when a call's arguments cannot be delivered. */
+export function failMessage(s: ArgStats): string {
+  if (s.unresolved)
+    return `cordon: the model's tool-call arguments hold ${s.unresolved} placeholder${s.unresolved === 1 ? "" : "s"} this request did not mint and cannot restore; the call was not delivered`;
+  return `cordon: the model's tool-call arguments could not be restored safely (${s.rejected}); the call was not delivered`;
+}

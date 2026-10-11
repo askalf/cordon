@@ -417,18 +417,22 @@ function validateSSE(sse) {
     ok("stream/chat-choices: the first choice's text is intact", txt.includes('"content":"ok"'));
   }
 
-  // A stream that stops inside a placeholder: the held argument tail is still flushed, resolved.
+  // A stream that stops inside a placeholder in the arguments: the call is rejected with
+  // the dialect's error frame, never completed by guessing which placeholder it was.
   await reset();
   txt = await (await post("/v1/chat/completions", chatTool("ARGTRUNC "))).text();
   {
-    const args = chatArgs(txt);
-    ok("stream/chat-truncated: the held argument tail is flushed and resolved", args.includes("john@acme.com") && !args.includes("<EMA"), args);
+    const f = frames(txt);
+    ok("stream/chat-truncated: ends with an error frame", f.at(-1)?.j?.error?.code === "cordon_unresolved_placeholder", JSON.stringify(f.at(-1)?.j));
+    ok("stream/chat-truncated: no value is guessed into the arguments", !chatArgs(txt).includes("john@acme.com"));
   }
   await reset();
   txt = await (await post("/v1/messages", aBody("TOOLCALL ARGTRUNC " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }))).text();
   {
+    const f = frames(txt);
     const args = joinFrames(txt, (j) => (j.type === "content_block_delta" && j.delta?.type === "input_json_delta" ? j.delta.partial_json : ""));
-    ok("stream/anthropic-truncated: the held input tail is flushed and resolved", args.includes("john@acme.com") && !args.includes("<EMA"), args);
+    ok("stream/anthropic-truncated: ends with an error frame", f.at(-1)?.j?.type === "error" && f.at(-1)?.ev === "error", JSON.stringify(f.at(-1)?.j));
+    ok("stream/anthropic-truncated: no value is guessed into the input", !args.includes("john@acme.com"));
   }
   await reset();
   txt = await (await post("/v1/messages", aBody("TOOLCALL STARTINPUT " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }))).text();
@@ -460,8 +464,47 @@ function validateSSE(sse) {
     const f = frames(txt);
     const joined = f.filter((x) => x.j?.type === "response.function_call_arguments.delta").map((x) => x.j.delta).join("");
     const p = parsesTo(joined);
-    ok("stream/policy: echo.text restored, echo.note withheld", p?.text?.includes("john@acme.com") && /<EMAIL_/.test(p?.note ?? ""), joined);
+    ok("stream/policy: echo.text restored, echo.note withheld as [EMAIL]", p?.text?.includes("john@acme.com") && (p?.note ?? "").includes("[EMAIL]") && !/<EMAIL_/.test(p?.note ?? ""), joined);
     ok("stream/policy: a withheld placeholder does not end the stream", !f.some((x) => x.j?.type === "error"));
+
+    // A name streamed in fragments: "send" is on the list, "send_email" is not. The policy
+    // must apply to the whole name, never to the first fragment.
+    for (const legacy of [false, true]) {
+      const label = legacy ? "function_call" : "tool_calls";
+      const tools = legacy ? { functions: [{ ...TOOL[0], name: "send_email" }] } : { tools: [{ type: "function", function: { ...TOOL[0], name: "send_email" } }] };
+      await reset();
+      txt = await (await post4("/v1/chat/completions", oBody("TOOLCALL NAMESPLIT " + (legacy ? "LEGACY " : "") + PII, { stream: true, ...tools }))).text();
+      const args = chatArgs(txt);
+      ok(`stream/policy/${label}: send_email (streamed as send + _email) gets nothing back`, args.length > 0 && !args.includes("john@acme.com") && args.includes("[EMAIL]"), args);
+      ok(`stream/policy/${label}: and the call still completes`, !!parsesTo(args) && !frames(txt).some((x) => x.j?.error));
+      const toolsSend = legacy ? { functions: [{ ...TOOL[0], name: "send" }] } : { tools: [{ type: "function", function: { ...TOOL[0], name: "send" } }] };
+      await reset();
+      txt = await (await post4("/v1/chat/completions", oBody("TOOLCALL " + (legacy ? "LEGACY " : "") + PII, { stream: true, ...toolsSend }))).text();
+      ok(`stream/policy/${label}: send itself, on the list, is restored`, parsesTo(chatArgs(txt))?.text?.includes("john@acme.com"), chatArgs(txt));
+    }
+  }
+
+  // Responses: every frame cordon writes, its own flushes included, has a unique and
+  // increasing sequence_number.
+  await reset();
+  txt = await (await post("/v1/responses", respTool())).text();
+  {
+    const seqs = frames(txt).map((x) => x.j?.sequence_number).filter((n) => typeof n === "number");
+    ok("stream/sequence: sequence_numbers are unique and increasing", seqs.length > 3 && seqs.every((n, i) => i === 0 || n === seqs[i - 1] + 1), JSON.stringify(seqs));
+  }
+  await reset();
+  txt = await (await post("/v1/responses", rBody("INTERLEAVE " + PII))).text();
+  {
+    const seqs = frames(txt).map((x) => x.j?.sequence_number).filter((n) => typeof n === "number");
+    ok("stream/sequence: and with interleaved parts flushed at their done frames", seqs.every((n, i) => i === 0 || n === seqs[i - 1] + 1), JSON.stringify(seqs));
+  }
+  // Messages: an input given whole at content_block_start is restored on the frame's own
+  // text, so an integer beyond 2^53 keeps its digits.
+  await reset();
+  txt = await (await post("/v1/messages", aBody("TOOLCALL STARTINPUT " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }))).text();
+  {
+    const start = frames(txt).find((x) => x.j?.type === "content_block_start" && x.j.content_block?.type === "tool_use");
+    ok("stream/anthropic-start: restored in place, the big integer's digits intact", start?.raw?.includes('"n":9007199254740993') && start.raw.includes("john@acme.com"), start?.raw);
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

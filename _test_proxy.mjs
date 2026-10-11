@@ -519,19 +519,19 @@ const rawPost = (path, body) =>
     const p = parse(a);
     ok("restore policy: 200 when a placeholder is withheld by policy", res.status === 200, String(res.status));
     ok("restore policy: echo.text is restored", p?.text?.includes("john@acme.com"), a);
-    ok("restore policy: echo.note keeps its placeholder", /<EMAIL_[0-9A-F]{6}_1>/.test(p?.note ?? "") && !p.note.includes("john@acme.com"), a);
+    ok("restore policy: echo.note gets the strip form, not the minted token", p?.note?.includes("[EMAIL]") && !/<EMAIL_/.test(p.note) && !p.note.includes("john@acme.com"), a);
   }
   await reset();
   res = await post4("/v1/responses", rBody("TOOLCALL " + PII, { tools: [{ ...TOOL[0], name: "other" }] }));
   {
     const a = argsOf(await res.json());
-    ok("restore policy: a tool not on the list gets nothing back", res.status === 200 && typeof a === "string" && !a.includes("john@acme.com") && a.includes("<EMAIL_"), a);
+    ok("restore policy: a tool not on the list gets nothing back", res.status === 200 && typeof a === "string" && !a.includes("john@acme.com") && a.includes("[EMAIL]") && !a.includes("<EMAIL_"), a);
   }
   await reset();
   res = await post4("/v1/messages", aBody("TOOLCALL " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }));
   {
     const tu = (await res.json())?.content?.find((b) => b.type === "tool_use");
-    ok("restore policy (Messages): text restored, note withheld", tu?.input?.text?.includes("john@acme.com") && /<EMAIL_/.test(tu?.input?.note ?? ""), JSON.stringify(tu?.input));
+    ok("restore policy (Messages): text restored, note withheld as [EMAIL]", tu?.input?.text?.includes("john@acme.com") && (tu?.input?.note ?? "").includes("[EMAIL]"), JSON.stringify(tu?.input));
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

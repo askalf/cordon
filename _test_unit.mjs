@@ -4,7 +4,7 @@ import { runAll, detector } from "./src/detect/index.ts";
 import { luhn, ibanMod97, abaRouting, ssnValid } from "./src/detect/validators.ts";
 import { Vault } from "./src/redact/vault.ts";
 import { applyRedaction, tally } from "./src/redact/apply.ts";
-import { reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
+import { reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, restoreArgObject, DeferredArgs, MAX_ARG_DEPTH, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
 import { parseRestoreTools } from "./src/redact/restorePolicy.ts";
 import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN, parseTimeoutMs, DEFAULT_UPSTREAM_TIMEOUT_MS, MAX_TIMEOUT_MS } from "./src/config.ts";
 import { setPolicy, getPolicy, allPolicies, save as savePolicy, load as loadPolicy } from "./src/policy.ts";
@@ -442,7 +442,7 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   const pol = restoreArgs(`{"text":"${em}","note":"${em}"}`, argContext(v, true, "echo", st3, p));
   let pp = null;
   try { pp = JSON.parse(pol); } catch {}
-  ok("restore policy: the allowed field is restored, the other keeps its placeholder", pp?.text === "john@acme.com" && pp?.note === em, pol);
+  ok("restore policy: the allowed field is restored, the other gets the strip form", pp?.text === "john@acme.com" && pp?.note === "[EMAIL]", pol);
   ok("restore policy: a placeholder withheld by policy is not an unresolved one", st3.unresolved === 0);
   const ps = new ArgStream(argContext(v, true, "echo", { unresolved: 0 }, p));
   let pstream = "";
@@ -469,6 +469,73 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   const fst = { unresolved: 0 };
   reidentifyBody(body, "openai", fresh, "responses", fst);
   ok("reidentifyBody: counted even when the request redacted nothing", fst.unresolved === 1);
+
+  // An escaped backslash before u003c is a backslash and the letters u003c, not a placeholder.
+  // JSON text: two backslashes (an escaped backslash), u003c, the name, then a real >.
+  const lit = `{"a":"\\\\u003c${em.slice(1, -1)}\\u003e"}`;
+  const lst = { unresolved: 0 };
+  const litOut = restoreArgs(lit, argContext(v, true, "echo", lst, ALL_TOOLS));
+  ok("args: \\u003c (an escaped backslash) is text, not a placeholder", litOut === lit && !litOut.includes("john@acme.com"), litOut);
+  const ls = new ArgStream(argContext(v, true, "echo", { unresolved: 0 }, ALL_TOOLS));
+  let litStream = "";
+  for (const ch of lit) litStream += ls.push(ch);
+  litStream += ls.end();
+  ok("args stream: the same across 1-character fragments", litStream === lit, litStream);
+
+  // A stream that ends inside a placeholder is rejected, never completed by guessing.
+  const tst = { unresolved: 0 };
+  const ts = new ArgStream(argContext(v, true, "echo", tst, ALL_TOOLS));
+  const cut = `{"a":"${em.slice(0, 5)}`;
+  const tout = ts.push(cut) + ts.end();
+  ok("args stream: a tail cut inside a placeholder is rejected and counted unresolved", tst.rejected === "the arguments end inside a placeholder" && tst.unresolved === 1, JSON.stringify(tst));
+  ok("args stream: and nothing is guessed into it", tout === cut && !tout.includes("john@acme.com"), tout);
+
+  // A parsed input: property names are restored like values, collisions and deep nesting rejected.
+  const o1 = { [em]: "x", nested: { [em]: em } };
+  const ost = { unresolved: 0 };
+  restoreArgObject(o1, argContext(v, false, "echo", ost, ALL_TOOLS));
+  ok("args object: a top-level property name is restored", Object.keys(o1)[0] === "john@acme.com" && !ost.rejected, JSON.stringify(o1));
+  ok("args object: nested names and values are restored", o1.nested["john@acme.com"] === "john@acme.com");
+  const o2 = { [em]: 1, "john@acme.com": 2 };
+  const cst = { unresolved: 0 };
+  restoreArgObject(o2, argContext(v, false, "echo", cst, ALL_TOOLS));
+  ok("args object: two names restoring to one name are rejected", cst.rejected === "two argument names restore to the same name", String(cst.rejected));
+  let deep = { leaf: em };
+  for (let i = 0; i < MAX_ARG_DEPTH + 5; i++) deep = { d: deep };
+  const dst = { unresolved: 0 };
+  restoreArgObject(deep, argContext(v, false, "echo", dst, ALL_TOOLS));
+  ok("args object: nesting past the limit is rejected, not cut silently", /deeper than/.test(dst.rejected ?? ""), String(dst.rejected));
+  let wide = {};
+  for (let i = 0; i < 20000; i++) wide = { d: wide };
+  const wst = { unresolved: 0 };
+  let threw = false;
+  try { restoreArgObject(wide, argContext(v, false, "echo", wst, ALL_TOOLS)); } catch { threw = true; }
+  ok("args object: a very deep object is refused without exhausting the stack", !threw && !!wst.rejected);
+
+  // A call whose name may still be arriving: nothing restored or emitted until it ends.
+  const names = { k: "send" };
+  const sendOnly = parseRestoreTools("send");
+  const dfa = new DeferredArgs(() => argContext(v, true, names.k, { unresolved: 0 }, sendOnly));
+  const dpush = dfa.push(`{"to":"${em}"}`);
+  names.k = "send_email";
+  const dend = dfa.end();
+  ok("deferred args: nothing emitted before the call ends", dpush === "");
+  ok("deferred args: the final name decides (send_email is not on the list)", dend === '{"to":"[EMAIL]"}', dend);
+
+  // A name character written as a JSON escape (\u0045 for E) is the same placeholder.
+  const nm = em.slice(1, -1);
+  const escName = "\\u00" + nm.charCodeAt(0).toString(16).toUpperCase() + nm.slice(1);
+  const escDoc = `{"a":"<${escName}>"}`;
+  const escOut = restoreArgs(escDoc, argContext(v, true, "echo", { unresolved: 0 }, ALL_TOOLS));
+  ok("args: an escape inside the placeholder name is decoded", JSON.parse(escOut).a === "john@acme.com", escOut);
+  const es = new ArgStream(argContext(v, true, "echo", { unresolved: 0 }, ALL_TOOLS));
+  let escStream = "";
+  for (const ch of escDoc) escStream += es.push(ch);
+  escStream += es.end();
+  ok("args stream: and across 1-character fragments", escStream === escOut, escStream);
+  // An escaped < or > never joins a name.
+  const notName = restoreArgs('{"a":"<EMAIL\\u003c>"}', argContext(v, true, "echo", { unresolved: 0 }, ALL_TOOLS));
+  ok("args: an escaped < inside the brackets is not a name character", notName === '{"a":"<EMAIL\\u003c>"}', notName);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

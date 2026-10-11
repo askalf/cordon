@@ -26,7 +26,7 @@ const instances = {
     UPSTREAM_TIMEOUT_MS: "500",
   },
   // A restore allowlist: only the `text` argument of the `echo` tool gets real values back.
-  8813: { AUDIT_LOG: "./_audit_test_restore.jsonl", CORDON_RESTORE_TOOLS: "echo.text" },
+  8813: { AUDIT_LOG: "./_audit_test_restore.jsonl", CORDON_RESTORE_TOOLS: "echo.text,send" },
 };
 
 // Suites importing TS modules directly run under the tsx loader.

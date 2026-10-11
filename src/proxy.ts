@@ -5,7 +5,7 @@ import { getPolicy } from "./policy";
 import { adapterFor, forwardUpstream, UpstreamTimeout } from "./providers";
 import { detector } from "./detect";
 import { applyRedaction, tally } from "./redact/apply";
-import { reidentifyBody, unresolvedMessage } from "./redact/reidentify";
+import { argsFailed, failMessage, reidentifyBody, type ArgStats } from "./redact/reidentify";
 import { Vault } from "./redact/vault";
 import { captureAndReidentify, pipeUpstream } from "./streaming";
 import { audit } from "./audit";
@@ -119,12 +119,12 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   // A placeholder in a tool call's arguments that this request did not mint (a stale one
   // from another conversation, a forged one) would reach the client's tool as data. The
   // call is not delivered: 502 with the count in X-Cordon-Unresolved, the body withheld.
-  const stats = { unresolved: 0 };
+  const stats: ArgStats = { unresolved: 0 };
   const restored = reidentifyBody(body, r.provider, vault, r.dialect, stats);
-  if (stats.unresolved) {
+  if (argsFailed(stats)) {
     res.statusCode = 502;
     res.setHeader("X-Cordon-Unresolved", String(stats.unresolved));
-    res.end(JSON.stringify({ error: unresolvedMessage(stats.unresolved) }));
+    res.end(JSON.stringify({ error: failMessage(stats) }));
     metrics.timing("error", t0);
     return;
   }

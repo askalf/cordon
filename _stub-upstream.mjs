@@ -210,7 +210,7 @@ function streamAnthropic(res, text, body = {}) {
 //   ARGTRUNC     (chat / Messages stream) the stream stops inside a placeholder
 //   SERVER       (Messages) a server_tool_use and an mcp_tool_use block
 //   STARTINPUT   (Messages stream) the input arrives whole on content_block_start
-const TOOL_FLAGS = ["TOOLCALL", "ESCAPED", "FOREIGN", "CUSTOM", "MCP", "LEGACY", "CHOICE1", "MIXED", "FINISHJOINED", "ARGTRUNC", "SERVER", "STARTINPUT"];
+const TOOL_FLAGS = ["TOOLCALL", "ESCAPED", "FOREIGN", "CUSTOM", "MCP", "LEGACY", "CHOICE1", "MIXED", "FINISHJOINED", "ARGTRUNC", "SERVER", "STARTINPUT", "NAMESPLIT"];
 const FOREIGN_PLACEHOLDER = "<EMAIL_ABCDEF_7>";
 function toolSpec(body, text) {
   const flags = new Set(TOOL_FLAGS.filter((f) => text.includes(f)));
@@ -289,7 +289,12 @@ function streamToolOpenAI(res, s, n) {
     if (legacy) opening.function_call.arguments = chunks.shift();
     else opening.tool_calls[0].function.arguments = chunks.shift();
   }
-  f({ role: "assistant", ...opening });
+  if (s.flags.has("NAMESPLIT")) {
+    // The name in two fragments: the first one alone is a prefix of the real name.
+    const first = chunks.shift();
+    if (legacy) { opening.function_call.name = s.name.slice(0, 4); f({ role: "assistant", ...opening }); f({ function_call: { name: s.name.slice(4), arguments: first } }); }
+    else { opening.tool_calls[0].function.name = s.name.slice(0, 4); f({ role: "assistant", ...opening }); f({ tool_calls: [{ index: 0, function: { name: s.name.slice(4), arguments: first } }] }); }
+  } else f({ role: "assistant", ...opening });
   if (s.flags.has("ARGTRUNC")) {
     // Stop four characters into the first placeholder: no finish, no [DONE].
     const cut = s.args.indexOf("<") + 4;
@@ -312,7 +317,8 @@ function streamToolAnthropic(res, s, n) {
   f("content_block_delta", { index: 0, delta: { type: "text_delta", text: "Calling the tool." } });
   f("content_block_stop", { index: 0 });
   if (s.flags.has("STARTINPUT")) {
-    f("content_block_start", { index: 1, content_block: { type: "tool_use", id: "toolu_stub" + n, name: s.name, input: { text: s.t, note: s.t } } });
+    // Written by hand so the input can carry an integer beyond 2^53.
+    res.write(`event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_stub${n}","name":${JSON.stringify(s.name)},"input":${s.args}}}\n\n`);
   } else {
     f("content_block_start", { index: 1, content_block: { type: "tool_use", id: "toolu_stub" + n, name: s.name, input: {} } });
     if (s.flags.has("ARGTRUNC")) {

@@ -8,8 +8,12 @@ import {
   restoreArgObject,
   restoreArgs,
   StreamReidentifier,
-  unresolvedMessage,
+  DeferredArgs,
+  argsFailed,
+  failMessage,
+  type ArgStats,
 } from "./redact/reidentify";
+import { restorePolicy } from "./redact/restorePolicy";
 import type { Vault } from "./redact/vault";
 
 /** Pipe an upstream Response straight to the client, verbatim (strip / off / errors). */
@@ -46,13 +50,99 @@ function reframe(frame: string, j: unknown): string {
  * one, so the error travels in the stream (a whole response gets a 502 and
  * X-Cordon-Unresolved instead); the stream ends after it.
  */
-function unresolvedFrame(provider: Provider, dialect: Dialect, n: number): string {
-  const message = unresolvedMessage(n);
+function unresolvedFrame(provider: Provider, dialect: Dialect, stats: ArgStats): string {
+  const message = failMessage(stats);
   if (provider === "anthropic")
     return `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message } })}\n\n`;
   if (dialect === "responses")
     return `event: error\ndata: ${JSON.stringify({ type: "error", code: "cordon_unresolved_placeholder", message, param: null })}\n\n`;
   return `data: ${JSON.stringify({ error: { message, type: "cordon_unresolved_placeholder", code: "cordon_unresolved_placeholder" } })}\n\n`;
+}
+
+/**
+ * The [start, end) of the value at an object-key `path` in JSON text, or null. Used to
+ * restore a value in place on the provider's own text, so nothing else in the frame is
+ * re-serialised (a number beyond 2^53 keeps its digits).
+ */
+export function valueSpan(text: string, path: string[]): [number, number] | null {
+  let i = 0;
+  const ws = () => {
+    while (i < text.length && " \t\r\n".includes(text[i])) i++;
+  };
+  const str = (): string => {
+    const s0 = i++;
+    while (i < text.length) {
+      if (text[i] === "\\") i += 2;
+      else if (text[i] === '"') return text.slice(s0, ++i);
+      else i++;
+    }
+    throw new Error("unterminated string");
+  };
+  const skip = (): void => {
+    ws();
+    const ch = text[i];
+    if (ch === '"') {
+      str();
+      return;
+    }
+    if (ch === "{" || ch === "[") {
+      const close = ch === "{" ? "}" : "]";
+      i++;
+      ws();
+      if (text[i] === close) {
+        i++;
+        return;
+      }
+      for (;;) {
+        ws();
+        if (ch === "{") {
+          str();
+          ws();
+          i++; // ':'
+        }
+        skip();
+        ws();
+        if (text[i] === ",") {
+          i++;
+          continue;
+        }
+        i++; // close
+        return;
+      }
+    }
+    while (i < text.length && !",}] \t\r\n".includes(text[i])) i++;
+  };
+  const find = (depth: number): [number, number] | null => {
+    ws();
+    if (depth === path.length) {
+      const s0 = i;
+      skip();
+      return [s0, i];
+    }
+    if (text[i] !== "{") return null;
+    i++;
+    ws();
+    if (text[i] === "}") return null;
+    for (;;) {
+      ws();
+      const k = JSON.parse(str());
+      ws();
+      i++; // ':'
+      if (k === path[depth]) return find(depth + 1);
+      skip();
+      ws();
+      if (text[i] === ",") {
+        i++;
+        continue;
+      }
+      return null;
+    }
+  };
+  try {
+    return find(0);
+  } catch {
+    return null;
+  }
 }
 
 const RESPONSES_TOOL_ITEMS = new Set(["function_call", "custom_tool_call", "mcp_call"]);
@@ -79,16 +169,27 @@ export async function captureAndReidentify(
   res.setHeader("content-type", "text/event-stream");
   res.setHeader("cache-control", "no-cache");
 
+  // Responses frames carry a sequence_number, and cordon writes frames of its own (a held
+  // tail flushed at a done frame), so every Responses frame it writes is renumbered from
+  // one counter that starts where the upstream started: unique and increasing.
+  let seq: number | undefined;
+  const renumber = (frame: string): string =>
+    frame.replace(/^(data:.*?"sequence_number":)(\d+)/m, (_m, head: string, n: string) => {
+      if (seq === undefined) seq = Number(n);
+      return head + seq++;
+    });
+  const send = (frame: string) => res.write(provider !== "anthropic" && dialect === "responses" ? renumber(frame) : frame);
+
   // Placeholders in tool arguments that this vault cannot resolve, across the stream.
-  const stats = { unresolved: 0 };
+  const stats: ArgStats = { unresolved: 0 };
   let stopped = false;
   /** True while the stream may go on; on the first unresolved placeholder, writes the
    *  error frame instead and stops the stream. Checked before every argument write. */
   const guard = (): boolean => {
     if (stopped) return false;
-    if (!stats.unresolved) return true;
+    if (!argsFailed(stats)) return true;
     stopped = true;
-    res.write(unresolvedFrame(provider, dialect, stats.unresolved));
+    send(unresolvedFrame(provider, dialect, stats));
     return false;
   };
 
@@ -101,7 +202,7 @@ export async function captureAndReidentify(
   // Responses addresses a delta by item_id / output_index / content_index; a re-emitted
   // delta carries the addressing of the frame it stands in for.
   const emitText = (chunk: string, index = emitIndex, ctx: Record<string, unknown> = {}) => {
-    if (chunk) res.write(adapter.frameFromText(chunk, index, ctx));
+    if (chunk) send(adapter.frameFromText(chunk, index, ctx));
   };
 
   // ---- Anthropic: tool blocks by index, each with its name and its input's ArgStream ----
@@ -109,7 +210,7 @@ export async function captureAndReidentify(
   const emitJson = (index: number, chunk: string) => {
     if (!chunk) return;
     const data = { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: chunk } };
-    res.write(`event: content_block_delta\ndata: ${JSON.stringify(data)}\n\n`);
+    send(`event: content_block_delta\ndata: ${JSON.stringify(data)}\n\n`);
   };
   const flushToolBlock = (index: number): boolean => {
     const blk = toolBlocks.get(index);
@@ -179,7 +280,7 @@ export async function captureAndReidentify(
   // ---- Chat completions: everything per choice (a request with n > 1 streams several) ----
   // A choice's text and each of its tool calls (by tool-call index, or "fc" for the legacy
   // function_call) hold their own tails; a call's name arrives on its first fragment.
-  type Choice = { text: StreamReidentifier; args: Map<string, ArgStream>; names: Map<string, string | undefined> };
+  type Choice = { text: StreamReidentifier; args: Map<string, ArgStream | DeferredArgs>; names: Map<string, string> };
   const choices = new Map<number, Choice>();
   const choiceFor = (ci: number): Choice => {
     let st = choices.get(ci);
@@ -189,10 +290,15 @@ export async function captureAndReidentify(
     }
     return st;
   };
-  const argsFor = (st: Choice, key: string): ArgStream => {
+  // A call's name can arrive in fragments, so a policy that depends on the name waits for
+  // the call to end (DeferredArgs). With no policy every name restores alike and the
+  // arguments stream as they come.
+  const argsFor = (st: Choice, key: string): ArgStream | DeferredArgs => {
     let a = st.args.get(key);
     if (!a) {
-      a = new ArgStream(argContext(vault, true, st.names.get(key), stats));
+      a = restorePolicy.all
+        ? new ArgStream(argContext(vault, true, undefined, stats))
+        : new DeferredArgs(() => argContext(vault, true, st.names.get(key), stats));
       st.args.set(key, a);
     }
     return a;
@@ -204,13 +310,13 @@ export async function captureAndReidentify(
   const flushChoice = (ci: number, st: Choice, skipText: boolean, skipArgs: Set<string>): boolean => {
     if (!skipText) {
       const t = st.text.end();
-      if (t) res.write(chatFrame(ci, { content: t }));
+      if (t) send(chatFrame(ci, { content: t }));
     }
     for (const [key, a] of st.args) {
       if (skipArgs.has(key)) continue;
       const chunk = a.end();
       if (!guard()) return false;
-      if (chunk) res.write(chatFrame(ci, argDelta(key, chunk)));
+      if (chunk) send(chatFrame(ci, argDelta(key, chunk)));
     }
     return true;
   };
@@ -240,12 +346,12 @@ export async function captureAndReidentify(
     const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
     const data = dataLine ? dataLine.slice(5).trim() : "";
     if (!data) {
-      res.write(frame); // structural lines (event:, ping comments) pass through
+      send(frame); // structural lines (event:, ping comments) pass through
       return;
     }
     if (data === "[DONE]") {
       flushHeld();
-      if (!stopped) res.write(frame);
+      if (!stopped) send(frame);
       return;
     }
 
@@ -264,13 +370,23 @@ export async function captureAndReidentify(
           // An input given whole at the start (not streamed as input_json_delta) is
           // restored here; the frame passes byte-for-byte when nothing in it changes.
           if (cb.input && typeof cb.input === "object") {
+            // Restored on the frame's own text: a re-serialised input would lose the digits
+            // of an integer beyond 2^53.
+            const span = valueSpan(data, ["content_block", "input"]);
+            if (span) {
+              const raw = data.slice(span[0], span[1]);
+              const restored = restoreArgs(raw, argContext(vault, true, name, stats));
+              if (!guard()) return;
+              send(restored === raw ? frame : frame.replace(/^data:.*$/m, () => `data: ${data.slice(0, span[0])}${restored}${data.slice(span[1])}`));
+              return;
+            }
             const changed = restoreArgObject(cb.input, argContext(vault, false, name, stats));
             if (!guard()) return;
-            res.write(changed ? reframe(frame, j) : frame);
+            send(changed ? reframe(frame, j) : frame);
             return;
           }
         }
-        res.write(frame);
+        send(frame);
         return;
       }
       if (type === "content_block_delta") {
@@ -288,7 +404,7 @@ export async function captureAndReidentify(
           if (!guard()) return;
           emitJson(index, chunk);
         } else {
-          res.write(frame);
+          send(frame);
         }
         return;
       }
@@ -297,10 +413,10 @@ export async function captureAndReidentify(
         if (toolBlocks.has(index)) {
           if (!flushToolBlock(index)) return;
         } else emitText(reider.end(), index); // flush held text BEFORE this block closes
-        res.write(frame);
+        send(frame);
         return;
       }
-      res.write(frame); // message_start / message_delta / message_stop / ping / error
+      send(frame); // message_start / message_delta / message_stop / ping / error
       return;
     }
 
@@ -319,11 +435,11 @@ export async function captureAndReidentify(
           if ((typeof j.item.arguments === "string" && j.item.arguments) || (typeof j.item.input === "string" && j.item.input)) {
             const item = reidentifyBody({ output: [j.item] }, provider, vault, dialect, stats).output[0];
             if (!guard()) return;
-            res.write(reframe(frame, { ...j, item }));
+            send(reframe(frame, { ...j, item }));
             return;
           }
         }
-        res.write(frame);
+        send(frame);
         return;
       }
       if (RESPONSES_ARGUMENT_DELTAS.has(type)) {
@@ -344,14 +460,14 @@ export async function captureAndReidentify(
         if (!flushPart(j)) return;
         if (typeof j.arguments === "string") j.arguments = restoreArgs(j.arguments, argContext(vault, true, toolFor(j), stats));
         if (!guard()) return;
-        res.write(reframe(frame, j));
+        send(reframe(frame, j));
         return;
       }
       if (type === "response.custom_tool_call_input.done") {
         if (!flushPart(j)) return;
         if (typeof j.input === "string") j.input = restoreArgs(j.input, argContext(vault, false, toolFor(j), stats));
         if (!guard()) return;
-        res.write(reframe(frame, j));
+        send(reframe(frame, j));
         return;
       }
       if (type === "response.output_text.delta" || type === "response.refusal.delta") {
@@ -371,21 +487,21 @@ export async function captureAndReidentify(
         if (!flushPart(j)) return;
         if (typeof j.text === "string") j.text = restore(j.text, vault);
         if (typeof j.refusal === "string") j.refusal = restore(j.refusal, vault);
-        res.write(reframe(frame, j));
+        send(reframe(frame, j));
         return;
       }
       if (type === "response.content_part.done" && j.part && typeof j.part === "object") {
         if (!flushPart(j)) return;
         if (typeof j.part.text === "string") j.part.text = restore(j.part.text, vault);
         if (typeof j.part.refusal === "string") j.part.refusal = restore(j.part.refusal, vault);
-        res.write(reframe(frame, j));
+        send(reframe(frame, j));
         return;
       }
       if (type === "response.output_item.done" && j.item && typeof j.item === "object") {
         if (!flushOutputItem(j)) return;
         const item = reidentifyBody({ output: [j.item] }, provider, vault, dialect, stats).output[0];
         if (!guard()) return;
-        res.write(reframe(frame, { ...j, item }));
+        send(reframe(frame, { ...j, item }));
         return;
       }
       if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
@@ -393,11 +509,11 @@ export async function captureAndReidentify(
         if (j.response && typeof j.response === "object") {
           const response = reidentifyBody(j.response, provider, vault, dialect, stats);
           if (!guard()) return;
-          res.write(reframe(frame, { ...j, response }));
-        } else res.write(frame);
+          send(reframe(frame, { ...j, response }));
+        } else send(frame);
         return;
       }
-      res.write(frame); // response.created / in_progress / content_part.added / ping / error
+      send(frame); // response.created / in_progress / content_part.added / ping / error
       return;
     }
 
@@ -410,7 +526,7 @@ export async function captureAndReidentify(
       oj = JSON.parse(data);
     } catch {}
     if (!oj || !Array.isArray(oj.choices)) {
-      res.write(frame); // an error object or anything else without choices
+      send(frame); // an error object or anything else without choices
       return;
     }
     let changed = false;
@@ -429,7 +545,7 @@ export async function captureAndReidentify(
       }
       for (const tc of Array.isArray(d?.tool_calls) ? d.tool_calls : []) {
         const key = `t${Number(tc?.index ?? 0)}`;
-        if (typeof tc?.function?.name === "string") st.names.set(key, tc.function.name);
+        if (typeof tc?.function?.name === "string") st.names.set(key, (st.names.get(key) ?? "") + tc.function.name);
         if (typeof tc?.function?.arguments === "string") {
           const a = argsFor(st, key);
           tc.function.arguments = a.push(tc.function.arguments) + (fin ? a.end() : "");
@@ -439,7 +555,7 @@ export async function captureAndReidentify(
       }
       const fc = d?.function_call;
       if (fc && typeof fc === "object") {
-        if (typeof fc.name === "string") st.names.set("fc", fc.name);
+        if (typeof fc.name === "string") st.names.set("fc", (st.names.get("fc") ?? "") + fc.name);
         if (typeof fc.arguments === "string") {
           const a = argsFor(st, "fc");
           fc.arguments = a.push(fc.arguments) + (fin ? a.end() : "");
@@ -456,7 +572,7 @@ export async function captureAndReidentify(
       if (!flushChoice(f.ci, f.st, f.hadText, f.hadArgs)) return;
       choices.delete(f.ci);
     }
-    res.write(changed ? reframe(frame, oj) : frame);
+    send(changed ? reframe(frame, oj) : frame);
   };
 
   const reader = upBody.getReader();
