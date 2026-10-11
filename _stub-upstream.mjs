@@ -195,6 +195,9 @@ function streamAnthropic(res, text, body = {}) {
   }
   f("content_block_start", { index: idx, content_block: { type: "text", text: "" } });
   for (const t of chunk3(text)) f("content_block_delta", { index: idx, delta: { type: "text_delta", text: t } });
+  // CITE: a citation whose cited_text and document_title are the received text.
+  if (text.includes("CITE "))
+    f("content_block_delta", { index: idx, delta: { type: "citations_delta", citation: { type: "char_location", cited_text: text, document_index: 0, document_title: text, start_char_index: 0, end_char_index: 4 } } });
   f("content_block_stop", { index: idx });
   f("message_delta", { delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } });
   f("message_stop", {});
@@ -244,7 +247,10 @@ const toolResponsesBody = (n, s) => ({
   usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, _stub_call: n,
 });
 function toolOpenAIBody(n, s) {
-  const call = s.flags.has("LEGACY")
+  // CUSTOM: a custom tool call, its input plain text.
+  const call = s.flags.has("CUSTOM")
+    ? { role: "assistant", content: null, tool_calls: [{ id: "call_stub" + n, type: "custom", custom: { name: s.name, input: s.t } }] }
+    : s.flags.has("LEGACY")
     ? { role: "assistant", content: null, function_call: { name: s.name, arguments: s.args } }
     : { role: "assistant", content: null, tool_calls: [{ id: "call_stub" + n, type: "function", function: { name: s.name, arguments: s.args } }] };
   const choices = s.flags.has("CHOICE1")
@@ -294,6 +300,16 @@ function streamToolResponses(res, s, n) {
 }
 function streamToolOpenAI(res, s, n) {
   res.setHeader("content-type", "text/event-stream");
+  if (s.flags.has("CUSTOM")) {
+    // A custom tool call: its plain-text input in 3-character fragments.
+    const w = (d, extra = {}) => res.write(`data: ${JSON.stringify({ id: "stub-" + n, choices: [{ index: 0, delta: d, ...extra }] })}\n\n`);
+    w({ role: "assistant", tool_calls: [{ index: 0, id: "call_stub" + n, type: "custom", custom: { name: s.name, input: "" } }] });
+    for (const c of chunk3(s.t)) w({ tool_calls: [{ index: 0, custom: { input: c } }] });
+    w({}, { finish_reason: "tool_calls" });
+    res.write("data: [DONE]\n\n");
+    res.end();
+    return;
+  }
   const ci = s.flags.has("CHOICE1") ? 1 : 0;
   const legacy = s.flags.has("LEGACY");
   const f = (d, extra = {}) => res.write(`data: ${JSON.stringify({ id: "stub-" + n, choices: [{ index: ci, delta: d, ...extra }] })}\n\n`);

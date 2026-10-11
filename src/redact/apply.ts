@@ -2,7 +2,8 @@ import { clone } from "../util";
 import type { Detector, Dialect, Provider, RedactSet, Span } from "../types";
 import type { Vault } from "./vault";
 
-type Slot = { get(): string; set(v: string): void; numeric?: boolean };
+// `doc`: the slot is a Messages document's plain-text source, at this document_index.
+type Slot = { get(): string; set(v: string): void; numeric?: boolean; doc?: number };
 
 // Leaf keys come from client-supplied bodies, so a key can literally be named
 // "__proto__" or "constructor". Write those via defineProperty so the redacted value
@@ -74,19 +75,80 @@ function pushKeySlots(obj: any, keys: string[], slots: Slot[], finalizers: (() =
   });
 }
 
-// A JSON-string field (tool-call arguments): parse → redact its leaves (incl. NUMERIC
-// PII) → re-serialize, so a redacted number becomes a QUOTED "<TYPE_N>" and the args
-// stay valid JSON (a textual replace left an unquoted placeholder). Unparseable args
-// fall back to text redaction.
+// A JSON-string field (tool-call arguments), redacted on its own text: one slot per
+// string literal (property names included, since the response side restores a value in a
+// name as in a value) and one per number, each written back in place. Nothing else is
+// re-serialised, so an untouched number keeps its digits (an integer beyond 2^53 too), and
+// a redacted number becomes a QUOTED "<TYPE_N>" so the arguments stay valid JSON. Two
+// names in one object that redact to the same name, or nesting deeper than
+// MAX_LEAF_DEPTH, refuse the request. Text that is not a JSON object or array falls back
+// to text redaction.
 function pushJsonString(obj: any, key: string, slots: Slot[], finalizers: (() => void)[]): void {
+  const text: string = obj[key];
   let parsed: any;
-  try { parsed = JSON.parse(obj[key]); } catch { parsed = undefined; }
-  if (parsed && typeof parsed === "object") {
-    pushStringLeaves(parsed, slots, 0, finalizers);
-    finalizers.push(() => { obj[key] = JSON.stringify(parsed); });
-  } else {
+  try { parsed = JSON.parse(text); } catch { parsed = undefined; }
+  if (!parsed || typeof parsed !== "object") {
     slots.push(slot(obj, key));
+    return;
   }
+  type Lit = { start: number; end: number; value: string; out?: string };
+  const lits: Lit[] = [];
+  // Per object: the literal index of each property name, to check names after redaction.
+  const objects: number[][] = [];
+  const stack: Array<{ names: number[]; wantKey: boolean } | null> = [];
+  for (let i = 0; i < text.length; ) {
+    const ch = text[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      const lit: Lit = { start: i, end: j + 1, value: JSON.parse(text.slice(i, j + 1)) };
+      const top = stack[stack.length - 1];
+      if (top?.wantKey) {
+        top.names.push(lits.length);
+        top.wantKey = false;
+      }
+      lits.push(lit);
+      slots.push({ get: () => lit.value, set: (v) => { lit.out = JSON.stringify(v); } });
+      i = j + 1;
+      continue;
+    }
+    if (ch === "-" || (ch >= "0" && ch <= "9")) {
+      const m = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(text.slice(i))!;
+      const lit: Lit = { start: i, end: i + m[0].length, value: m[0] };
+      lits.push(lit);
+      slots.push({ get: () => lit.value, set: (v) => { lit.out = JSON.stringify(v); }, numeric: true });
+      i = lit.end;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      const frame = ch === "{" ? { names: [] as number[], wantKey: true } : null;
+      if (frame) objects.push(frame.names);
+      stack.push(frame);
+      if (stack.length - 1 > MAX_LEAF_DEPTH) throw tooDeep("Tool-call arguments");
+    } else if (ch === "}" || ch === "]") stack.pop();
+    else if (ch === ",") {
+      const top = stack[stack.length - 1];
+      if (top) top.wantKey = true;
+    }
+    i++;
+  }
+  finalizers.push(() => {
+    const changed = lits.filter((l) => l.out !== undefined);
+    if (!changed.length) return;
+    const repeats = (names: string[]) => names.length - new Set(names).size;
+    for (const names of objects) {
+      const after = names.map((n) => (lits[n].out !== undefined ? JSON.parse(lits[n].out!) : lits[n].value));
+      if (repeats(after) > repeats(names.map((n) => lits[n].value)))
+        throw new Error("two tool-call argument names redact to the same name; refusing to forward the request");
+    }
+    let out = "";
+    let last = 0;
+    for (const l of changed) {
+      out += text.slice(last, l.start) + l.out;
+      last = l.end;
+    }
+    obj[key] = out + text.slice(last);
+  });
 }
 
 // Keys the Responses input walk never redacts, at any depth. The walk is fail-closed (every
@@ -157,6 +219,9 @@ function requestTextSlots(
   const slots: Slot[] = [];
   const finalizers: (() => void)[] = []; // run after redaction (re-serialize parsed JSON-string fields)
 
+  // Messages documents in the order the request walk meets them: a citation's
+  // document_index counts them the same way.
+  let docIndex = 0;
   const pushContent = (container: any, key: string | number) => {
     const c = container[key];
     if (typeof c === "string") {
@@ -194,7 +259,8 @@ function requestTextSlots(
           if (typeof part.title === "string") slots.push(slot(part, "title"));
           if (typeof part.context === "string") slots.push(slot(part, "context"));
           const src = part.source;
-          if (src?.type === "text" && typeof src.data === "string") slots.push(slot(src, "data"));
+          const doc = docIndex++;
+          if (src?.type === "text" && typeof src.data === "string") slots.push({ ...slot(src, "data"), doc });
           else if (src?.type === "content") {
             if (typeof src.content === "string") slots.push(slot(src, "content"));
             else if (Array.isArray(src.content)) pushContent(src, "content");
@@ -281,12 +347,27 @@ function requestTextSlots(
     if (Array.isArray(msg.tool_calls))
       for (const tc of msg.tool_calls) {
         const fn = tc?.function;
-        if (!fn || typeof fn.arguments !== "string") continue;
-        pushJsonString(fn, "arguments", slots, finalizers);
+        if (fn && typeof fn.arguments === "string") pushJsonString(fn, "arguments", slots, finalizers);
+        // A custom tool's input is plain text, restored on the way down like arguments.
+        if (tc?.custom && typeof tc.custom.input === "string") slots.push(slot(tc.custom, "input"));
       }
   }
 
   return { slots, finalizers };
+}
+
+/** Where each placeholder landed in a redacted document, and the caller's span it
+ *  replaced, ascending (the same tokens replaceSpans wrote). */
+function documentMap(spans: Span[], vault: Vault) {
+  let shift = 0;
+  return [...spans]
+    .sort((a, b) => a.start - b.start)
+    .map((s) => {
+      const len = vault.placeholderFor(s.value, s.type).length;
+      const rStart = s.start + shift;
+      shift += len - (s.end - s.start);
+      return { rStart, rEnd: rStart + len, oStart: s.start, oEnd: s.end };
+    });
 }
 
 /** Replace spans in one string right-to-left so earlier offsets stay valid. */
@@ -337,6 +418,7 @@ export function applyRedaction(
       spans = spans.filter((s) => NUMERIC_PII.has(s.type) && s.start === 0 && s.end === text.length);
     if (!spans.length) continue;
     sl.set(replaceSpans(text, spans, vault));
+    if (sl.doc !== undefined) vault.documents.set(sl.doc, documentMap(spans, vault));
     all.push(...spans);
   }
   for (const f of finalizers) f(); // re-serialize parsed JSON-string fields (tool_calls.arguments)
