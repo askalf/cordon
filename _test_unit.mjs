@@ -3,8 +3,8 @@ import { rmSync, writeFileSync, readFileSync } from "node:fs";
 import { runAll, detector } from "./src/detect/index.ts";
 import { luhn, ibanMod97, abaRouting, ssnValid } from "./src/detect/validators.ts";
 import { Vault } from "./src/redact/vault.ts";
-import { applyRedaction, tally } from "./src/redact/apply.ts";
-import { reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, restoreArgsWhole, hasDuplicateKeys, restoreArgObject, DeferredArgs, MAX_ARG_DEPTH, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
+import { applyRedaction, tally, exactDecimal } from "./src/redact/apply.ts";
+import { restoreCitation, reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, restoreArgsWhole, hasDuplicateKeys, restoreArgObject, DeferredArgs, MAX_ARG_DEPTH, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
 import { parseRestoreTools } from "./src/redact/restorePolicy.ts";
 import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN, parseTimeoutMs, DEFAULT_UPSTREAM_TIMEOUT_MS, MAX_TIMEOUT_MS } from "./src/config.ts";
 import { setPolicy, getPolicy, allPolicies, save as savePolicy, load as loadPolicy } from "./src/policy.ts";
@@ -222,6 +222,14 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   ok("apply: tool_calls arguments keep a big integer next to a redacted field", tc === '{"id":9007199254740993,"to":"[EMAIL]","card":"[CREDIT_CARD]"}', tc);
   const ra = applyRedaction({ model: "m", input: [{ type: "function_call", call_id: "c", name: "f", arguments: withPii }] }, "openai", v, ALL, detector, true, "responses").deidBody.input[0].arguments;
   ok("apply: Responses arguments keep a big integer next to a redacted field", ra === '{"id":9007199254740993,"to":"[EMAIL]","card":"[CREDIT_CARD]"}', ra);
+  // A card spelled with a decimal or an exponent is still the card: detected on the exact
+  // decimal value of the literal, and the whole literal replaced.
+  for (const [lex, want] of [["4.111111111111111e15", "4111111111111111"], ["4111111111111111.0", "4111111111111111"], ["41111111111111110E-1", "4111111111111111"], ["-12e2", "-1200"], ["1.5", "1.5"], ["0.0", "0"], ["1e999", "1e999"], ["9007199254740993", "9007199254740993"]])
+    ok(`exactDecimal: ${lex} -> ${want}`, exactDecimal(lex) === want, exactDecimal(lex));
+  for (const lex of ["4111111111111111.0", "4.111111111111111e15"]) {
+    const out = legacy(`{"card":${lex},"f":1.50}`);
+    ok(`apply: a card written ${lex} is redacted whole, other numbers byte for byte`, out === '{"card":"[CREDIT_CARD]","f":1.50}', out);
+  }
   const spaced = '{ "to" : "jane@corp.io" ,\n "n": 2 }';
   const so = legacy(spaced);
   ok("apply: the arguments' own spacing is kept", so === '{ "to" : "[EMAIL]" ,\n "n": 2 }', so);
@@ -251,6 +259,19 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   // A document cordon did not change, or another document_index, is left as cited.
   const plain = reidentifyBody({ content: [{ type: "text", text: "x", citations: [{ type: "char_location", cited_text: "ab", document_index: 0, start_char_index: 3, end_char_index: 5 }] }] }, "anthropic", v, "messages").content[0].citations[0];
   ok("citations: an untouched document keeps its offsets", plain.start_char_index === 3 && plain.end_char_index === 5);
+  // Replayed as history, the restored citation is redacted again (cited_text and title).
+  const next = new Vault("reversible");
+  const hist = { model: "m", messages: [{ role: "user", content: "q" }, { role: "assistant", content: [{ type: "text", text: "see", citations: out }] }] };
+  const rh = applyRedaction(hist, "anthropic", next, ALL, detector).deidBody.messages[1].content[0].citations;
+  ok("citations: replayed as history, cited_text and document_title are redacted again", !JSON.stringify(rh).includes("jane@corp.io") && /<EMAIL_/.test(rh[1].cited_text) && /<EMAIL_/.test(rh[0].document_title), JSON.stringify(rh));
+  // Offsets count Unicode characters: a character outside the BMP before the value.
+  const ev = new Vault("reversible");
+  const origU = "\u{1F600} jane@corp.io end";
+  const sentU = applyRedaction({ model: "m", messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: origU } }] }] }, "anthropic", ev, ALL, detector).deidBody.messages[0].content[0].source.data;
+  const ci = (t, sub) => Array.from(t.slice(0, t.indexOf(sub))).length;
+  const cu = { type: "char_location", cited_text: "end", document_index: 0, start_char_index: ci(sentU, "end"), end_char_index: ci(sentU, "end") + 3 };
+  restoreCitation(cu, ev);
+  ok("citations: offsets in Unicode characters, past a character outside the BMP", cu.start_char_index === ci(origU, "end") && cu.end_char_index === ci(origU, "end") + 3, JSON.stringify(cu));
 }
 {
   // Chat: an assistant's refusal and legacy function_call arguments are model-visible.

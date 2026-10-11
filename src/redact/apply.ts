@@ -75,6 +75,36 @@ function pushKeySlots(obj: any, keys: string[], slots: Slot[], finalizers: (() =
   });
 }
 
+/**
+ * The exact decimal value of a JSON number literal, from its digits (never through a JS
+ * number, which rounds past 2^53): an integral value as plain digits with its sign
+ * ("4111111111111111" for 4.111111111111111e15 or 4111111111111111.0), anything else as
+ * written. An exponent past 400 is left as written rather than expanded.
+ */
+export function exactDecimal(lexeme: string): string {
+  const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(lexeme);
+  if (!m) return lexeme;
+  const exp = Number(m[4] ?? 0);
+  if (Math.abs(exp) > 400) return lexeme;
+  const digits = m[2] + (m[3] ?? "");
+  const point = m[2].length + exp; // digits before the decimal point
+  let int: string;
+  let frac: string;
+  if (point <= 0) {
+    int = "0";
+    frac = "0".repeat(-point) + digits;
+  } else if (point >= digits.length) {
+    int = digits + "0".repeat(point - digits.length);
+    frac = "";
+  } else {
+    int = digits.slice(0, point);
+    frac = digits.slice(point);
+  }
+  if (/[1-9]/.test(frac)) return lexeme;
+  int = int.replace(/^0+(?=\d)/, "");
+  return int === "0" ? "0" : m[1] + int;
+}
+
 // A JSON-string field (tool-call arguments), redacted on its own text: one slot per
 // string literal (property names included, since the response side restores a value in a
 // name as in a value) and one per number, each written back in place. Nothing else is
@@ -116,7 +146,10 @@ function pushJsonString(obj: any, key: string, slots: Slot[], finalizers: (() =>
       const m = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(text.slice(i))!;
       const lit: Lit = { start: i, end: i + m[0].length, value: m[0] };
       lits.push(lit);
-      slots.push({ get: () => lit.value, set: (v) => { lit.out = JSON.stringify(v); }, numeric: true });
+      // Detected on the number's exact decimal value (4111111111111111.0 and
+      // 4.111111111111111e15 are the same card), and a match replaces the whole literal.
+      const value = exactDecimal(m[0]);
+      slots.push({ get: () => value, set: (v) => { lit.out = JSON.stringify(v); }, numeric: true });
       i = lit.end;
       continue;
     }
@@ -239,6 +272,14 @@ function requestTextSlots(
           // the previous reply's output to the next request's input, and that reply left
           // here with its real values restored.
           slots.push(slot(part, "text"));
+          // A Messages reply replayed as history: its citations carry the restored text of
+          // what they cite, and the titles of what they cite.
+          if (Array.isArray(part.citations))
+            for (const c of part.citations) {
+              if (!c || typeof c !== "object") continue;
+              for (const k of ["cited_text", "document_title", "title"])
+                if (typeof c[k] === "string") slots.push(slot(c, k));
+            }
         } else if (part.type === "refusal" && typeof part.refusal === "string") {
           slots.push(slot(part, "refusal"));
         } else if (part.type === "tool_result" || part.type === "mcp_tool_result") {
@@ -358,15 +399,20 @@ function requestTextSlots(
 
 /** Where each placeholder landed in a redacted document, and the caller's span it
  *  replaced, ascending (the same tokens replaceSpans wrote). */
-function documentMap(spans: Span[], vault: Vault) {
+// In Unicode characters, the unit Messages citation offsets count, not the UTF-16 code
+// units of the detector's spans: a character outside the BMP before a span is one.
+function documentMap(text: string, spans: Span[], vault: Vault) {
+  const chars = (i: number) => Array.from(text.slice(0, i)).length;
   let shift = 0;
   return [...spans]
     .sort((a, b) => a.start - b.start)
     .map((s) => {
-      const len = vault.placeholderFor(s.value, s.type).length;
-      const rStart = s.start + shift;
-      shift += len - (s.end - s.start);
-      return { rStart, rEnd: rStart + len, oStart: s.start, oEnd: s.end };
+      const len = Array.from(vault.placeholderFor(s.value, s.type)).length;
+      const oStart = chars(s.start);
+      const oEnd = chars(s.end);
+      const rStart = oStart + shift;
+      shift += len - (oEnd - oStart);
+      return { rStart, rEnd: rStart + len, oStart, oEnd };
     });
 }
 
@@ -418,7 +464,7 @@ export function applyRedaction(
       spans = spans.filter((s) => NUMERIC_PII.has(s.type) && s.start === 0 && s.end === text.length);
     if (!spans.length) continue;
     sl.set(replaceSpans(text, spans, vault));
-    if (sl.doc !== undefined) vault.documents.set(sl.doc, documentMap(spans, vault));
+    if (sl.doc !== undefined) vault.documents.set(sl.doc, documentMap(text, spans, vault));
     all.push(...spans);
   }
   for (const f of finalizers) f(); // re-serialize parsed JSON-string fields (tool_calls.arguments)
