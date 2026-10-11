@@ -68,9 +68,12 @@ export const openai: ProviderAdapter = {
           if (part?.type === "text" && typeof part.text === "string") slots.push(textSlot(part, "text"));
       }
       // The arguments the model chose for a tool, a JSON string per call.
+      // A custom tool's input is plain text.
       for (const tc of Array.isArray(msg?.tool_calls) ? msg.tool_calls : []) {
         const fn = tc?.function;
         if (fn && typeof fn.arguments === "string") slots.push(argsSlot(fn, "arguments", fn.name));
+        const cu = tc?.custom;
+        if (cu && typeof cu.input === "string") slots.push(argsSlot(cu, "input", cu.name, false));
       }
       // The legacy single function call (functions / function_call request fields).
       const fc = msg?.function_call;

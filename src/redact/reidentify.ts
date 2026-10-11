@@ -418,10 +418,15 @@ function formingName(tail: string): string {
  * it, values are restored by restoreArgs (policy, unresolved count, JSON escaping), and a
  * stream that ends inside a placeholder is rejected rather than guessed at: the streamed
  * arguments and the whole-document restore of the same text must agree.
+ *
+ * JSON arguments are released only at end(), after the checks that need the whole
+ * document (property names, nesting depth) pass: a runner that dispatches a call once its
+ * fragments form complete JSON must never receive one cordon then refuses. Plain-text
+ * input has no such check and streams as it comes.
  */
 export class ArgStream {
   private buf = "";
-  // JSON arguments as received and as restored, for the property-name check at the end.
+  // JSON arguments as received and as restored, for the checks at the end.
   private src = "";
   private out = "";
   constructor(private readonly c: ArgContext) {}
@@ -432,7 +437,8 @@ export class ArgStream {
     const flushLen = p === -1 ? this.buf.length : p;
     const flush = this.buf.slice(0, flushLen);
     this.buf = this.buf.slice(flushLen);
-    return this.emit(flush, restoreArgs(flush, this.c));
+    const out = this.emit(flush, restoreArgs(flush, this.c));
+    return this.c.json ? "" : out;
   }
 
   end(): string {
@@ -451,8 +457,9 @@ export class ArgStream {
       this.c.keys?.feed(forming);
       out += this.emit(forming, forming);
     }
-    if (this.c.json) checkArgKeys(this.src, this.out, this.c.stats);
-    return out;
+    if (!this.c.json) return out;
+    checkArgKeys(this.src, this.out, this.c.stats);
+    return argsFailed(this.c.stats) ? "" : this.out;
   }
 
   private emit(src: string, out: string): string {
@@ -502,6 +509,38 @@ export class DeferredArgs {
  * collects the placeholders in arguments that this request cannot restore; the caller
  * refuses to deliver a body with any.
  */
+/**
+ * A Messages citation, restored: its cited_text and document_title get real values back,
+ * and a char_location into a document whose text cordon redacted gets the caller's
+ * offsets back (a placeholder's span maps to the whole value it replaced).
+ */
+export function restoreCitation(c: any, vault: Vault): void {
+  if (!c || typeof c !== "object") return;
+  if (typeof c.cited_text === "string") c.cited_text = restore(c.cited_text, vault);
+  if (typeof c.document_title === "string") c.document_title = restore(c.document_title, vault);
+  const doc = c.type === "char_location" ? vault.documents.get(Number(c.document_index)) : undefined;
+  if (!doc) return;
+  // An offset inside a placeholder cuts the token, so cited_text holds a piece of it that
+  // restore cannot resolve: the range then quotes the caller's text instead.
+  let cut = false;
+  const back = (i: number, end: boolean): number => {
+    let shift = 0;
+    for (const s of doc.map) {
+      if (i <= s.rStart) break;
+      if (i < s.rEnd) {
+        cut = true;
+        return end ? s.oEnd : s.oStart;
+      }
+      shift = s.rEnd - s.oEnd;
+    }
+    return i - shift;
+  };
+  if (typeof c.start_char_index === "number") c.start_char_index = back(c.start_char_index, false);
+  if (typeof c.end_char_index === "number") c.end_char_index = back(c.end_char_index, true);
+  if (cut && typeof c.cited_text === "string" && typeof c.start_char_index === "number" && typeof c.end_char_index === "number")
+    c.cited_text = Array.from(doc.source).slice(c.start_char_index, c.end_char_index).join("");
+}
+
 export function reidentifyBody(
   body: any,
   provider: Provider,
@@ -516,6 +555,9 @@ export function reidentifyBody(
     else if (sl.kind === "args") sl.set(restoreArgsWhole(sl.get(), argContext(vault, sl.json, sl.tool, stats, policy)));
     else restoreArgObject(sl.obj, argContext(vault, false, sl.tool, stats, policy));
   }
+  if (provider === "anthropic")
+    for (const block of Array.isArray(out?.content) ? out.content : [])
+      for (const c of Array.isArray(block?.citations) ? block.citations : []) restoreCitation(c, vault);
   return out;
 }
 

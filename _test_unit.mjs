@@ -3,8 +3,8 @@ import { rmSync, writeFileSync, readFileSync } from "node:fs";
 import { runAll, detector } from "./src/detect/index.ts";
 import { luhn, ibanMod97, abaRouting, ssnValid } from "./src/detect/validators.ts";
 import { Vault } from "./src/redact/vault.ts";
-import { applyRedaction, tally } from "./src/redact/apply.ts";
-import { reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, restoreArgsWhole, hasDuplicateKeys, restoreArgObject, DeferredArgs, MAX_ARG_DEPTH, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
+import { applyRedaction, tally, exactDecimal } from "./src/redact/apply.ts";
+import { restoreCitation, reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, restoreArgsWhole, hasDuplicateKeys, restoreArgObject, DeferredArgs, MAX_ARG_DEPTH, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
 import { parseRestoreTools } from "./src/redact/restorePolicy.ts";
 import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN, parseTimeoutMs, DEFAULT_UPSTREAM_TIMEOUT_MS, MAX_TIMEOUT_MS } from "./src/config.ts";
 import { setPolicy, getPolicy, allPolicies, save as savePolicy, load as loadPolicy } from "./src/policy.ts";
@@ -209,6 +209,84 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   ok("apply: tool schema property names are left as written", Object.keys(sch.tools[0].input_schema.properties)[0] === "email");
 }
 {
+  // JSON-string arguments are redacted on their own text: untouched numbers keep every
+  // digit (beyond 2^53 too), with or without another field to redact, on legacy
+  // function_call, tool_calls and Responses arguments alike.
+  const big = '{"id":9007199254740993,"f":1.50,"e":1e400}';
+  const withPii = '{"id":9007199254740993,"to":"jane@corp.io","card":4012888888881881}';
+  const v = new Vault("strip");
+  const legacy = (args) => applyRedaction({ model: "m", messages: [{ role: "assistant", content: null, function_call: { name: "f", arguments: args } }] }, "openai", v, ALL, detector).deidBody.messages[0].function_call.arguments;
+  ok("apply: legacy arguments with nothing to redact are byte for byte", legacy(big) === big, legacy(big));
+  ok("apply: legacy arguments keep a big integer next to a redacted field", legacy(withPii) === '{"id":9007199254740993,"to":"[EMAIL]","card":"[CREDIT_CARD]"}', legacy(withPii));
+  const tc = applyRedaction({ model: "m", messages: [{ role: "assistant", content: null, tool_calls: [{ id: "c", type: "function", function: { name: "f", arguments: withPii } }] }] }, "openai", v, ALL, detector).deidBody.messages[0].tool_calls[0].function.arguments;
+  ok("apply: tool_calls arguments keep a big integer next to a redacted field", tc === '{"id":9007199254740993,"to":"[EMAIL]","card":"[CREDIT_CARD]"}', tc);
+  const ra = applyRedaction({ model: "m", input: [{ type: "function_call", call_id: "c", name: "f", arguments: withPii }] }, "openai", v, ALL, detector, true, "responses").deidBody.input[0].arguments;
+  ok("apply: Responses arguments keep a big integer next to a redacted field", ra === '{"id":9007199254740993,"to":"[EMAIL]","card":"[CREDIT_CARD]"}', ra);
+  // A card spelled with a decimal or an exponent is still the card: detected on the exact
+  // decimal value of the literal, and the whole literal replaced.
+  for (const [lex, want] of [["4.111111111111111e15", "4111111111111111"], ["4111111111111111.0", "4111111111111111"], ["41111111111111110E-1", "4111111111111111"], ["-12e2", "-1200"], ["1.5", "1.5"], ["0.0", "0"], ["1e999", "1e999"], ["9007199254740993", "9007199254740993"],
+    ["4111111111111111" + "0".repeat(401) + "e-401", "4111111111111111"], ["0.0004111111111111111e19", "4111111111111111"], ["1e-99999999999999999999", "1e-99999999999999999999"], ["7e99999999999999999999", "7e99999999999999999999"], ["1" + "0".repeat(41), "1" + "0".repeat(41)], ["1" + "0".repeat(39), "1" + "0".repeat(39)]])
+    ok(`exactDecimal: ${lex} -> ${want}`, exactDecimal(lex) === want, exactDecimal(lex));
+  {
+    // A huge exponent costs nothing: decided by counting, never by building the digits.
+    const t0 = Date.now();
+    const out = legacy('{"n":1e999999999,"m":5e-999999999}');
+    ok("apply: a huge exponent is left as written, quickly", out === '{"n":1e999999999,"m":5e-999999999}' && Date.now() - t0 < 1000, out);
+  }
+  for (const lex of ["4111111111111111.0", "4.111111111111111e15", "4111111111111111" + "0".repeat(401) + "e-401"]) {
+    const out = legacy(`{"card":${lex},"f":1.50}`);
+    ok(`apply: a card written ${lex} is redacted whole, other numbers byte for byte`, out === '{"card":"[CREDIT_CARD]","f":1.50}', out);
+  }
+  const spaced = '{ "to" : "jane@corp.io" ,\n "n": 2 }';
+  const so = legacy(spaced);
+  ok("apply: the arguments' own spacing is kept", so === '{ "to" : "[EMAIL]" ,\n "n": 2 }', so);
+}
+{
+  // Citations into a plain-text document cordon redacted: cited_text and document_title get
+  // real values back, and char_location offsets are the caller's, not the redacted text's.
+  const v = new Vault("reversible");
+  const orig = "Contact jane@corp.io today. Then call nobody.";
+  const body = { model: "m", messages: [{ role: "user", content: [
+    { type: "document", source: { type: "url", url: "https://x.example/a.pdf" } },
+    { type: "document", title: "notes for jane@corp.io", citations: { enabled: true }, source: { type: "text", media_type: "text/plain", data: orig } },
+  ] }] };
+  const sent = applyRedaction(body, "anthropic", v, ALL, detector).deidBody.messages[0].content[1];
+  const red = sent.source.data;
+  const tok = red.slice(8, red.indexOf(" today"));
+  const cite = (from, to) => ({ type: "char_location", cited_text: red.slice(from, to), document_index: 1, document_title: sent.title, start_char_index: from, end_char_index: to });
+  const after = cite(red.indexOf("Then"), red.indexOf("Then") + 4);
+  const over = cite(0, red.indexOf(" today"));
+  const inside = cite(red.indexOf(tok) + 3, red.indexOf(tok) + 6);
+  const resp = { content: [{ type: "text", text: "see", citations: [after, over, inside] }] };
+  const out = reidentifyBody(resp, "anthropic", v, "messages").content[0].citations;
+  ok("citations: an offset after a placeholder is the caller's", out[0].start_char_index === orig.indexOf("Then") && out[0].end_char_index === orig.indexOf("Then") + 4 && out[0].cited_text === "Then", JSON.stringify(out[0]));
+  ok("citations: a range over a placeholder covers the whole value, cited_text restored", out[1].start_char_index === 0 && out[1].end_char_index === orig.indexOf(" today") && out[1].cited_text === "Contact jane@corp.io", JSON.stringify(out[1]));
+  ok("citations: a range inside a placeholder maps to the value it replaced", out[2].start_char_index === orig.indexOf("jane") && out[2].end_char_index === orig.indexOf(" today") && out[2].cited_text === "jane@corp.io", JSON.stringify(out[2]));
+  // One endpoint inside a placeholder: the range widens to the whole value, and cited_text
+  // quotes the caller's text over the widened range, never a piece of the token.
+  const startIn = reidentifyBody({ content: [{ type: "text", text: "s", citations: [cite(red.indexOf(tok) + 3, red.indexOf("today") + 5)] }] }, "anthropic", v, "messages").content[0].citations[0];
+  ok("citations: a range starting inside a placeholder quotes the caller's text", startIn.start_char_index === orig.indexOf("jane") && startIn.end_char_index === orig.indexOf("today") + 5 && startIn.cited_text === "jane@corp.io today", JSON.stringify(startIn));
+  const endIn = reidentifyBody({ content: [{ type: "text", text: "e", citations: [cite(0, red.indexOf(tok) + 4)] }] }, "anthropic", v, "messages").content[0].citations[0];
+  ok("citations: a range ending inside a placeholder quotes the caller's text", endIn.start_char_index === 0 && endIn.end_char_index === orig.indexOf(" today") && endIn.cited_text === "Contact jane@corp.io", JSON.stringify(endIn));
+  ok("citations: document_title restored", out[0].document_title === "notes for jane@corp.io", out[0].document_title);
+  // A document cordon did not change, or another document_index, is left as cited.
+  const plain = reidentifyBody({ content: [{ type: "text", text: "x", citations: [{ type: "char_location", cited_text: "ab", document_index: 0, start_char_index: 3, end_char_index: 5 }] }] }, "anthropic", v, "messages").content[0].citations[0];
+  ok("citations: an untouched document keeps its offsets", plain.start_char_index === 3 && plain.end_char_index === 5);
+  // Replayed as history, the restored citation is redacted again (cited_text and title).
+  const next = new Vault("reversible");
+  const hist = { model: "m", messages: [{ role: "user", content: "q" }, { role: "assistant", content: [{ type: "text", text: "see", citations: out }] }] };
+  const rh = applyRedaction(hist, "anthropic", next, ALL, detector).deidBody.messages[1].content[0].citations;
+  ok("citations: replayed as history, cited_text and document_title are redacted again", !JSON.stringify(rh).includes("jane@corp.io") && /<EMAIL_/.test(rh[1].cited_text) && /<EMAIL_/.test(rh[0].document_title), JSON.stringify(rh));
+  // Offsets count Unicode characters: a character outside the BMP before the value.
+  const ev = new Vault("reversible");
+  const origU = "\u{1F600} jane@corp.io end";
+  const sentU = applyRedaction({ model: "m", messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: origU } }] }] }, "anthropic", ev, ALL, detector).deidBody.messages[0].content[0].source.data;
+  const ci = (t, sub) => Array.from(t.slice(0, t.indexOf(sub))).length;
+  const cu = { type: "char_location", cited_text: "end", document_index: 0, start_char_index: ci(sentU, "end"), end_char_index: ci(sentU, "end") + 3 };
+  restoreCitation(cu, ev);
+  ok("citations: offsets in Unicode characters, past a character outside the BMP", cu.start_char_index === ci(origU, "end") && cu.end_char_index === ci(origU, "end") + 3, JSON.stringify(cu));
+}
+{
   // Chat: an assistant's refusal and legacy function_call arguments are model-visible.
   const v = new Vault("strip");
   const body = { model: "m", messages: [
@@ -220,6 +298,9 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   ok("apply: chat refusal redacted", d.messages[0].refusal === "not for [EMAIL]", d.messages[0].refusal);
   ok("apply: legacy function_call arguments redacted and still JSON", fc.to === "[EMAIL]" && fc.n === 1 && d.messages[0].function_call.name === "send", d.messages[0].function_call.arguments);
   ok("apply: a function message's content redacted", d.messages[1].content === "sent to [EMAIL]");
+  // A custom tool call replayed as history: its plain-text input is redacted.
+  const cb = applyRedaction({ model: "m", messages: [{ role: "assistant", content: null, tool_calls: [{ id: "c", type: "custom", custom: { name: "shell", input: "mail jane@corp.io" } }] }] }, "openai", new Vault("strip"), ALL, detector).deidBody;
+  ok("apply: a chat custom tool call's input redacted on replay", cb.messages[0].tool_calls[0].custom.input === "mail [EMAIL]" && cb.messages[0].tool_calls[0].custom.name === "shell", JSON.stringify(cb.messages[0]));
 }
 {
   // redactSystem=false → system prompt is application scaffolding, left untouched;
@@ -599,7 +680,29 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   const cut = `{"a":"${em.slice(0, 5)}`;
   const tout = ts.push(cut) + ts.end();
   ok("args stream: a tail cut inside a placeholder is rejected and counted unresolved", tst.rejected === "the arguments end inside a placeholder" && tst.unresolved === 1, JSON.stringify(tst));
-  ok("args stream: and nothing is guessed into it", tout === cut && !tout.includes("john@acme.com"), tout);
+  ok("args stream: and nothing of the refused call is released", tout === "" && !tout.includes("john@acme.com"), tout);
+
+  // JSON arguments are released only once the whole-document checks pass: fragments give
+  // nothing, a clean call gives the whole restored document at the end, and a call refused
+  // for colliding names or depth gives nothing at all.
+  {
+    const bv = new Vault("reversible");
+    const e1 = bv.placeholderFor("a@corp.io", "EMAIL");
+    const e2 = bv.placeholderFor("b@corp.io", "EMAIL");
+    const run = (doc, pol) => {
+      const st = { unresolved: 0 };
+      const s = new ArgStream(argContext(bv, true, "echo", st, pol));
+      const parts = [];
+      for (let i = 0; i < doc.length; i += 4) parts.push(s.push(doc.slice(i, i + 4)));
+      return { parts, end: s.end(), st };
+    };
+    const clean = run(`{"to":"${e1}","n":1}`, ALL_TOOLS);
+    ok("args stream: a clean call releases nothing until the end, then the whole document", clean.parts.every((p) => p === "") && clean.end === '{"to":"a@corp.io","n":1}', JSON.stringify(clean));
+    const coll = run(`{"${e1}":1,"${e2}":2}`, parseRestoreTools(""));
+    ok("args stream: a call refused for colliding names releases nothing", coll.parts.every((p) => p === "") && coll.end === "" && /same name/.test(coll.st.rejected ?? ""), JSON.stringify(coll));
+    const deep = run("[".repeat(70) + `"${e1}"` + "]".repeat(70), ALL_TOOLS);
+    ok("args stream: a call refused for depth releases nothing", deep.parts.every((p) => p === "") && deep.end === "" && /deeper than 64/.test(deep.st.rejected ?? ""), JSON.stringify(deep.st));
+  }
 
   // A parsed input: property names are restored like values, collisions and deep nesting rejected.
   const o1 = { [em]: "x", nested: { [em]: em } };

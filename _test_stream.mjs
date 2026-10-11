@@ -417,6 +417,22 @@ function validateSSE(sse) {
     ok("stream/chat-choices: the first choice's text is intact", txt.includes('"content":"ok"'));
   }
 
+  // A streamed citation's cited_text and document_title get real values back.
+  await reset();
+  txt = await (await post("/v1/messages", aBody("CITE " + PII))).text();
+  {
+    const c = frames(txt).find((x) => x.j?.delta?.type === "citations_delta")?.j?.delta?.citation;
+    ok("stream/citations: cited_text and document_title restored", c?.cited_text?.includes("john@acme.com") && c?.document_title?.includes("john@acme.com") && !/<EMAIL_/.test(JSON.stringify(c)), JSON.stringify(c));
+  }
+
+  // A chat custom tool call: its plain-text input restored as it streams.
+  await reset();
+  txt = await (await post("/v1/chat/completions", chatTool("CUSTOM "))).text();
+  {
+    const input = joinFrames(txt, (j) => j.choices?.[0]?.delta?.tool_calls?.[0]?.custom?.input ?? "");
+    ok("stream/chat-custom: the custom input is restored", input.includes("john@acme.com") && !/<EMAIL_/.test(input), input);
+  }
+
   // A stream that stops inside a placeholder in the arguments: the call is rejected with
   // the dialect's error frame, never completed by guessing which placeholder it was.
   await reset();
@@ -425,6 +441,7 @@ function validateSSE(sse) {
     const f = frames(txt);
     ok("stream/chat-truncated: ends with an error frame", f.at(-1)?.j?.error?.code === "cordon_unresolved_placeholder", JSON.stringify(f.at(-1)?.j));
     ok("stream/chat-truncated: no value is guessed into the arguments", !chatArgs(txt).includes("john@acme.com"));
+    ok("stream/chat-truncated: no fragment of the refused call reached the client", chatArgs(txt) === "", chatArgs(txt));
   }
   await reset();
   txt = await (await post("/v1/messages", aBody("TOOLCALL ARGTRUNC " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }))).text();
@@ -433,6 +450,7 @@ function validateSSE(sse) {
     const args = joinFrames(txt, (j) => (j.type === "content_block_delta" && j.delta?.type === "input_json_delta" ? j.delta.partial_json : ""));
     ok("stream/anthropic-truncated: ends with an error frame", f.at(-1)?.j?.type === "error" && f.at(-1)?.ev === "error", JSON.stringify(f.at(-1)?.j));
     ok("stream/anthropic-truncated: no value is guessed into the input", !args.includes("john@acme.com"));
+    ok("stream/anthropic-truncated: no fragment of the refused call reached the client", args === "", args);
   }
   await reset();
   txt = await (await post("/v1/messages", aBody("TOOLCALL STARTINPUT " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }))).text();

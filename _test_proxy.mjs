@@ -505,6 +505,13 @@ const rawPost = (path, body) =>
     ok(`tool/unresolved/${label}: X-Cordon-Unresolved counts each one`, res.headers.get("x-cordon-unresolved") === "2", res.headers.get("x-cordon-unresolved"));
     ok(`tool/unresolved/${label}: no part of the call is delivered`, !t.includes("john@acme.com") && !t.includes("EMAIL_ABCDEF_7"), t);
   }
+  // A chat custom tool call's plain-text input is restored like a function's arguments.
+  await reset();
+  res = await post("/v1/chat/completions", oBody("TOOLCALL CUSTOM " + PII, { tools: [{ type: "function", function: TOOL[0] }] }));
+  {
+    const cu = (await res.json())?.choices?.[0]?.message?.tool_calls?.[0]?.custom;
+    ok("tool/chat-custom: the custom input is restored", res.status === 200 && cu?.input?.includes("john@acme.com") && !/<EMAIL_/.test(cu.input), JSON.stringify(cu));
+  }
   // A whole custom tool input that ends inside a placeholder is refused, as the stream is.
   await reset();
   res = await post("/v1/responses", rBody("TOOLCALL CUSTOM " + PII + " use <EMAIL_ABC", { tools: TOOL }));

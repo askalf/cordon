@@ -2,7 +2,8 @@ import { clone } from "../util";
 import type { Detector, Dialect, Provider, RedactSet, Span } from "../types";
 import type { Vault } from "./vault";
 
-type Slot = { get(): string; set(v: string): void; numeric?: boolean };
+// `doc`: the slot is a Messages document's plain-text source, at this document_index.
+type Slot = { get(): string; set(v: string): void; numeric?: boolean; doc?: number };
 
 // Leaf keys come from client-supplied bodies, so a key can literally be named
 // "__proto__" or "constructor". Write those via defineProperty so the redacted value
@@ -74,19 +75,111 @@ function pushKeySlots(obj: any, keys: string[], slots: Slot[], finalizers: (() =
   });
 }
 
-// A JSON-string field (tool-call arguments): parse → redact its leaves (incl. NUMERIC
-// PII) → re-serialize, so a redacted number becomes a QUOTED "<TYPE_N>" and the args
-// stay valid JSON (a textual replace left an unquoted placeholder). Unparseable args
-// fall back to text redaction.
+/** The most digits an integral number literal is expanded to for detection. */
+const MAX_INTEGRAL_DIGITS = 40;
+
+/**
+ * The exact decimal value of a JSON number literal, from its digits (never through a JS
+ * number, which rounds past 2^53): an integral value as plain digits with its sign
+ * ("4111111111111111" for 4.111111111111111e15, 4111111111111111.0, or the card's digits
+ * followed by zeros with a compensating negative exponent), anything else as written.
+ * Normalised by significant digits, counted rather than built, so an exponent of any size
+ * costs nothing; a value with a fractional part, or an integer longer than
+ * MAX_INTEGRAL_DIGITS, is left as written.
+ */
+export function exactDecimal(lexeme: string): string {
+  const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(lexeme);
+  if (!m) return lexeme;
+  const exp = Number(m[4] ?? 0);
+  if (!Number.isFinite(exp)) return lexeme;
+  let digits = m[2] + (m[3] ?? "");
+  let point = m[2].length + exp; // where the decimal point falls in `digits`
+  const lead = digits.length - digits.replace(/^0+/, "").length;
+  digits = digits.slice(lead);
+  point -= lead;
+  digits = digits.replace(/0+$/, "");
+  if (!digits) return "0";
+  if (point < digits.length || point > MAX_INTEGRAL_DIGITS) return lexeme;
+  return m[1] + digits + "0".repeat(point - digits.length);
+}
+
+// A JSON-string field (tool-call arguments), redacted on its own text: one slot per
+// string literal (property names included, since the response side restores a value in a
+// name as in a value) and one per number, each written back in place. Nothing else is
+// re-serialised, so an untouched number keeps its digits (an integer beyond 2^53 too), and
+// a redacted number becomes a QUOTED "<TYPE_N>" so the arguments stay valid JSON. Two
+// names in one object that redact to the same name, or nesting deeper than
+// MAX_LEAF_DEPTH, refuse the request. Text that is not a JSON object or array falls back
+// to text redaction.
 function pushJsonString(obj: any, key: string, slots: Slot[], finalizers: (() => void)[]): void {
+  const text: string = obj[key];
   let parsed: any;
-  try { parsed = JSON.parse(obj[key]); } catch { parsed = undefined; }
-  if (parsed && typeof parsed === "object") {
-    pushStringLeaves(parsed, slots, 0, finalizers);
-    finalizers.push(() => { obj[key] = JSON.stringify(parsed); });
-  } else {
+  try { parsed = JSON.parse(text); } catch { parsed = undefined; }
+  if (!parsed || typeof parsed !== "object") {
     slots.push(slot(obj, key));
+    return;
   }
+  type Lit = { start: number; end: number; value: string; out?: string };
+  const lits: Lit[] = [];
+  // Per object: the literal index of each property name, to check names after redaction.
+  const objects: number[][] = [];
+  const stack: Array<{ names: number[]; wantKey: boolean } | null> = [];
+  for (let i = 0; i < text.length; ) {
+    const ch = text[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      const lit: Lit = { start: i, end: j + 1, value: JSON.parse(text.slice(i, j + 1)) };
+      const top = stack[stack.length - 1];
+      if (top?.wantKey) {
+        top.names.push(lits.length);
+        top.wantKey = false;
+      }
+      lits.push(lit);
+      slots.push({ get: () => lit.value, set: (v) => { lit.out = JSON.stringify(v); } });
+      i = j + 1;
+      continue;
+    }
+    if (ch === "-" || (ch >= "0" && ch <= "9")) {
+      const m = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(text.slice(i))!;
+      const lit: Lit = { start: i, end: i + m[0].length, value: m[0] };
+      lits.push(lit);
+      // Detected on the number's exact decimal value (4111111111111111.0 and
+      // 4.111111111111111e15 are the same card), and a match replaces the whole literal.
+      const value = exactDecimal(m[0]);
+      slots.push({ get: () => value, set: (v) => { lit.out = JSON.stringify(v); }, numeric: true });
+      i = lit.end;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      const frame = ch === "{" ? { names: [] as number[], wantKey: true } : null;
+      if (frame) objects.push(frame.names);
+      stack.push(frame);
+      if (stack.length - 1 > MAX_LEAF_DEPTH) throw tooDeep("Tool-call arguments");
+    } else if (ch === "}" || ch === "]") stack.pop();
+    else if (ch === ",") {
+      const top = stack[stack.length - 1];
+      if (top) top.wantKey = true;
+    }
+    i++;
+  }
+  finalizers.push(() => {
+    const changed = lits.filter((l) => l.out !== undefined);
+    if (!changed.length) return;
+    const repeats = (names: string[]) => names.length - new Set(names).size;
+    for (const names of objects) {
+      const after = names.map((n) => (lits[n].out !== undefined ? JSON.parse(lits[n].out!) : lits[n].value));
+      if (repeats(after) > repeats(names.map((n) => lits[n].value)))
+        throw new Error("two tool-call argument names redact to the same name; refusing to forward the request");
+    }
+    let out = "";
+    let last = 0;
+    for (const l of changed) {
+      out += text.slice(last, l.start) + l.out;
+      last = l.end;
+    }
+    obj[key] = out + text.slice(last);
+  });
 }
 
 // Keys the Responses input walk never redacts, at any depth. The walk is fail-closed (every
@@ -157,6 +250,9 @@ function requestTextSlots(
   const slots: Slot[] = [];
   const finalizers: (() => void)[] = []; // run after redaction (re-serialize parsed JSON-string fields)
 
+  // Messages documents in the order the request walk meets them: a citation's
+  // document_index counts them the same way.
+  let docIndex = 0;
   const pushContent = (container: any, key: string | number) => {
     const c = container[key];
     if (typeof c === "string") {
@@ -174,6 +270,14 @@ function requestTextSlots(
           // the previous reply's output to the next request's input, and that reply left
           // here with its real values restored.
           slots.push(slot(part, "text"));
+          // A Messages reply replayed as history: its citations carry the restored text of
+          // what they cite, and the titles of what they cite.
+          if (Array.isArray(part.citations))
+            for (const c of part.citations) {
+              if (!c || typeof c !== "object") continue;
+              for (const k of ["cited_text", "document_title", "title"])
+                if (typeof c[k] === "string") slots.push(slot(c, k));
+            }
         } else if (part.type === "refusal" && typeof part.refusal === "string") {
           slots.push(slot(part, "refusal"));
         } else if (part.type === "tool_result" || part.type === "mcp_tool_result") {
@@ -194,7 +298,8 @@ function requestTextSlots(
           if (typeof part.title === "string") slots.push(slot(part, "title"));
           if (typeof part.context === "string") slots.push(slot(part, "context"));
           const src = part.source;
-          if (src?.type === "text" && typeof src.data === "string") slots.push(slot(src, "data"));
+          const doc = docIndex++;
+          if (src?.type === "text" && typeof src.data === "string") slots.push({ ...slot(src, "data"), doc });
           else if (src?.type === "content") {
             if (typeof src.content === "string") slots.push(slot(src, "content"));
             else if (Array.isArray(src.content)) pushContent(src, "content");
@@ -281,12 +386,32 @@ function requestTextSlots(
     if (Array.isArray(msg.tool_calls))
       for (const tc of msg.tool_calls) {
         const fn = tc?.function;
-        if (!fn || typeof fn.arguments !== "string") continue;
-        pushJsonString(fn, "arguments", slots, finalizers);
+        if (fn && typeof fn.arguments === "string") pushJsonString(fn, "arguments", slots, finalizers);
+        // A custom tool's input is plain text, restored on the way down like arguments.
+        if (tc?.custom && typeof tc.custom.input === "string") slots.push(slot(tc.custom, "input"));
       }
   }
 
   return { slots, finalizers };
+}
+
+/** Where each placeholder landed in a redacted document, and the caller's span it
+ *  replaced, ascending (the same tokens replaceSpans wrote). */
+// In Unicode characters, the unit Messages citation offsets count, not the UTF-16 code
+// units of the detector's spans: a character outside the BMP before a span is one.
+function documentMap(text: string, spans: Span[], vault: Vault) {
+  const chars = (i: number) => Array.from(text.slice(0, i)).length;
+  let shift = 0;
+  return [...spans]
+    .sort((a, b) => a.start - b.start)
+    .map((s) => {
+      const len = Array.from(vault.placeholderFor(s.value, s.type)).length;
+      const oStart = chars(s.start);
+      const oEnd = chars(s.end);
+      const rStart = oStart + shift;
+      shift += len - (oEnd - oStart);
+      return { rStart, rEnd: rStart + len, oStart, oEnd };
+    });
 }
 
 /** Replace spans in one string right-to-left so earlier offsets stay valid. */
@@ -337,6 +462,7 @@ export function applyRedaction(
       spans = spans.filter((s) => NUMERIC_PII.has(s.type) && s.start === 0 && s.end === text.length);
     if (!spans.length) continue;
     sl.set(replaceSpans(text, spans, vault));
+    if (sl.doc !== undefined) vault.documents.set(sl.doc, { source: text, map: documentMap(text, spans, vault) });
     all.push(...spans);
   }
   for (const f of finalizers) f(); // re-serialize parsed JSON-string fields (tool_calls.arguments)

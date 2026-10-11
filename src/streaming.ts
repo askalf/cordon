@@ -8,6 +8,7 @@ import {
   restoreArgObject,
   restoreArgs,
   restoreArgsWhole,
+  restoreCitation,
   StreamReidentifier,
   DeferredArgs,
   argsFailed,
@@ -287,12 +288,14 @@ export async function captureAndReidentify(
   // ---- Chat completions: everything per choice (a request with n > 1 streams several) ----
   // A choice's text and each of its tool calls (by tool-call index, or "fc" for the legacy
   // function_call) hold their own tails; a call's name arrives on its first fragment.
-  type Choice = { text: StreamReidentifier; args: Map<string, ArgStream | DeferredArgs>; names: Map<string, string> };
+  // A call's arguments are JSON text (a function) or plain text (a custom tool's input);
+  // `custom` holds the keys of the custom calls.
+  type Choice = { text: StreamReidentifier; args: Map<string, ArgStream | DeferredArgs>; names: Map<string, string>; custom: Set<string> };
   const choices = new Map<number, Choice>();
   const choiceFor = (ci: number): Choice => {
     let st = choices.get(ci);
     if (!st) {
-      st = { text: new StreamReidentifier(vault), args: new Map(), names: new Map() };
+      st = { text: new StreamReidentifier(vault), args: new Map(), names: new Map(), custom: new Set() };
       choices.set(ci, st);
     }
     return st;
@@ -303,16 +306,21 @@ export async function captureAndReidentify(
   const argsFor = (st: Choice, key: string): ArgStream | DeferredArgs => {
     let a = st.args.get(key);
     if (!a) {
+      const json = !st.custom.has(key);
       a = restorePolicy.all || restorePolicy.none
-        ? new ArgStream(argContext(vault, true, undefined, stats))
-        : new DeferredArgs(() => argContext(vault, true, st.names.get(key), stats));
+        ? new ArgStream(argContext(vault, json, undefined, stats))
+        : new DeferredArgs(() => argContext(vault, json, st.names.get(key), stats));
       st.args.set(key, a);
     }
     return a;
   };
   const chatFrame = (ci: number, delta: unknown) => `data: ${JSON.stringify({ choices: [{ index: ci, delta }] })}\n\n`;
-  const argDelta = (key: string, chunk: string) =>
-    key === "fc" ? { function_call: { arguments: chunk } } : { tool_calls: [{ index: Number(key.slice(1)), function: { arguments: chunk } }] };
+  const argDelta = (st: Choice, key: string, chunk: string) =>
+    key === "fc"
+      ? { function_call: { arguments: chunk } }
+      : st.custom.has(key)
+        ? { tool_calls: [{ index: Number(key.slice(1)), custom: { input: chunk } }] }
+        : { tool_calls: [{ index: Number(key.slice(1)), function: { arguments: chunk } }] };
   /** Everything one choice still holds, except what the current frame already carried. */
   const flushChoice = (ci: number, st: Choice, skipText: boolean, skipArgs: Set<string>): boolean => {
     if (!skipText) {
@@ -323,7 +331,7 @@ export async function captureAndReidentify(
       if (skipArgs.has(key)) continue;
       const chunk = a.end();
       if (!guard()) return false;
-      if (chunk) send(chatFrame(ci, argDelta(key, chunk)));
+      if (chunk) send(chatFrame(ci, argDelta(st, key, chunk)));
     }
     return true;
   };
@@ -402,6 +410,9 @@ export async function captureAndReidentify(
         if (j.delta?.type === "text_delta") {
           emitIndex = j.index ?? emitIndex;
           emitText(reider.push(j.delta.text ?? ""), emitIndex); // suppress original, re-emit restored
+        } else if (j.delta?.type === "citations_delta" && j.delta.citation) {
+          restoreCitation(j.delta.citation, vault);
+          send(reframe(frame, j));
         } else if (j.delta?.type === "input_json_delta") {
           const index = Number(j.index ?? 0);
           let blk = toolBlocks.get(index);
@@ -558,6 +569,18 @@ export async function captureAndReidentify(
           tc.function.arguments = a.push(tc.function.arguments) + (fin ? a.end() : "");
           changed = true;
           hadArgs.add(key);
+        }
+        // A custom tool's plain-text input.
+        const cu = tc?.custom;
+        if (cu && typeof cu === "object") {
+          st.custom.add(key);
+          if (typeof cu.name === "string") st.names.set(key, (st.names.get(key) ?? "") + cu.name);
+          if (typeof cu.input === "string") {
+            const a = argsFor(st, key);
+            cu.input = a.push(cu.input) + (fin ? a.end() : "");
+            changed = true;
+            hadArgs.add(key);
+          }
         }
       }
       const fc = d?.function_call;

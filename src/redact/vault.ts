@@ -24,6 +24,11 @@ import type { RedactMode } from "../types";
 export class Vault {
   private fwd = new Map<string, string>(); // value → placeholder
   private rev = new Map<string, string>(); // placeholder → value (reversible only)
+  /** Per Messages document (by document_index), the caller's text and, ascending and
+   *  non-overlapping, where each placeholder sits in the text sent upstream and which span
+   *  of the caller's text it replaced: citations into that document are translated back to
+   *  the caller's offsets, and a range that ends inside a placeholder quotes the caller's text. */
+  readonly documents = new Map<number, { source: string; map: Array<{ rStart: number; rEnd: number; oStart: number; oEnd: number }> }>();
   private counters = new Map<string, number>(); // type → next counter
   // Per-request nonce for counter tokens (uppercase hex). Fresh per Vault, so it's stable
   // within a request but unpredictable to the caller.
