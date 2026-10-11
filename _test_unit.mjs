@@ -710,6 +710,57 @@ ok("timeout: empty, zero, negative and Infinity -> default",
     }
   }
 
+  // A top-level value is judged by the key the model wrote: with echo.[EMAIL] on the list,
+  // a withheld placeholder key that becomes [EMAIL] does not authorize its value, on parsed
+  // input and on JSON text alike.
+  {
+    const kv2 = new Vault("reversible");
+    const k1 = kv2.placeholderFor("key@corp.io", "EMAIL");
+    const v1 = kv2.placeholderFor("value@corp.io", "EMAIL");
+    const pol = parseRestoreTools("echo.[EMAIL]");
+    const obj = { [k1]: v1 };
+    restoreArgObject(obj, argContext(kv2, false, "echo", { unresolved: 0 }, pol));
+    const txt = restoreArgsWhole(JSON.stringify({ [k1]: v1 }), argContext(kv2, true, "echo", { unresolved: 0 }, pol));
+    ok("policy parity: a renamed key does not authorize its value (parsed input)", JSON.stringify(obj) === '{"[EMAIL]":"[EMAIL]"}', JSON.stringify(obj));
+    ok("policy parity: and JSON text gives the same arguments", txt === JSON.stringify(obj), txt);
+  }
+
+  // A placeholder outside a string literal ({"phone":<PHONE_…>}) is refused before anything
+  // is substituted: restored, a digit-only phone would turn into a JSON number, which the
+  // replay walk does not redact as a phone.
+  {
+    const pv = new Vault("reversible");
+    const ph = pv.placeholderFor("5551234567", "PHONE");
+    const em2 = pv.placeholderFor("jane@corp.io", "EMAIL");
+    const bare = `{"phone":${ph},"note":"${em2}"}`;
+    const outside = /outside a JSON string/;
+    const ws = { unresolved: 0 };
+    const wo = restoreArgsWhole(bare, argContext(pv, true, "echo", ws, ALL_TOOLS));
+    ok("args: a placeholder outside a string is refused (whole)", outside.test(ws.rejected ?? "") && wo.includes(ph) && !wo.includes("5551234567"), JSON.stringify({ ws, wo }));
+    for (const n of [1, 2, 3]) {
+      const ss = { unresolved: 0 };
+      const as = new ArgStream(argContext(pv, true, "echo", ss, ALL_TOOLS));
+      let so = "";
+      for (let i = 0; i < bare.length; i += n) so += as.push(bare.slice(i, i + n));
+      so += as.end();
+      ok(`args: a placeholder outside a string is refused (${n}-character stream)`, outside.test(ss.rejected ?? "") && !so.includes("5551234567"), JSON.stringify({ ss, so }));
+    }
+    // Inside a string, keys and values alike, it is restored as before.
+    const quoted = `{"phone":"${ph}","${em2}":1}`;
+    const qs = { unresolved: 0 };
+    const qo = restoreArgsWhole(quoted, argContext(pv, true, "echo", qs, ALL_TOOLS));
+    ok("args: the same placeholder inside a string is restored", !qs.rejected && JSON.parse(qo).phone === "5551234567" && JSON.parse(qo)["jane@corp.io"] === 1, qo);
+    // An escaped quote inside a string does not end it; a placeholder after it is inside.
+    const esc = `{"a":"say \\"hi\\" ${ph}"}`;
+    const es = { unresolved: 0 };
+    const eo = restoreArgsWhole(esc, argContext(pv, true, "echo", es, ALL_TOOLS));
+    ok("args: a placeholder after an escaped quote is still inside the string", !es.rejected && JSON.parse(eo).a === 'say "hi" 5551234567', eo);
+    // Replay: what the refused call carried is the token, so a later turn redacts nothing
+    // it never had; had the number gone out, the walk would have forwarded it as a number.
+    const replay = applyRedaction({ model: "m", messages: [{ role: "assistant", content: null, tool_calls: [{ id: "c", type: "function", function: { name: "echo", arguments: '{"phone":5551234567}' } }] }] }, "openai", new Vault("reversible"), ALL, detector).deidBody;
+    ok("replay: a digit-only phone as a JSON number is not redacted (why it must never be produced)", replay.messages[0].tool_calls[0].function.arguments.includes("5551234567"), replay.messages[0].tool_calls[0].function.arguments);
+  }
+
   // Nesting deeper than MAX_ARG_DEPTH is refused on JSON text, whole and streamed, as on
   // parsed objects; 64 levels pass.
   {

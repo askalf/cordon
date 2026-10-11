@@ -62,6 +62,11 @@ export class TopKeyTracker {
   private expectKey = false;
   key: string | undefined;
 
+  /** Whether the text fed so far ends inside a string literal. */
+  get inLiteral(): boolean {
+    return this.inString;
+  }
+
   feed(s: string): void {
     for (let i = 0; i < s.length; i++) this.step(s[i]);
   }
@@ -201,6 +206,17 @@ export function restoreArgs(text: string, c: ArgContext): string {
     out += before;
     const token = `<${name}>`;
     const value = c.vault.lookup(token);
+    // A placeholder belongs inside a string literal. Outside one ({"phone":<PHONE_…>}) the
+    // arguments are not JSON, and a substituted value would make them JSON of another
+    // type (a phone number as a number), which a later turn would replay unredacted. The
+    // call is refused and the token left as it came.
+    if (c.json && c.keys && !c.keys.inLiteral && (value !== undefined || isMintedPlaceholder(token))) {
+      c.stats.rejected ??= "a placeholder sits outside a JSON string";
+      out += m[0];
+      c.keys.feed(m[0]);
+      last = m.index + m[0].length;
+      continue;
+    }
     if (value === undefined) {
       if (isMintedPlaceholder(token)) c.stats.unresolved++;
       out += m[0];
