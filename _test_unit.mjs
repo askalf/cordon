@@ -576,6 +576,10 @@ ok("timeout: empty, zero, negative and Infinity -> default",
       ["distinct restored names pass", `{"${a1}":1,"${a2}":2}`, ALL_TOOLS, false],
       ["duplicates the model wrote itself are not this restore's", `{"x":1,"x":2,"y":"${a1}"}`, ALL_TOOLS, false],
     ];
+    // An unrelated duplicate the model wrote in one object never hides a new collision in
+    // another.
+    cases.push(["a collision next to an unrelated duplicate elsewhere", `{"a":{"x":1,"x":2},"b":{"alice@example.com":1,"${a1}":2}}`, ALL_TOOLS, true]);
+    cases.push(["a collision in the same object as an unrelated duplicate", `{"x":1,"x":2,"alice@example.com":3,"${a1}":4}`, ALL_TOOLS, true]);
     for (const [label, doc, pol, bad] of cases) {
       const ws = { unresolved: 0 };
       restoreArgsWhole(doc, argContext(kv, true, "echo", ws, pol));
@@ -588,6 +592,35 @@ ok("timeout: empty, zero, negative and Infinity -> default",
         ok(`args collide (${n}-character stream): ${label}`, (ss.rejected === "two argument names restore to the same name") === bad, JSON.stringify(ss));
       }
     }
+  }
+
+  // Nesting deeper than MAX_ARG_DEPTH is refused on JSON text, whole and streamed, as on
+  // parsed objects; 64 levels pass.
+  {
+    const nest = (n, inner) => '{"a":'.repeat(n) + inner + "}".repeat(n);
+    const dv = new Vault("reversible");
+    const dt = dv.placeholderFor("john@acme.com", "EMAIL");
+    for (const [label, doc, bad] of [
+      ["70 levels with a placeholder", nest(70, `"${dt}"`), true],
+      ["70 levels of arrays without one", "[".repeat(70) + "1" + "]".repeat(70), true],
+      ["65 levels (depth 64) with a placeholder", nest(65, `"${dt}"`), false],
+    ]) {
+      const ws = { unresolved: 0 };
+      restoreArgsWhole(doc, argContext(dv, true, "echo", ws, ALL_TOOLS));
+      const nestRe = /nest deeper than 64/;
+      ok(`args depth (whole): ${label}`, nestRe.test(ws.rejected ?? "") === bad, JSON.stringify(ws));
+      for (const n of [1, 7]) {
+        const ss = { unresolved: 0 };
+        const as = new ArgStream(argContext(dv, true, "echo", ss, ALL_TOOLS));
+        for (let i = 0; i < doc.length; i += n) as.push(doc.slice(i, i + n));
+        as.end();
+        ok(`args depth (${n}-character stream): ${label}`, nestRe.test(ss.rejected ?? "") === bad, JSON.stringify(ss));
+      }
+    }
+    const deepObj = JSON.parse(nest(70, `"${dt}"`));
+    const os = { unresolved: 0 };
+    restoreArgObject(deepObj, argContext(dv, false, "echo", os, ALL_TOOLS));
+    ok("args depth: the object path refuses the same 70-level document", /nest deeper than 64/.test(os.rejected ?? ""), JSON.stringify(os));
   }
 
   // A stream that ends inside `<NAME` is refused only when NAME is the start of a token

@@ -224,12 +224,16 @@ export function restoreArgs(text: string, c: ArgContext): string {
 }
 
 /**
- * Whether a JSON document has an object with two property names that decode to the same
- * string. A scan over the text, not a parse, so the numbers in it are never re-read; text
- * that is not well-formed JSON reports false (the tool's parser is the judge of that).
+ * The shape of a JSON document as far as the argument checks need it: the property names
+ * of each object, decoded, in document order, and how deep its containers nest (the top
+ * container is depth 0, as in restoreArgObject). A scan over the text, not a parse, so the
+ * numbers in it are never re-read; text that is not well-formed JSON gives null (the
+ * tool's parser is the judge of that).
  */
-export function hasDuplicateKeys(text: string): boolean {
-  const stack: Array<{ keys: Set<string>; wantKey: boolean } | null> = [];
+export function scanJsonShape(text: string): { objects: string[][]; depth: number } | null {
+  const objects: string[][] = [];
+  const stack: Array<{ keys: string[]; wantKey: boolean } | null> = [];
+  let depth = 0;
   let i = 0;
   try {
     while (i < text.length) {
@@ -239,17 +243,18 @@ export function hasDuplicateKeys(text: string): boolean {
         while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
         const top = stack[stack.length - 1];
         if (top?.wantKey) {
-          const key = JSON.parse(text.slice(i, j + 1)) as string;
-          if (top.keys.has(key)) return true;
-          top.keys.add(key);
+          top.keys.push(JSON.parse(text.slice(i, j + 1)) as string);
           top.wantKey = false;
         }
         i = j + 1;
         continue;
       }
-      if (ch === "{") stack.push({ keys: new Set(), wantKey: true });
-      else if (ch === "[") stack.push(null);
-      else if (ch === "}" || ch === "]") stack.pop();
+      if (ch === "{" || ch === "[") {
+        const frame = ch === "{" ? { keys: [] as string[], wantKey: true } : null;
+        if (frame) objects.push(frame.keys);
+        stack.push(frame);
+        depth = Math.max(depth, stack.length - 1);
+      } else if (ch === "}" || ch === "]") stack.pop();
       else if (ch === ",") {
         const top = stack[stack.length - 1];
         if (top) top.wantKey = true;
@@ -257,16 +262,36 @@ export function hasDuplicateKeys(text: string): boolean {
       i++;
     }
   } catch {
-    return false;
+    return null;
   }
-  return false;
+  return { objects, depth };
 }
 
-/** Refuse a restore that made two property names in one object the same: a restored value
- *  or two withheld ones ([EMAIL]) can collide, and the tool's parser keeps only one. A
- *  document that arrived with duplicates is the model's, not this restore's. */
+/** How many property names in one object repeat an earlier one. */
+const repeats = (keys: string[]): number => keys.length - new Set(keys).size;
+
+/** Whether any object in a JSON document has two property names that decode the same. */
+export function hasDuplicateKeys(text: string): boolean {
+  return scanJsonShape(text)?.objects.some((k) => repeats(k) > 0) ?? false;
+}
+
+/** The checks restoreArgObject makes on objects, made on JSON argument text: nesting
+ *  deeper than MAX_ARG_DEPTH is refused, and so is a restore that made two property names
+ *  in one object the same (a restored value meeting a literal, or two withheld values both
+ *  [EMAIL]; the tool's parser keeps only one). Judged object by object: duplicates the
+ *  model wrote itself are the tool's to judge, and never hide a collision elsewhere.
+ *  A restore only rewrites inside strings, so the objects of `before` and `after` line up. */
 function checkArgKeys(before: string, after: string, stats: ArgStats): void {
-  if (before !== after && hasDuplicateKeys(after) && !hasDuplicateKeys(before)) {
+  const b = scanJsonShape(before);
+  if (!b) return;
+  if (b.depth > MAX_ARG_DEPTH) {
+    stats.rejected ??= `the arguments nest deeper than ${MAX_ARG_DEPTH} levels`;
+    return;
+  }
+  if (before === after) return;
+  const a = scanJsonShape(after);
+  if (!a || a.objects.length !== b.objects.length) return;
+  if (a.objects.some((keys, i) => repeats(keys) > repeats(b.objects[i]))) {
     stats.rejected ??= "two argument names restore to the same name";
   }
 }
