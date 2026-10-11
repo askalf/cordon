@@ -17,8 +17,25 @@ export interface ProviderAdapter {
    *  output_index, content_index) plus the upstream event `type`, copied from the
    *  frame being re-emitted. */
   frameFromText(text: string, index?: number, ctx?: Record<string, unknown>): string;
-  /** Walk a non-streaming response body's assistant-text fields (for re-identify). */
-  responseTextSlots(body: any): Array<{ get(): string; set(v: string): void }>;
+  /** Walk a non-streaming response body's assistant-text fields (for re-identify). A
+   *  slot marked `json` is a JSON document carried as a string (tool-call arguments)
+   *  and is restored leaf-wise so the client still gets valid JSON. */
+  responseTextSlots(body: any): Array<ResponseSlot>;
+}
+
+export type ResponseSlot = { get(): string; set(v: string): void; json?: boolean };
+
+/** A slot for every string leaf of a tool call's already-parsed input (Anthropic
+ *  tool_use.input): the model's arguments are the one place a redacted value must come
+ *  back real, or the caller's tool runs on a placeholder. */
+function leafSlots(node: any, slots: ResponseSlot[], depth = 0): void {
+  if (depth > 16 || !node || typeof node !== "object") return;
+  const keys = Array.isArray(node) ? node.map((_: any, i: number) => i) : Object.keys(node);
+  for (const k of keys) {
+    const v = node[k];
+    if (typeof v === "string") slots.push({ get: () => node[k], set: (x) => (node[k] = x) });
+    else if (v && typeof v === "object") leafSlots(v, slots, depth + 1);
+  }
 }
 
 // ----------------------------- OpenAI (chat.completions) -----------------------------
@@ -37,7 +54,7 @@ export const openai: ProviderAdapter = {
     return `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n`;
   },
   responseTextSlots(body) {
-    const slots: Array<{ get(): string; set(v: string): void }> = [];
+    const slots: ResponseSlot[] = [];
     for (const ch of body?.choices ?? []) {
       const msg = ch?.message;
       if (msg && typeof msg.content === "string") {
@@ -46,6 +63,11 @@ export const openai: ProviderAdapter = {
         for (const part of msg.content)
           if (part?.type === "text" && typeof part.text === "string")
             slots.push({ get: () => part.text, set: (v) => (part.text = v) });
+      }
+      // The arguments the model chose for a tool are a JSON string; restored leaf-wise.
+      for (const tc of Array.isArray(msg?.tool_calls) ? msg.tool_calls : []) {
+        const fn = tc?.function;
+        if (fn && typeof fn.arguments === "string") slots.push({ get: () => fn.arguments, set: (v) => (fn.arguments = v), json: true });
       }
     }
     return slots;
@@ -69,10 +91,13 @@ export const anthropic: ProviderAdapter = {
     return `event: content_block_delta\ndata: ${JSON.stringify(data)}\n\n`;
   },
   responseTextSlots(body) {
-    const slots: Array<{ get(): string; set(v: string): void }> = [];
-    for (const block of body?.content ?? [])
+    const slots: ResponseSlot[] = [];
+    for (const block of body?.content ?? []) {
       if (block?.type === "text" && typeof block.text === "string")
         slots.push({ get: () => block.text, set: (v) => (block.text = v) });
+      // tool_use.input is already parsed: every string leaf is restored in place.
+      else if (block?.type === "tool_use" && block.input && typeof block.input === "object") leafSlots(block.input, slots);
+    }
     return slots;
   },
 };
@@ -82,6 +107,10 @@ export const anthropic: ProviderAdapter = {
  *  refusal are DISTINCT event types and a client consuming refusals reads only its
  *  own, so a refusal delta must be re-emitted as a refusal delta. */
 const RESPONSES_TEXT_DELTAS = new Set(["response.output_text.delta", "response.refusal.delta"]);
+/** The streamed fragments of a tool call's arguments (function_call) and a custom tool's
+ *  input: re-emitted under their own event type once restored, like a refusal delta. */
+export const RESPONSES_ARGUMENT_DELTAS = new Set(["response.function_call_arguments.delta", "response.custom_tool_call_input.delta"]);
+const RESPONSES_REEMITTED = new Set([...RESPONSES_TEXT_DELTAS, ...RESPONSES_ARGUMENT_DELTAS]);
 
 export const openaiResponses: ProviderAdapter = {
   parseDelta(data) {
@@ -99,15 +128,25 @@ export const openaiResponses: ProviderAdapter = {
     // not by a single block index; `ctx` carries those from the frame being re-emitted,
     // along with that frame's event type so a refusal delta stays a refusal delta.
     const type =
-      typeof ctx.type === "string" && RESPONSES_TEXT_DELTAS.has(ctx.type)
+      typeof ctx.type === "string" && RESPONSES_REEMITTED.has(ctx.type)
         ? ctx.type
         : "response.output_text.delta";
     const data = { ...ctx, type, delta: text };
     return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
   },
   responseTextSlots(body) {
-    const slots: Array<{ get(): string; set(v: string): void }> = [];
+    const slots: ResponseSlot[] = [];
     for (const item of body?.output ?? []) {
+      // A tool call's arguments are a JSON string and a custom tool's input plain text:
+      // the values the caller's tool will run on, restored before they reach it.
+      if (item?.type === "function_call" && typeof item.arguments === "string") {
+        slots.push({ get: () => item.arguments, set: (v) => (item.arguments = v), json: true });
+        continue;
+      }
+      if (item?.type === "custom_tool_call" && typeof item.input === "string") {
+        slots.push({ get: () => item.input, set: (v) => (item.input = v) });
+        continue;
+      }
       if (item?.type !== "message" || !Array.isArray(item.content)) continue;
       for (const part of item.content) {
         if (part?.type === "output_text" && typeof part.text === "string")

@@ -1,6 +1,7 @@
 import type { Dialect, HttpRes, Provider } from "./types";
 import type { ProviderAdapter } from "./providers";
-import { reidentifyBody, restore, StreamReidentifier } from "./redact/reidentify";
+import { reidentifyBody, restore, restoreJsonString, StreamReidentifier } from "./redact/reidentify";
+import { RESPONSES_ARGUMENT_DELTAS } from "./providers";
 import type { Vault } from "./redact/vault";
 
 /** Pipe an upstream Response straight to the client, verbatim (strip / off / errors). */
@@ -71,13 +72,31 @@ export async function captureAndReidentify(
   // is flushed and dropped when that part's own done frame arrives.
   const parts = new Map<string, { reider: StreamReidentifier; ctx: Record<string, unknown> }>();
   const partKey = (j: any) => `${j?.item_id ?? ""}/${j?.output_index ?? 0}/${j?.content_index ?? 0}`;
-  const partFor = (j: any, ctx: Record<string, unknown>) => {
+  // A tool call's arguments stream as fragments of JSON string literals, so that part's
+  // re-identifier escapes what it restores (json), where a text part restores as is.
+  const partFor = (j: any, ctx: Record<string, unknown>, json = false) => {
     const key = partKey(j);
     const found = parts.get(key);
     if (found) { found.ctx = ctx; return found; }
-    const made = { reider: new StreamReidentifier(vault), ctx };
+    const made = { reider: new StreamReidentifier(vault, { json }), ctx };
     parts.set(key, made);
     return made;
+  };
+  // Anthropic tool_use blocks stream their input as input_json_delta fragments, one
+  // re-identifier per block index, flushed when that block stops.
+  const jsonBlocks = new Map<number, StreamReidentifier>();
+  const emitJson = (index: number, chunk: string) => {
+    if (!chunk) return;
+    const data = { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: chunk } };
+    res.write(`event: content_block_delta\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+  // OpenAI chat streams a tool call's arguments as fragments on delta.tool_calls[i], one
+  // re-identifier per tool-call index, flushed on the finish frame.
+  const chatArgs = new Map<number, StreamReidentifier>();
+  const emitChatArgs = (index: number, chunk: string) => {
+    if (!chunk) return;
+    const data = { choices: [{ index: 0, delta: { tool_calls: [{ index, function: { arguments: chunk } }] } }] };
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
   /** Flush one part's held tail under its own addressing and forget it. */
   const flushPart = (j: any) => {
@@ -141,13 +160,23 @@ export async function captureAndReidentify(
         if (j.delta?.type === "text_delta") {
           emitIndex = j.index ?? emitIndex;
           emitText(reider.push(j.delta.text ?? ""), emitIndex); // suppress original, re-emit restored
+        } else if (j.delta?.type === "input_json_delta") {
+          // A tool_use block's arguments: the values the caller's tool will run on, so a
+          // placeholder in them is restored (JSON-escaped) before the client parses them.
+          const index = Number(j.index ?? 0);
+          let r = jsonBlocks.get(index);
+          if (!r) { r = new StreamReidentifier(vault, { json: true }); jsonBlocks.set(index, r); }
+          emitJson(index, r.push(j.delta.partial_json ?? ""));
         } else {
           res.write(frame);
         }
         return;
       }
       if (type === "content_block_stop") {
-        emitText(reider.end(), j?.index ?? emitIndex); // flush held text BEFORE this block closes (no-op for non-text)
+        const index = Number(j?.index ?? emitIndex);
+        const jr = jsonBlocks.get(index);
+        if (jr) { emitJson(index, jr.end()); jsonBlocks.delete(index); }
+        else emitText(reider.end(), index); // flush held text BEFORE this block closes (no-op for non-text)
         res.write(frame);
         return;
       }
@@ -161,6 +190,26 @@ export async function captureAndReidentify(
         j = JSON.parse(data);
       } catch {}
       const type = j?.type;
+      if (RESPONSES_ARGUMENT_DELTAS.has(type)) {
+        // A tool call's arguments or a custom tool's input, fragment by fragment: the
+        // values the caller's tool will run on, restored before they reach it.
+        const { delta: _d, ...ctx } = j;
+        const part = partFor(j, ctx, true);
+        emitText(part.reider.push(j.delta ?? ""), 0, part.ctx);
+        return;
+      }
+      if (type === "response.function_call_arguments.done") {
+        flushPart(j);
+        if (typeof j.arguments === "string") j.arguments = restoreJsonString(j.arguments, vault);
+        res.write(reframe(frame, j));
+        return;
+      }
+      if (type === "response.custom_tool_call_input.done") {
+        flushPart(j);
+        if (typeof j.input === "string") j.input = restore(j.input, vault);
+        res.write(reframe(frame, j));
+        return;
+      }
       if (type === "response.output_text.delta" || type === "response.refusal.delta") {
         // Suppress the original delta, re-emit the restorable prefix under the same
         // addressing AND the same event type — a refusal delta re-emitted as output
@@ -200,22 +249,40 @@ export async function captureAndReidentify(
         else res.write(frame);
         return;
       }
-      res.write(frame); // response.created / in_progress / output_item.added / content_part.added / function-call frames / ping
+      res.write(frame); // response.created / in_progress / output_item.added / content_part.added / ping
       return;
     }
 
     // openai
+    let oj: any;
     let ch: any;
     try {
-      ch = JSON.parse(data).choices?.[0];
+      oj = JSON.parse(data);
+      ch = oj.choices?.[0];
     } catch {}
     const content = ch?.delta?.content;
     if (typeof content === "string" && content.length) {
       emitText(reider.push(content)); // suppress original
       return;
     }
+    const toolCalls = ch?.delta?.tool_calls;
+    if (Array.isArray(toolCalls) && toolCalls.some((tc: any) => typeof tc?.function?.arguments === "string")) {
+      // The frame keeps its id, type and name fields; only the argument fragments are
+      // replaced by what is safe to emit now, the forming tail held per tool-call index.
+      for (const tc of toolCalls) {
+        if (typeof tc?.function?.arguments !== "string") continue;
+        const index = Number(tc.index ?? 0);
+        let r = chatArgs.get(index);
+        if (!r) { r = new StreamReidentifier(vault, { json: true }); chatArgs.set(index, r); }
+        tc.function.arguments = r.push(tc.function.arguments);
+      }
+      res.write(reframe(frame, oj));
+      return;
+    }
     if (ch?.finish_reason != null) {
       flushTail();
+      for (const [index, r] of chatArgs) emitChatArgs(index, r.end());
+      chatArgs.clear();
       res.write(frame);
       return;
     }

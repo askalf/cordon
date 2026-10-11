@@ -193,6 +193,67 @@ function streamAnthropic(res, text, body = {}) {
   res.end();
 }
 
+// A TOOL CALL instead of a text reply: the model answers by calling `echo` with the
+// received text as its one argument, in each dialect's own shape. Streams chunk the
+// arguments JSON in 3-character fragments, so a placeholder inside the JSON string
+// literal is split across frames the same way text placeholders are above. What the
+// client's tool would run on is the restored value, or it is not restored at all.
+const toolArgs = (text) => JSON.stringify({ text });
+const toolResponsesBody = (n, text) => ({
+  id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status: "completed",
+  output: [{ id: "fc_stub" + n, type: "function_call", status: "completed", call_id: "call_stub" + n, name: "echo", arguments: toolArgs(text) }],
+  usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, _stub_call: n,
+});
+const toolOpenAIBody = (n, text) => ({
+  id: "stub-" + n, object: "chat.completion", model: "gpt-4o-mini",
+  choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: [{ id: "call_stub" + n, type: "function", function: { name: "echo", arguments: toolArgs(text) } }] }, finish_reason: "tool_calls" }],
+  usage: { prompt_tokens: 10, completion_tokens: 5 }, _stub_call: n,
+});
+const toolAnthropicBody = (n, text) => ({
+  id: "stub-" + n, type: "message", role: "assistant", model: "claude-haiku-4-5-20251001",
+  content: [{ type: "tool_use", id: "toolu_stub" + n, name: "echo", input: { text } }], stop_reason: "tool_use",
+  usage: { input_tokens: 10, output_tokens: 5 }, _stub_call: n,
+});
+function streamToolResponses(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  let seq = 0;
+  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  const args = toolArgs(text);
+  const addr = { item_id: "fc_stub" + n, output_index: 0 };
+  const shell = (status) => ({ id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status, output: [] });
+  const item = (status, a) => ({ id: addr.item_id, type: "function_call", status, call_id: "call_stub" + n, name: "echo", arguments: a });
+  f("response.created", { response: shell("in_progress") });
+  f("response.output_item.added", { output_index: 0, item: item("in_progress", "") });
+  for (const c of chunk3(args)) f("response.function_call_arguments.delta", { ...addr, delta: c });
+  f("response.function_call_arguments.done", { ...addr, arguments: args });
+  f("response.output_item.done", { output_index: 0, item: item("completed", args) });
+  f("response.completed", { response: { ...shell("completed"), output: [item("completed", args)], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
+  res.end();
+}
+function streamToolOpenAI(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  const f = (d) => res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: d }] })}\n\n`);
+  f({ role: "assistant", tool_calls: [{ index: 0, id: "call_stub" + n, type: "function", function: { name: "echo", arguments: "" } }] });
+  for (const c of chunk3(toolArgs(text))) f({ tool_calls: [{ index: 0, function: { arguments: c } }] });
+  res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\n`);
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+function streamToolAnthropic(res, text, n) {
+  res.setHeader("content-type", "text/event-stream");
+  const f = (e, d) => res.write(`event: ${e}\ndata: ${JSON.stringify({ type: e, ...d })}\n\n`);
+  f("message_start", { message: { id: "stub", type: "message", role: "assistant", model: "claude-haiku-4-5-20251001", content: [], usage: { input_tokens: 10, output_tokens: 0 } } });
+  f("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
+  f("content_block_delta", { index: 0, delta: { type: "text_delta", text: "Calling the tool." } });
+  f("content_block_stop", { index: 0 });
+  f("content_block_start", { index: 1, content_block: { type: "tool_use", id: "toolu_stub" + n, name: "echo", input: {} } });
+  for (const c of chunk3(toolArgs(text))) f("content_block_delta", { index: 1, delta: { type: "input_json_delta", partial_json: c } });
+  f("content_block_stop", { index: 1 });
+  f("message_delta", { delta: { stop_reason: "tool_use" }, usage: { output_tokens: 5 } });
+  f("message_stop", {});
+  res.end();
+}
+
 http
   .createServer((req, res) => {
     let b = "";
@@ -218,6 +279,14 @@ http
       if (req.url.includes("count_tokens")) return json(res, { input_tokens: 42, _stub_call: n, _url: req.url });
       if (req.method === "GET" && req.url.startsWith("/v1/models"))
         return json(res, { object: "list", data: [], _url: req.url });
+
+      // A request whose text asks for a TOOLCALL is answered with one in each dialect.
+      if (text.includes("TOOLCALL")) {
+        const t = text.replace("TOOLCALL ", "");
+        if (req.url.includes("/chat/completions")) return body.stream ? streamToolOpenAI(res, t, n) : json(res, toolOpenAIBody(n, t));
+        if (req.url.includes("/responses")) return body.stream ? streamToolResponses(res, t, n) : json(res, toolResponsesBody(n, t));
+        if (req.url.includes("/messages")) return body.stream ? streamToolAnthropic(res, t, n) : json(res, toolAnthropicBody(n, t));
+      }
 
       // Echo the received text back as the assistant reply.
       if (req.url.includes("/chat/completions"))

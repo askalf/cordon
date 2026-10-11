@@ -256,6 +256,64 @@ function validateSSE(sse) {
   text = reconstruct(txt, "anthropic");
   ok("stream/strip: placeholders persist", text.includes("[EMAIL]") && !text.includes("john@acme.com"));
 
+  // ---- streamed tool calls: arguments restored across 3-character fragments, every dialect ----
+  // The stub chunks the arguments JSON in 3-character fragments, so each placeholder is
+  // split across frames inside a JSON string literal; what reaches the client must be the
+  // real values, JSON-escaped, and the fragments must join into JSON that parses.
+  const TOOL = [{ type: "function", name: "echo", description: "echo", parameters: { type: "object", properties: { text: { type: "string" } } } }];
+  const joinFrames = (sse, pick) => {
+    let out = "";
+    for (const frame of sse.split("\n\n")) {
+      const line = frame.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      let j; try { j = JSON.parse(line.slice(5).trim()); } catch { continue; }
+      out += pick(j) ?? "";
+    }
+    return out;
+  };
+  const parsesTo = (s) => { try { return JSON.parse(s); } catch { return null; } };
+  await reset();
+  txt = await (await post("/v1/responses", rBody("TOOLCALL " + PII, { tools: TOOL }))).text();
+  {
+    const args = joinFrames(txt, (j) => (j.type === "response.function_call_arguments.delta" ? j.delta : ""));
+    const parsed = parsesTo(args);
+    ok("stream/tool/responses: argument fragments join into JSON", !!parsed, args);
+    ok("stream/tool/responses: email restored across fragments", !!parsed && parsed.text.includes("john@acme.com") && !args.includes("<EMAIL"), args);
+    ok("stream/tool/responses: card restored across fragments", !!parsed && parsed.text.includes("4012888888881881"));
+    const done = joinFrames(txt, (j) => (j.type === "response.function_call_arguments.done" ? j.arguments : ""));
+    ok("stream/tool/responses: arguments.done frame restored", done.includes("john@acme.com") && !done.includes("<EMAIL"), done);
+    const item = joinFrames(txt, (j) => (j.type === "response.output_item.done" ? j.item?.arguments : ""));
+    ok("stream/tool/responses: output_item.done arguments restored", item.includes("john@acme.com") && !item.includes("<EMAIL"), item);
+    ok("stream/tool/responses: event lines kept for the re-emitted fragments", txt.includes("event: response.function_call_arguments.delta"));
+    sent = JSON.stringify(await calls());
+    ok("stream/tool/responses: upstream never saw the raw values", !sent.includes("john@acme.com") && !sent.includes("4012888888881881"));
+  }
+  await reset();
+  txt = await (await post("/v1/chat/completions", oBody("TOOLCALL " + PII, { tools: [{ type: "function", function: TOOL[0] }] }))).text();
+  {
+    const args = joinFrames(txt, (j) => (j.choices?.[0]?.delta?.tool_calls ?? []).map((tc) => tc.function?.arguments ?? "").join(""));
+    const parsed = parsesTo(args);
+    ok("stream/tool/chat: argument fragments join into JSON", !!parsed, args);
+    ok("stream/tool/chat: email restored across fragments", !!parsed && parsed.text.includes("john@acme.com") && !args.includes("<EMAIL"), args);
+    const first = joinFrames(txt, (j) => (j.choices?.[0]?.delta?.tool_calls?.[0]?.id ? j.choices[0].delta.tool_calls[0].id : ""));
+    ok("stream/tool/chat: the tool call's id frame passes through", first.startsWith("call_stub"), first);
+    sent = JSON.stringify(await calls());
+    ok("stream/tool/chat: upstream never saw the raw values", !sent.includes("john@acme.com"));
+  }
+  await reset();
+  txt = await (await post("/v1/messages", aBody("TOOLCALL " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }))).text();
+  {
+    const args = joinFrames(txt, (j) => (j.type === "content_block_delta" && j.delta?.type === "input_json_delta" ? j.delta.partial_json : ""));
+    const parsed = parsesTo(args);
+    ok("stream/tool/anthropic: input_json fragments join into JSON", !!parsed, args);
+    ok("stream/tool/anthropic: email restored across fragments", !!parsed && parsed.text.includes("john@acme.com") && !args.includes("<EMAIL"), args);
+    ok("stream/tool/anthropic: card restored across fragments", !!parsed && parsed.text.includes("4012888888881881"));
+    const v = validateSSE(txt);
+    ok("stream/tool/anthropic: the text block before the tool call is intact", v.ok && v.text === "Calling the tool.", v.error || v.text);
+    sent = JSON.stringify(await calls());
+    ok("stream/tool/anthropic: upstream never saw the raw values", !sent.includes("john@acme.com") && !sent.includes("4012888888881881"));
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

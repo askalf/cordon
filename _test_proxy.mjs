@@ -385,6 +385,53 @@ const rawPost = (path, body) =>
   ok("audit: log contains NO raw ops address from Responses instructions", !log.includes("ops@acme.com"));
   ok("audit: Responses requests recorded under provider openai", log.split("\n").some((l) => l.includes('"provider":"openai"') && l.includes('"CREDIT_CARD":1')));
 
+  // ---- tool calls: the model's arguments come back with the real values, in every dialect ----
+  // An agent runner executes the tool with what the model typed. A placeholder left in the
+  // arguments would be typed into a form or stored as data; the restored value must be
+  // what reaches the runner, and the arguments must still parse as JSON.
+  const TOOL = [{ type: "function", name: "echo", description: "echo", parameters: { type: "object", properties: { text: { type: "string" } } } }];
+  await reset();
+  res = await post("/v1/responses", rBody("TOOLCALL " + PII, { tools: TOOL }));
+  {
+    const j = await res.json();
+    const fc = j?.output?.find((o) => o.type === "function_call");
+    let args; try { args = JSON.parse(fc?.arguments ?? ""); } catch { args = null; }
+    ok("tool/responses: function_call arguments parse as JSON", !!args, fc?.arguments);
+    ok("tool/responses: email restored inside the arguments", !!args && args.text.includes("john@acme.com") && !fc.arguments.includes("<EMAIL"), fc?.arguments);
+    ok("tool/responses: card restored inside the arguments", !!args && args.text.includes("4012888888881881"));
+    sent = JSON.stringify(await calls());
+    ok("tool/responses: upstream never saw the raw values", !sent.includes("john@acme.com") && !sent.includes("4012888888881881"));
+  }
+  await reset();
+  res = await post("/v1/chat/completions", oBody("TOOLCALL " + PII, { tools: [{ type: "function", function: TOOL[0] }] }));
+  {
+    const j = await res.json();
+    const tc = j?.choices?.[0]?.message?.tool_calls?.[0];
+    let args; try { args = JSON.parse(tc?.function?.arguments ?? ""); } catch { args = null; }
+    ok("tool/chat: tool_calls arguments parse as JSON", !!args, tc?.function?.arguments);
+    ok("tool/chat: email restored inside the arguments", !!args && args.text.includes("john@acme.com") && !tc.function.arguments.includes("<EMAIL"), tc?.function?.arguments);
+    sent = JSON.stringify(await calls());
+    ok("tool/chat: upstream never saw the raw values", !sent.includes("john@acme.com"));
+  }
+  await reset();
+  res = await post("/v1/messages", aBody("TOOLCALL " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }));
+  {
+    const j = await res.json();
+    const tu = j?.content?.find((b) => b.type === "tool_use");
+    ok("tool/anthropic: tool_use input restored", typeof tu?.input?.text === "string" && tu.input.text.includes("john@acme.com") && !tu.input.text.includes("<EMAIL"), JSON.stringify(tu?.input));
+    ok("tool/anthropic: card restored inside tool_use input", typeof tu?.input?.text === "string" && tu.input.text.includes("4012888888881881"));
+    sent = JSON.stringify(await calls());
+    ok("tool/anthropic: upstream never saw the raw values", !sent.includes("john@acme.com") && !sent.includes("4012888888881881"));
+  }
+  // strip: the placeholder stays in the arguments, the value never comes back
+  await reset();
+  res = await post("/v1/responses", rBody("TOOLCALL " + PII, { tools: TOOL }), { "x-redact-mode": "strip" });
+  {
+    const j = await res.json();
+    const fc = j?.output?.find((o) => o.type === "function_call");
+    ok("tool/responses/strip: placeholder persists in the arguments", typeof fc?.arguments === "string" && fc.arguments.includes("[EMAIL]") && !fc.arguments.includes("john@acme.com"), fc?.arguments);
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

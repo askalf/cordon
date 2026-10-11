@@ -59,6 +59,16 @@ All four sets are on by default. Narrow them per tenant; a request can add sets 
 X-Redact-Mode: strip   →   "text":"email [EMAIL] re card [CREDIT_CARD]"
 ```
 
+## Fronting an agent runner
+
+An agent runner (a tool-using loop: Claude Code headless, a native Responses loop, anything that calls tools the model picks) can sit behind cordon unchanged: point its base URL at cordon and keep its own key. Three things make that safe, and they are what the tool-call tests prove:
+
+- **Tool results are redacted on the way up.** A page the runner read, a task it was given, a tool's output: every string leaf of a `function_call_output`, `tool_result` or `tool` message is de-identified like user text, so the model sees `<EMAIL_…>` where the page said an address.
+- **Tool arguments are restored on the way down.** The arguments the model chooses for a tool (`function_call.arguments` and `custom_tool_call.input` on the Responses API, `tool_calls[].function.arguments` on chat completions, `tool_use.input` on Messages) are the values the runner's tool will run on, so in reversible mode they come back real, streamed or not. A placeholder split across streamed fragments is held back and restored whole, and a restored value is JSON-escaped where the fragments are a JSON string literal, so the arguments still parse. Without this the runner would type a placeholder into a form or store it as data.
+- **Opaque fields pass through untouched.** Reasoning items and `encrypted_content`, ids and `call_id`s, tool and model names, `include` lists: what the provider needs byte-exact is never rewritten.
+
+The runner's own prompt is `instructions` (Responses) or `system` (Messages) and is left as sent unless `redactSystem` is on. In `strip` mode the model's arguments keep their `[EMAIL]` placeholders and the runner's tool sees them, which is the right outcome for a runner that must never hold the value.
+
 ## What it does not do
 
 - **Names, free-text addresses, medical conditions.** There is no NER. A person's name in prose passes through. The detector is an interface (`src/detect`), so a Presidio-style sidecar can be added; it is not included.
