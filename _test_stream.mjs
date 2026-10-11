@@ -498,6 +498,29 @@ function validateSSE(sse) {
     const seqs = frames(txt).map((x) => x.j?.sequence_number).filter((n) => typeof n === "number");
     ok("stream/sequence: and with interleaved parts flushed at their done frames", seqs.every((n, i) => i === 0 || n === seqs[i - 1] + 1), JSON.stringify(seqs));
   }
+  // Upstream frames with spaced JSON ("sequence_number": 6) share the counter with the
+  // compact frames cordon rewrites.
+  await reset();
+  txt = await (await post("/v1/responses", respTool("SPACED "))).text();
+  {
+    const seqs = frames(txt).map((x) => x.j?.sequence_number).filter((n) => typeof n === "number");
+    ok("stream/sequence: spaced upstream frames and rewritten frames share one increasing count", seqs.length > 3 && seqs.every((n, i) => i === 0 || n === seqs[i - 1] + 1), JSON.stringify(seqs));
+  }
+  await reset();
+  txt = await (await post("/v1/responses", rBody("INTERLEAVE SPACED " + PII))).text();
+  {
+    const seqs = frames(txt).map((x) => x.j?.sequence_number).filter((n) => typeof n === "number");
+    ok("stream/sequence: spaced, with cordon's own flush frames between them", seqs.length > 3 && seqs.every((n, i) => i === 0 || n === seqs[i - 1] + 1), JSON.stringify(seqs));
+  }
+  // A custom tool's plain-text input that ends in an uppercase name after < is text, as
+  // it is in the whole document: delivered, not refused as a cut-off placeholder.
+  await reset();
+  txt = await (await post("/v1/responses", rBody("TOOLCALL CUSTOM cat <README", { tools: TOOL }))).text();
+  {
+    const f = frames(txt);
+    const joined = f.filter((x) => x.j?.type === "response.custom_tool_call_input.delta").map((x) => x.j.delta).join("");
+    ok("stream/custom-tail: `cat <README` is delivered as written", joined.endsWith("cat <README") && !f.some((x) => x.j?.type === "error"), joined + " | " + JSON.stringify(f.at(-1)?.j));
+  }
   // Messages: an input given whole at content_block_start is restored on the frame's own
   // text, so an integer beyond 2^53 keeps its digits.
   await reset();

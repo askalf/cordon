@@ -96,7 +96,15 @@ function streamResponses(res, text, n) {
 function streamResponsesInterleaved(res, text, n) {
   res.setHeader("content-type", "text/event-stream");
   let seq = 0;
-  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  // SPACED: "sequence_number": N, as valid JSON may be written, numbered in steps of two.
+  const spaced = text.includes("SPACED ");
+  text = text.replace("SPACED ", "");
+  const f = (type, d) => {
+    let data = JSON.stringify({ type, sequence_number: seq, ...d });
+    seq += spaced ? 2 : 1;
+    if (spaced) data = data.replace('"sequence_number":', '"sequence_number": ');
+    res.write(`event: ${type}\ndata: ${data}\n\n`);
+  };
   const a = { item_id: "msg_stub" + n + "a", output_index: 0, content_index: 0 };
   const b = { item_id: "msg_stub" + n + "b", output_index: 1, content_index: 0 };
   const aText = text.replace("INTERLEAVE ", "");
@@ -208,9 +216,12 @@ function streamAnthropic(res, text, body = {}) {
 //   MIXED        (chat stream) the first frame carries text and the first fragment
 //   FINISHJOINED (chat stream) the last fragment and finish_reason share a frame
 //   ARGTRUNC     (chat / Messages stream) the stream stops inside a placeholder
+//   SPACED       (Responses stream) frames written with a space after the colons of
+//                "type" and "sequence_number", as valid JSON may be, numbered in steps
+//                of two (increasing is all a client may assume)
 //   SERVER       (Messages) a server_tool_use and an mcp_tool_use block
 //   STARTINPUT   (Messages stream) the input arrives whole on content_block_start
-const TOOL_FLAGS = ["TOOLCALL", "ESCAPED", "FOREIGN", "CUSTOM", "MCP", "LEGACY", "CHOICE1", "MIXED", "FINISHJOINED", "ARGTRUNC", "SERVER", "STARTINPUT", "NAMESPLIT"];
+const TOOL_FLAGS = ["TOOLCALL", "ESCAPED", "FOREIGN", "CUSTOM", "MCP", "LEGACY", "CHOICE1", "MIXED", "FINISHJOINED", "ARGTRUNC", "SERVER", "STARTINPUT", "NAMESPLIT", "SPACED"];
 const FOREIGN_PLACEHOLDER = "<EMAIL_ABCDEF_7>";
 function toolSpec(body, text) {
   const flags = new Set(TOOL_FLAGS.filter((f) => text.includes(f)));
@@ -255,7 +266,13 @@ const toolAnthropicBody = (n, s) => ({
 function streamToolResponses(res, s, n) {
   res.setHeader("content-type", "text/event-stream");
   let seq = 0;
-  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  const spaced = s.flags.has("SPACED");
+  const f = (type, d) => {
+    let data = JSON.stringify({ type, sequence_number: seq, ...d });
+    seq += spaced ? 2 : 1;
+    if (spaced) data = data.replace('"type":', '"type": ').replace('"sequence_number":', '"sequence_number": ');
+    res.write(`event: ${type}\ndata: ${data}\n\n`);
+  };
   const custom = s.flags.has("CUSTOM");
   const mcp = s.flags.has("MCP");
   const addr = { item_id: (custom ? "ctc_stub" : mcp ? "mcp_stub" : "fc_stub") + n, output_index: 0 };

@@ -7,6 +7,7 @@ import {
   restore,
   restoreArgObject,
   restoreArgs,
+  restoreArgsWhole,
   StreamReidentifier,
   DeferredArgs,
   argsFailed,
@@ -172,11 +173,17 @@ export async function captureAndReidentify(
   // Responses frames carry a sequence_number, and cordon writes frames of its own (a held
   // tail flushed at a done frame), so every Responses frame it writes is renumbered from
   // one counter that starts where the upstream started: unique and increasing.
+  // The number is found as the top-level value (valueSpan), whatever the JSON spacing
+  // around it, so untouched upstream frames and cordon's compact ones share the counter.
   let seq: number | undefined;
   const renumber = (frame: string): string =>
-    frame.replace(/^(data:.*?"sequence_number":)(\d+)/m, (_m, head: string, n: string) => {
-      if (seq === undefined) seq = Number(n);
-      return head + seq++;
+    frame.replace(/^data: ?(.*)$/m, (line: string, data: string) => {
+      const span = valueSpan(data, ["sequence_number"]);
+      if (!span) return line;
+      const n = Number(data.slice(span[0], span[1]));
+      if (!Number.isInteger(n)) return line;
+      if (seq === undefined) seq = n;
+      return `data: ${data.slice(0, span[0])}${seq++}${data.slice(span[1])}`;
     });
   const send = (frame: string) => res.write(provider !== "anthropic" && dialect === "responses" ? renumber(frame) : frame);
 
@@ -375,7 +382,7 @@ export async function captureAndReidentify(
             const span = valueSpan(data, ["content_block", "input"]);
             if (span) {
               const raw = data.slice(span[0], span[1]);
-              const restored = restoreArgs(raw, argContext(vault, true, name, stats));
+              const restored = restoreArgsWhole(raw, argContext(vault, true, name, stats));
               if (!guard()) return;
               send(restored === raw ? frame : frame.replace(/^data:.*$/m, () => `data: ${data.slice(0, span[0])}${restored}${data.slice(span[1])}`));
               return;
@@ -458,7 +465,7 @@ export async function captureAndReidentify(
         // The whole document, restored on its raw text: byte-for-byte what the deltas
         // above joined into.
         if (!flushPart(j)) return;
-        if (typeof j.arguments === "string") j.arguments = restoreArgs(j.arguments, argContext(vault, true, toolFor(j), stats));
+        if (typeof j.arguments === "string") j.arguments = restoreArgsWhole(j.arguments, argContext(vault, true, toolFor(j), stats));
         if (!guard()) return;
         send(reframe(frame, j));
         return;

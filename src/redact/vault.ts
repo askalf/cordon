@@ -80,6 +80,12 @@ export class Vault {
     return found;
   }
 
+  /** Whether a placeholder this vault minted starts with `prefix` (reversible only). */
+  hasTokenPrefix(prefix: string): boolean {
+    for (const token of this.rev.keys()) if (token.startsWith(prefix)) return true;
+    return false;
+  }
+
   /** Whether any reverse mappings exist (i.e. there is anything to re-identify). */
   get hasReverse(): boolean {
     return this.rev.size > 0;

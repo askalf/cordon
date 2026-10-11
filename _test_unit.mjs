@@ -4,7 +4,7 @@ import { runAll, detector } from "./src/detect/index.ts";
 import { luhn, ibanMod97, abaRouting, ssnValid } from "./src/detect/validators.ts";
 import { Vault } from "./src/redact/vault.ts";
 import { applyRedaction, tally } from "./src/redact/apply.ts";
-import { reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, restoreArgObject, DeferredArgs, MAX_ARG_DEPTH, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
+import { reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, restoreArgsWhole, hasDuplicateKeys, restoreArgObject, DeferredArgs, MAX_ARG_DEPTH, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
 import { parseRestoreTools } from "./src/redact/restorePolicy.ts";
 import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN, parseTimeoutMs, DEFAULT_UPSTREAM_TIMEOUT_MS, MAX_TIMEOUT_MS } from "./src/config.ts";
 import { setPolicy, getPolicy, allPolicies, save as savePolicy, load as loadPolicy } from "./src/policy.ts";
@@ -562,6 +562,57 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   const litPlain = JSON.stringify({ x: "<3>", y: "a<3>b<3>c" });
   const litPlainOut = restoreArgs(litPlain, argContext(litEmptyV, true, "echo", { unresolved: 0 }, ALL_TOOLS));
   ok("args: an empty vault leaves <3> literals byte for byte", litPlainOut === litPlain, litPlainOut);
+
+  // Property names that become the same after a restore are refused on the JSON-text path,
+  // whole and streamed, as restoreArgObject refuses them on parsed objects.
+  {
+    const kv = new Vault("reversible");
+    const a1 = kv.placeholderFor("alice@example.com", "EMAIL");
+    const a2 = kv.placeholderFor("bob@example.com", "EMAIL");
+    ok("hasDuplicateKeys: same name twice in one object", hasDuplicateKeys('{"a":{"x":1,"x":2}}') && !hasDuplicateKeys('{"a":{"x":1},"b":{"x":2}}') && !hasDuplicateKeys('["x","x"]') && hasDuplicateKeys('{"\\u0078":1,"x":2}'));
+    const cases = [
+      ["a restored name meets a literal one", `{"users":{"alice@example.com":"viewer","${a1}":"admin"}}`, ALL_TOOLS, true],
+      ["two withheld names both become [EMAIL]", `{"${a1}":1,"${a2}":2}`, parseRestoreTools(""), true],
+      ["distinct restored names pass", `{"${a1}":1,"${a2}":2}`, ALL_TOOLS, false],
+      ["duplicates the model wrote itself are not this restore's", `{"x":1,"x":2,"y":"${a1}"}`, ALL_TOOLS, false],
+    ];
+    for (const [label, doc, pol, bad] of cases) {
+      const ws = { unresolved: 0 };
+      restoreArgsWhole(doc, argContext(kv, true, "echo", ws, pol));
+      ok(`args collide (whole): ${label}`, (ws.rejected === "two argument names restore to the same name") === bad, JSON.stringify(ws));
+      for (const n of [1, 3]) {
+        const ss = { unresolved: 0 };
+        const as = new ArgStream(argContext(kv, true, "echo", ss, pol));
+        for (let i = 0; i < doc.length; i += n) as.push(doc.slice(i, i + n));
+        as.end();
+        ok(`args collide (${n}-character stream): ${label}`, (ss.rejected === "two argument names restore to the same name") === bad, JSON.stringify(ss));
+      }
+    }
+  }
+
+  // A stream that ends inside `<NAME` is refused only when NAME is the start of a token
+  // this vault minted or has the minted shape; other text is delivered as written, as the
+  // whole document would be.
+  {
+    const tv = new Vault("reversible");
+    const tok = tv.placeholderFor("john@acme.com", "EMAIL");
+    const tail = (text, json) => {
+      const ts = { unresolved: 0 };
+      const s = new ArgStream(argContext(tv, json, "echo", ts, ALL_TOOLS));
+      let o = "";
+      for (const ch of text) o += s.push(ch);
+      o += s.end();
+      return { o, ts };
+    };
+    for (const text of ["cat <README", "x<Y", "SELECT * FROM t WHERE x<Y"]) {
+      const { o, ts } = tail(text, false);
+      ok(`args stream tail: \`${text}\` is delivered as written`, o === text && !ts.rejected && ts.unresolved === 0, JSON.stringify({ o, ts }));
+    }
+    const cut = tail("x " + tok.slice(0, 5), false);
+    ok("args stream tail: the start of a minted token is refused", cut.ts.rejected === "the arguments end inside a placeholder" && cut.ts.unresolved === 1, JSON.stringify(cut));
+    const foreign = tail("x <PHONE_ABCDEF_", false);
+    ok("args stream tail: a foreign minted shape is refused", foreign.ts.rejected === "the arguments end inside a placeholder", JSON.stringify(foreign));
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

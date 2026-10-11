@@ -223,6 +223,62 @@ export function restoreArgs(text: string, c: ArgContext): string {
   return out + rest;
 }
 
+/**
+ * Whether a JSON document has an object with two property names that decode to the same
+ * string. A scan over the text, not a parse, so the numbers in it are never re-read; text
+ * that is not well-formed JSON reports false (the tool's parser is the judge of that).
+ */
+export function hasDuplicateKeys(text: string): boolean {
+  const stack: Array<{ keys: Set<string>; wantKey: boolean } | null> = [];
+  let i = 0;
+  try {
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '"') {
+        let j = i + 1;
+        while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+        const top = stack[stack.length - 1];
+        if (top?.wantKey) {
+          const key = JSON.parse(text.slice(i, j + 1)) as string;
+          if (top.keys.has(key)) return true;
+          top.keys.add(key);
+          top.wantKey = false;
+        }
+        i = j + 1;
+        continue;
+      }
+      if (ch === "{") stack.push({ keys: new Set(), wantKey: true });
+      else if (ch === "[") stack.push(null);
+      else if (ch === "}" || ch === "]") stack.pop();
+      else if (ch === ",") {
+        const top = stack[stack.length - 1];
+        if (top) top.wantKey = true;
+      }
+      i++;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/** Refuse a restore that made two property names in one object the same: a restored value
+ *  or two withheld ones ([EMAIL]) can collide, and the tool's parser keeps only one. A
+ *  document that arrived with duplicates is the model's, not this restore's. */
+function checkArgKeys(before: string, after: string, stats: ArgStats): void {
+  if (before !== after && hasDuplicateKeys(after) && !hasDuplicateKeys(before)) {
+    stats.rejected ??= "two argument names restore to the same name";
+  }
+}
+
+/** restoreArgs for a whole argument document: JSON text is also refused when the restore
+ *  made two of its property names the same (as restoreArgObject refuses for objects). */
+export function restoreArgsWhole(text: string, c: ArgContext): string {
+  const out = restoreArgs(text, c);
+  if (c.json) checkArgKeys(text, out, c.stats);
+  return out;
+}
+
 /** How deep an argument object may nest before it is refused rather than walked. */
 export const MAX_ARG_DEPTH = 64;
 
@@ -312,6 +368,9 @@ function formingName(tail: string): string {
  */
 export class ArgStream {
   private buf = "";
+  // JSON arguments as received and as restored, for the property-name check at the end.
+  private src = "";
+  private out = "";
   constructor(private readonly c: ArgContext) {}
 
   push(delta: string): string {
@@ -320,23 +379,48 @@ export class ArgStream {
     const flushLen = p === -1 ? this.buf.length : p;
     const flush = this.buf.slice(0, flushLen);
     this.buf = this.buf.slice(flushLen);
-    return restoreArgs(flush, this.c);
+    return this.emit(flush, restoreArgs(flush, this.c));
   }
 
   end(): string {
     const tail = this.buf;
     this.buf = "";
     const p = formingStart(tail, this.c.json);
-    if (p === -1) return restoreArgs(tail, this.c);
-    const out = restoreArgs(tail.slice(0, p), this.c);
-    const forming = tail.slice(p);
-    if (formingName(forming)) {
-      this.c.stats.unresolved++;
-      this.c.stats.rejected ??= "the arguments end inside a placeholder";
+    let out: string;
+    if (p === -1) out = this.emit(tail, restoreArgs(tail, this.c));
+    else {
+      const forming = tail.slice(p);
+      out = this.emit(tail.slice(0, p), restoreArgs(tail.slice(0, p), this.c));
+      if (truncatedToken(formingName(forming), this.c.vault)) {
+        this.c.stats.unresolved++;
+        this.c.stats.rejected ??= "the arguments end inside a placeholder";
+      }
+      this.c.keys?.feed(forming);
+      out += this.emit(forming, forming);
     }
-    this.c.keys?.feed(forming);
-    return out + forming;
+    if (this.c.json) checkArgKeys(this.src, this.out, this.c.stats);
+    return out;
   }
+
+  private emit(src: string, out: string): string {
+    if (this.c.json) {
+      this.src += src;
+      this.out += out;
+    }
+    return out;
+  }
+}
+
+/**
+ * Whether a name a stream ended inside is a cut-off placeholder rather than text: the
+ * start of one this vault minted, or a name with the minted shape up to its nonce or
+ * hash (a foreign token). Anything else (`<README`, `x<Y`) is text the tool
+ * receives as written, as it would in a whole document.
+ */
+function truncatedToken(name: string, vault: Vault): boolean {
+  if (!name) return false;
+  if (/^[A-Z][A-Z0-9_]*_(?:[0-9A-F]{6}_\d*|[0-9A-F]{8})$/.test(name)) return true;
+  return vault.hasTokenPrefix(`<${name}`);
 }
 
 /**
@@ -376,7 +460,7 @@ export function reidentifyBody(
   const out = clone(body);
   for (const sl of adapterFor(provider, dialect).responseTextSlots(out)) {
     if (sl.kind === "text") sl.set(restore(sl.get(), vault));
-    else if (sl.kind === "args") sl.set(restoreArgs(sl.get(), argContext(vault, sl.json, sl.tool, stats, policy)));
+    else if (sl.kind === "args") sl.set(restoreArgsWhole(sl.get(), argContext(vault, sl.json, sl.tool, stats, policy)));
     else restoreArgObject(sl.obj, argContext(vault, false, sl.tool, stats, policy));
   }
   return out;
