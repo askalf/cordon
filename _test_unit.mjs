@@ -149,6 +149,66 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   ok("apply: server_tool_use and mcp_tool_use input redacted, names and ids as sent", stu.input.query === "[EMAIL]" && mtu.input.who === "[EMAIL]" && stu.name === "web_search" && mtu.id === "mcptoolu_1" && mtu.server_name === "crm", JSON.stringify(d.messages[1]));
 }
 {
+  // A tool call replayed as history is read as deep as the response side restores (64
+  // levels): a leaf past the old 16-level walk is redacted, and past 64 the request is
+  // refused rather than forwarded part read.
+  const nest = (n, leaf) => { let o = leaf; for (let i = 0; i < n; i++) o = { a: o }; return o; };
+  const v = new Vault("strip");
+  const body20 = { model: "m", messages: [{ role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "lookup", input: nest(20, { who: "jane@corp.io" }) }] }] };
+  const d20 = applyRedaction(body20, "anthropic", v, ALL, detector).deidBody;
+  ok("apply: a tool_use leaf 20 levels down is redacted", JSON.stringify(d20).includes("[EMAIL]") && !JSON.stringify(d20).includes("jane@corp.io"), JSON.stringify(d20).slice(-80));
+  const chat20 = { model: "m", messages: [{ role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "lookup", arguments: JSON.stringify(nest(20, { who: "jane@corp.io" })) } }] }] };
+  const c20 = applyRedaction(chat20, "openai", v, ALL, detector).deidBody;
+  ok("apply: a tool_calls argument 20 levels down is redacted", c20.messages[0].tool_calls[0].function.arguments.includes("[EMAIL]") && !c20.messages[0].tool_calls[0].function.arguments.includes("jane@corp.io"));
+  for (const [label, b, p] of [
+    ["tool_use input", { model: "m", messages: [{ role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "lookup", input: nest(70, { who: "jane@corp.io" }) }] }] }, "anthropic"],
+    ["tool_calls arguments", { model: "m", messages: [{ role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "lookup", arguments: JSON.stringify(nest(70, { who: "jane@corp.io" })) } }] }] }, "openai"],
+  ]) {
+    let threw = "";
+    try { applyRedaction(b, p, v, ALL, detector); } catch (e) { threw = String(e.message); }
+    ok(`apply: ${label} nested 70 levels is refused, not walked part way`, /deeper than 64/.test(threw), threw);
+  }
+}
+{
+  // Property names in tool-call arguments are redacted like values, so a call whose names
+  // came back real (CORDON_RESTORE_TOOLS=lookup.payload) is re-redacted when replayed.
+  const rv = new Vault("reversible");
+  const tok = rv.placeholderFor("jane@corp.io", "EMAIL");
+  const lookupPayload = parseRestoreTools("lookup.payload");
+  // Anthropic: the response restores the name, the replayed history redacts it again.
+  const input = { payload: { [tok]: true, note: "x" } };
+  restoreArgObject(input, argContext(rv, false, "lookup", { unresolved: 0 }, lookupPayload));
+  ok("round trip (Messages): the response restores the property name", Object.keys(input.payload)[0] === "jane@corp.io", JSON.stringify(input));
+  const next = new Vault("reversible");
+  const hist = { model: "m", messages: [{ role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "lookup", input }] }] };
+  const dh = applyRedaction(hist, "anthropic", next, ALL, detector).deidBody;
+  const keysOut = Object.keys(dh.messages[0].content[0].input.payload);
+  ok("round trip (Messages): the replayed name is redacted, order kept", /^<EMAIL_[0-9A-F]{6}_1>$/.test(keysOut[0]) && keysOut[1] === "note" && !JSON.stringify(dh).includes("jane@corp.io"), JSON.stringify(dh.messages[0].content[0].input));
+  // JSON-string arguments: the same, on chat tool_calls.
+  const args = restoreArgsWhole(JSON.stringify({ payload: { [tok]: true } }), argContext(rv, true, "lookup", { unresolved: 0 }, lookupPayload));
+  ok("round trip (JSON text): the response restores the property name", JSON.parse(args).payload["jane@corp.io"] === true, args);
+  const chist = { model: "m", messages: [{ role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "lookup", arguments: args } }] }] };
+  const dc = applyRedaction(chist, "openai", new Vault("reversible"), ALL, detector).deidBody;
+  const ca = dc.messages[0].tool_calls[0].function.arguments;
+  ok("round trip (JSON text): the replayed name is redacted", /"<EMAIL_[0-9A-F]{6}_1>":true/.test(ca) && !ca.includes("jane@corp.io"), ca);
+  const rhist = { model: "m", input: [{ type: "function_call", call_id: "call_1", name: "lookup", arguments: args }] };
+  const dr = applyRedaction(rhist, "openai", new Vault("reversible"), ALL, detector, true, "responses").deidBody;
+  const ra = dr.input[0].arguments;
+  ok("round trip (Responses): the replayed name is redacted", /"<EMAIL_[0-9A-F]{6}_1>":true/.test(ra) && !ra.includes("jane@corp.io") && dr.input[0].call_id === "call_1", ra);
+  // Two names that redact to the same name refuse the request.
+  for (const [label, b, p] of [
+    ["Messages", { model: "m", messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t", name: "lookup", input: { "a@corp.io": 1, "b@corp.io": 2 } }] }] }, "anthropic"],
+    ["JSON text", { model: "m", messages: [{ role: "assistant", content: null, tool_calls: [{ id: "c", type: "function", function: { name: "lookup", arguments: '{"a@corp.io":1,"b@corp.io":2}' } }] }] }, "openai"],
+  ]) {
+    let threw = "";
+    try { applyRedaction(b, p, new Vault("strip"), ALL, detector); } catch (e) { threw = String(e.message); }
+    ok(`apply: argument names that collide after redaction refuse the request (${label})`, /redact to the same name/.test(threw), threw);
+  }
+  // Schema property names are field names, not arguments: left as written.
+  const sch = applyRedaction({ model: "m", tools: [{ name: "t", description: "d", input_schema: { type: "object", properties: { email: { type: "string" } } } }], messages: [] }, "anthropic", new Vault("strip"), ALL, detector).deidBody;
+  ok("apply: tool schema property names are left as written", Object.keys(sch.tools[0].input_schema.properties)[0] === "email");
+}
+{
   // Chat: an assistant's refusal and legacy function_call arguments are model-visible.
   const v = new Vault("strip");
   const body = { model: "m", messages: [
@@ -322,7 +382,7 @@ const noRaw = (body, raw) => !JSON.stringify(body).includes(raw);
   // fail-closed 422), never forwarded with its deep leaves unread.
   {
     let deep = { text: RAW };
-    for (let i = 0; i < 40; i++) deep = { nested: deep };
+    for (let i = 0; i < 70; i++) deep = { nested: deep };
     let threw = false;
     try { rRedact({ input: [{ type: "future_item_v9", payload: deep }] }); } catch { threw = true; }
     ok("responses: an item nested past the depth cap throws (fail closed)", threw);

@@ -30,22 +30,48 @@ const numSlot = (obj: any, key: string | number): Slot => ({
   numeric: true,
 });
 
+// The deepest a structured field is walked: the same 64 levels the response side
+// restores tool arguments to (reidentify.ts MAX_ARG_DEPTH), so whatever came back real in
+// a tool call is read again when the runner replays that call as history. Deeper is
+// refused (a throw is a fail-closed 422 in the proxy), never walked part way.
+const MAX_LEAF_DEPTH = 64;
+const tooDeep = (what: string) =>
+  new Error(`${what} nested deeper than ${MAX_LEAF_DEPTH} levels; refusing to forward unread fields`);
+
 // Recursively push a slot for every string leaf — and every numeric leaf — of an
 // object/array. Used for model-visible structured fields that carry user data
 // (tool_use inputs, tool schemas, tool_call arguments) — a raw email/card hiding
-// in any of them would otherwise reach the model. Depth-capped so a pathological
-// schema can't blow the stack (a redaction crash would fail the request closed,
-// but cheap to avoid).
-const MAX_LEAF_DEPTH = 16;
-function pushStringLeaves(node: any, slots: Slot[], depth = 0): void {
-  if (depth > MAX_LEAF_DEPTH || !node || typeof node !== "object") return;
+// in any of them would otherwise reach the model. With `finalizers` (tool-call
+// arguments) the property names are redacted too: the response side restores a value
+// in a property name as it does in a value, and the replayed call must not carry it.
+function pushStringLeaves(node: any, slots: Slot[], depth = 0, finalizers?: (() => void)[]): void {
+  if (!node || typeof node !== "object") return;
+  if (depth > MAX_LEAF_DEPTH) throw tooDeep("A structured field");
   const keys = Array.isArray(node) ? node.map((_: any, i: number) => i) : Object.keys(node);
+  if (finalizers && !Array.isArray(node)) pushKeySlots(node, keys as string[], slots, finalizers);
   for (const k of keys) {
     const v = (node as any)[k];
     if (typeof v === "string") slots.push(slot(node, k));
     else if (typeof v === "number" || typeof v === "bigint") slots.push(numSlot(node, k));
-    else if (v && typeof v === "object") pushStringLeaves(v, slots, depth + 1);
+    else if (v && typeof v === "object") pushStringLeaves(v, slots, depth + 1, finalizers);
   }
+}
+
+// One slot per property name of an argument object. A redacted name is applied after
+// every value is written (a finalizer, ahead of any re-serialisation pushed later), with
+// the object's key order kept. Two names that redact to the same name refuse the request
+// rather than drop one of the values.
+function pushKeySlots(obj: any, keys: string[], slots: Slot[], finalizers: (() => void)[]): void {
+  const renamed = new Map<string, string>();
+  for (const k of keys) slots.push({ get: () => k, set: (v) => { renamed.set(k, v); } });
+  finalizers.push(() => {
+    if (renamed.size === 0) return;
+    const entries = keys.map((k) => [renamed.get(k) ?? k, obj[k]] as [string, any]);
+    if (new Set(entries.map(([k]) => k)).size !== entries.length)
+      throw new Error("two tool-call argument names redact to the same name; refusing to forward the request");
+    for (const k of keys) delete obj[k];
+    for (const [k, v] of entries) Object.defineProperty(obj, k, { value: v, writable: true, enumerable: true, configurable: true });
+  });
 }
 
 // A JSON-string field (tool-call arguments): parse → redact its leaves (incl. NUMERIC
@@ -56,7 +82,7 @@ function pushJsonString(obj: any, key: string, slots: Slot[], finalizers: (() =>
   let parsed: any;
   try { parsed = JSON.parse(obj[key]); } catch { parsed = undefined; }
   if (parsed && typeof parsed === "object") {
-    pushStringLeaves(parsed, slots);
+    pushStringLeaves(parsed, slots, 0, finalizers);
     finalizers.push(() => { obj[key] = JSON.stringify(parsed); });
   } else {
     slots.push(slot(obj, key));
@@ -96,8 +122,7 @@ const RESPONSES_MEDIA_TYPES = new Set(["input_image", "input_file", "image_gener
  * deeper leaves unread, and a throw is a fail-closed 422 in the proxy.
  */
 function pushResponsesLeaves(node: any, slots: Slot[], finalizers: (() => void)[], depth = 0): void {
-  if (depth > MAX_LEAF_DEPTH)
-    throw new Error(`Responses input nested deeper than ${MAX_LEAF_DEPTH} levels; refusing to forward unread fields`);
+  if (depth > MAX_LEAF_DEPTH) throw tooDeep("Responses input");
   if (!Array.isArray(node) && RESPONSES_MEDIA_TYPES.has(node.type)) return;
   const keys = Array.isArray(node) ? node.map((_: any, i: number) => i) : Object.keys(node);
   for (const k of keys) {
@@ -161,7 +186,7 @@ function requestTextSlots(
         ) {
           // Tool inputs are user-supplied data, not a fixed schema; an earlier reply's call
           // comes back here with its real values restored.
-          pushStringLeaves(part.input, slots);
+          pushStringLeaves(part.input, slots, 0, finalizers);
         } else if (part.type === "document") {
           // A document's title and context are read by the model, and so is a plain-text
           // source (its data is the text) or a content source (text blocks). A base64 or
