@@ -118,6 +118,50 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   ok("apply: strip span count", spans.length === 2);
 }
 {
+  // Anthropic blocks that carry text beyond text parts, and the media that passes as sent.
+  const v = new Vault("strip");
+  const body = {
+    model: "m",
+    messages: [
+      { role: "user", content: [
+        { type: "document", title: "jane@corp.io notes", context: "from 10.0.0.9", source: { type: "text", media_type: "text/plain", data: "mail jane@corp.io" } },
+        { type: "document", source: { type: "content", content: [{ type: "text", text: "ip 10.0.0.9" }] } },
+        { type: "document", source: { type: "url", url: "https://x.example/jane@corp.io.pdf" } },
+        { type: "search_result", title: "jane@corp.io", source: "https://x.example/r?u=jane@corp.io", content: [{ type: "text", text: "ip 10.0.0.9" }] },
+        { type: "tool_result", tool_use_id: "toolu_1", content: [{ type: "image", source: { type: "url", url: "https://x.example/jane@corp.io.png" } }, { type: "text", text: "ip 10.0.0.9" }] },
+        { type: "mcp_tool_result", tool_use_id: "mcptoolu_1", content: [{ type: "text", text: "ip 10.0.0.9" }] },
+      ] },
+      { role: "assistant", content: [
+        { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "jane@corp.io" } },
+        { type: "mcp_tool_use", id: "mcptoolu_1", name: "lookup", server_name: "crm", input: { who: "jane@corp.io" } },
+      ] },
+    ],
+  };
+  const { deidBody: d } = applyRedaction(body, "anthropic", v, ALL, detector);
+  const [doc, docC, docU, sr, tr, mtr] = d.messages[0].content;
+  ok("apply: document title, context and plain-text source redacted", doc.title === "[EMAIL] notes" && doc.context === "from [IPV4]" && doc.source.data === "mail [EMAIL]", JSON.stringify(doc));
+  ok("apply: document content source redacted", docC.source.content[0].text === "ip [IPV4]", JSON.stringify(docC));
+  ok("apply: a URL document source passes as sent", docU.source.url === "https://x.example/jane@corp.io.pdf");
+  ok("apply: search_result title and text redacted, its source as sent", sr.title === "[EMAIL]" && sr.content[0].text === "ip [IPV4]" && sr.source === "https://x.example/r?u=jane@corp.io", JSON.stringify(sr));
+  ok("apply: a tool_result image source passes as sent, its text is redacted", tr.content[0].source.url === "https://x.example/jane@corp.io.png" && tr.content[1].text === "ip [IPV4]" && tr.tool_use_id === "toolu_1", JSON.stringify(tr));
+  ok("apply: mcp_tool_result text redacted", mtr.content[0].text === "ip [IPV4]", JSON.stringify(mtr));
+  const [stu, mtu] = d.messages[1].content;
+  ok("apply: server_tool_use and mcp_tool_use input redacted, names and ids as sent", stu.input.query === "[EMAIL]" && mtu.input.who === "[EMAIL]" && stu.name === "web_search" && mtu.id === "mcptoolu_1" && mtu.server_name === "crm", JSON.stringify(d.messages[1]));
+}
+{
+  // Chat: an assistant's refusal and legacy function_call arguments are model-visible.
+  const v = new Vault("strip");
+  const body = { model: "m", messages: [
+    { role: "assistant", content: null, refusal: "not for jane@corp.io", function_call: { name: "send", arguments: '{"to":"jane@corp.io","n":1}' } },
+    { role: "function", name: "send", content: "sent to jane@corp.io" },
+  ] };
+  const { deidBody: d } = applyRedaction(body, "openai", v, ALL, detector);
+  const fc = JSON.parse(d.messages[0].function_call.arguments);
+  ok("apply: chat refusal redacted", d.messages[0].refusal === "not for [EMAIL]", d.messages[0].refusal);
+  ok("apply: legacy function_call arguments redacted and still JSON", fc.to === "[EMAIL]" && fc.n === 1 && d.messages[0].function_call.name === "send", d.messages[0].function_call.arguments);
+  ok("apply: a function message's content redacted", d.messages[1].content === "sent to [EMAIL]");
+}
+{
   // redactSystem=false → system prompt is application scaffolding, left untouched;
   // user message content (and OpenAI role:"system" messages) handled accordingly.
   const va = new Vault("strip");

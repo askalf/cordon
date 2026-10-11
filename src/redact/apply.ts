@@ -118,8 +118,10 @@ function pushResponsesLeaves(node: any, slots: Slot[], finalizers: (() => void)[
  * model-visible structured field that can carry user data: OpenAI message `name` +
  * assistant `tool_calls[].function.arguments`, tool definitions (descriptions +
  * parameter schemas), and Anthropic `tool_use` inputs. Responses input items are walked
- * fail-closed (see pushResponsesLeaves). Only image / file parts, the structural
- * Responses keys above and raw provider-auth headers are intentionally left untouched.
+ * fail-closed (see pushResponsesLeaves). Chat and Messages content is read by part and
+ * block type: media (image, audio, file and document file sources, search_result
+ * sources), thinking blocks, ids, tool names, and any type not handled here pass as sent;
+ * README "Fronting an agent runner" lists both sides.
  */
 function requestTextSlots(
   body: any,
@@ -149,13 +151,34 @@ function requestTextSlots(
           slots.push(slot(part, "text"));
         } else if (part.type === "refusal" && typeof part.refusal === "string") {
           slots.push(slot(part, "refusal"));
-        } else if (part.type === "tool_result") {
+        } else if (part.type === "tool_result" || part.type === "mcp_tool_result") {
           // Anthropic tool_result content can itself be a string or block array.
           if (typeof part.content === "string") slots.push(slot(part, "content"));
           else if (Array.isArray(part.content)) pushContent(part, "content");
-        } else if (part.type === "tool_use" && part.input && typeof part.input === "object") {
-          // Anthropic tool_use args are user-supplied data, not a fixed schema.
+        } else if (
+          (part.type === "tool_use" || part.type === "server_tool_use" || part.type === "mcp_tool_use") &&
+          part.input && typeof part.input === "object"
+        ) {
+          // Tool inputs are user-supplied data, not a fixed schema; an earlier reply's call
+          // comes back here with its real values restored.
           pushStringLeaves(part.input, slots);
+        } else if (part.type === "document") {
+          // A document's title and context are read by the model, and so is a plain-text
+          // source (its data is the text) or a content source (text blocks). A base64 or
+          // URL source is a file, left as sent.
+          if (typeof part.title === "string") slots.push(slot(part, "title"));
+          if (typeof part.context === "string") slots.push(slot(part, "context"));
+          const src = part.source;
+          if (src?.type === "text" && typeof src.data === "string") slots.push(slot(src, "data"));
+          else if (src?.type === "content") {
+            if (typeof src.content === "string") slots.push(slot(src, "content"));
+            else if (Array.isArray(src.content)) pushContent(src, "content");
+          }
+        } else if (part.type === "search_result") {
+          // A search result's title and text blocks are content; its source is the
+          // result's identifier (a URL), cited back by the model as given.
+          if (typeof part.title === "string") slots.push(slot(part, "title"));
+          if (Array.isArray(part.content)) pushContent(part, "content");
         }
       }
     }
@@ -224,8 +247,12 @@ function requestTextSlots(
     // OpenAI carries the system prompt as a role:"system" message — skip it too.
     if (!redactSystem && msg.role === "system") continue;
     if (typeof msg.content === "string" || Array.isArray(msg.content)) pushContent(msg, "content");
-    // OpenAI: participant `name` and assistant `tool_calls` arguments are model-visible.
+    // OpenAI: participant `name`, an assistant's `refusal`, and its `tool_calls` and
+    // legacy `function_call` arguments are model-visible.
     if (typeof msg.name === "string") slots.push(slot(msg, "name"));
+    if (typeof msg.refusal === "string") slots.push(slot(msg, "refusal"));
+    if (msg.function_call && typeof msg.function_call.arguments === "string")
+      pushJsonString(msg.function_call, "arguments", slots, finalizers);
     if (Array.isArray(msg.tool_calls))
       for (const tc of msg.tool_calls) {
         const fn = tc?.function;
