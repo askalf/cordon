@@ -189,14 +189,16 @@ export function restoreArgs(text: string, c: ArgContext): string {
         continue;
       }
     }
-    const before = text.slice(last, m.index);
-    c.keys?.feed(before);
-    out += before;
+    // Validated before anything is written or fed to the key tracker: a literal such as
+    // <3> is ordinary text, left in place for the slice after the next real placeholder.
     const name = c.json ? decodeName(m[1]) : m[1];
     if (!/^[A-Z][A-Z0-9_]*$/.test(name)) {
       re.lastIndex = m.index + 1;
       continue;
     }
+    const before = text.slice(last, m.index);
+    c.keys?.feed(before);
+    out += before;
     const token = `<${name}>`;
     const value = c.vault.lookup(token);
     if (value === undefined) {

@@ -536,6 +536,25 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   // An escaped < or > never joins a name.
   const notName = restoreArgs('{"a":"<EMAIL\\u003c>"}', argContext(v, true, "echo", { unresolved: 0 }, ALL_TOOLS));
   ok("args: an escaped < inside the brackets is not a name character", notName === '{"a":"<EMAIL\\u003c>"}', notName);
+
+  // Text that is not a placeholder (<3>, a<b>c, <>) passes through once, untouched, next
+  // to a real token, whole and streamed at 1, 2 and 3 characters; and with an empty vault.
+  const litDoc = JSON.stringify({ x: "<3>", y: "a<b>c", z: "<>", w: `p<3>q${em}r<3>`, k: { "<3>": em } });
+  const litDocWant = JSON.stringify({ x: "<3>", y: "a<b>c", z: "<>", w: "p<3>qjohn@acme.comr<3>", k: { "<3>": "john@acme.com" } });
+  const litStats = { unresolved: 0 };
+  const litWhole = restoreArgs(litDoc, argContext(v, true, "echo", litStats, ALL_TOOLS));
+  ok("args: literals next to a token pass through once", litWhole === litDocWant && litStats.unresolved === 0, litWhole);
+  for (const n of [1, 2, 3]) {
+    const ls = new ArgStream(argContext(v, true, "echo", { unresolved: 0 }, ALL_TOOLS));
+    let lo = "";
+    for (let i = 0; i < litDoc.length; i += n) lo += ls.push(litDoc.slice(i, i + n));
+    lo += ls.end();
+    ok(`args stream: literals next to a token, ${n}-character fragments`, lo === litDocWant, lo);
+  }
+  const litEmptyV = new Vault("reversible");
+  const litPlain = JSON.stringify({ x: "<3>", y: "a<3>b<3>c" });
+  const litPlainOut = restoreArgs(litPlain, argContext(litEmptyV, true, "echo", { unresolved: 0 }, ALL_TOOLS));
+  ok("args: an empty vault leaves <3> literals byte for byte", litPlainOut === litPlain, litPlainOut);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
