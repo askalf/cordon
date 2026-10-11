@@ -224,9 +224,16 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   ok("apply: Responses arguments keep a big integer next to a redacted field", ra === '{"id":9007199254740993,"to":"[EMAIL]","card":"[CREDIT_CARD]"}', ra);
   // A card spelled with a decimal or an exponent is still the card: detected on the exact
   // decimal value of the literal, and the whole literal replaced.
-  for (const [lex, want] of [["4.111111111111111e15", "4111111111111111"], ["4111111111111111.0", "4111111111111111"], ["41111111111111110E-1", "4111111111111111"], ["-12e2", "-1200"], ["1.5", "1.5"], ["0.0", "0"], ["1e999", "1e999"], ["9007199254740993", "9007199254740993"]])
+  for (const [lex, want] of [["4.111111111111111e15", "4111111111111111"], ["4111111111111111.0", "4111111111111111"], ["41111111111111110E-1", "4111111111111111"], ["-12e2", "-1200"], ["1.5", "1.5"], ["0.0", "0"], ["1e999", "1e999"], ["9007199254740993", "9007199254740993"],
+    ["4111111111111111" + "0".repeat(401) + "e-401", "4111111111111111"], ["0.0004111111111111111e19", "4111111111111111"], ["1e-99999999999999999999", "1e-99999999999999999999"], ["7e99999999999999999999", "7e99999999999999999999"], ["1" + "0".repeat(41), "1" + "0".repeat(41)], ["1" + "0".repeat(39), "1" + "0".repeat(39)]])
     ok(`exactDecimal: ${lex} -> ${want}`, exactDecimal(lex) === want, exactDecimal(lex));
-  for (const lex of ["4111111111111111.0", "4.111111111111111e15"]) {
+  {
+    // A huge exponent costs nothing: decided by counting, never by building the digits.
+    const t0 = Date.now();
+    const out = legacy('{"n":1e999999999,"m":5e-999999999}');
+    ok("apply: a huge exponent is left as written, quickly", out === '{"n":1e999999999,"m":5e-999999999}' && Date.now() - t0 < 1000, out);
+  }
+  for (const lex of ["4111111111111111.0", "4.111111111111111e15", "4111111111111111" + "0".repeat(401) + "e-401"]) {
     const out = legacy(`{"card":${lex},"f":1.50}`);
     ok(`apply: a card written ${lex} is redacted whole, other numbers byte for byte`, out === '{"card":"[CREDIT_CARD]","f":1.50}', out);
   }

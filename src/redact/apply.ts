@@ -75,34 +75,32 @@ function pushKeySlots(obj: any, keys: string[], slots: Slot[], finalizers: (() =
   });
 }
 
+/** The most digits an integral number literal is expanded to for detection. */
+const MAX_INTEGRAL_DIGITS = 40;
+
 /**
  * The exact decimal value of a JSON number literal, from its digits (never through a JS
  * number, which rounds past 2^53): an integral value as plain digits with its sign
- * ("4111111111111111" for 4.111111111111111e15 or 4111111111111111.0), anything else as
- * written. An exponent past 400 is left as written rather than expanded.
+ * ("4111111111111111" for 4.111111111111111e15, 4111111111111111.0, or the card's digits
+ * followed by zeros with a compensating negative exponent), anything else as written.
+ * Normalised by significant digits, counted rather than built, so an exponent of any size
+ * costs nothing; a value with a fractional part, or an integer longer than
+ * MAX_INTEGRAL_DIGITS, is left as written.
  */
 export function exactDecimal(lexeme: string): string {
   const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(lexeme);
   if (!m) return lexeme;
   const exp = Number(m[4] ?? 0);
-  if (Math.abs(exp) > 400) return lexeme;
-  const digits = m[2] + (m[3] ?? "");
-  const point = m[2].length + exp; // digits before the decimal point
-  let int: string;
-  let frac: string;
-  if (point <= 0) {
-    int = "0";
-    frac = "0".repeat(-point) + digits;
-  } else if (point >= digits.length) {
-    int = digits + "0".repeat(point - digits.length);
-    frac = "";
-  } else {
-    int = digits.slice(0, point);
-    frac = digits.slice(point);
-  }
-  if (/[1-9]/.test(frac)) return lexeme;
-  int = int.replace(/^0+(?=\d)/, "");
-  return int === "0" ? "0" : m[1] + int;
+  if (!Number.isFinite(exp)) return lexeme;
+  let digits = m[2] + (m[3] ?? "");
+  let point = m[2].length + exp; // where the decimal point falls in `digits`
+  const lead = digits.length - digits.replace(/^0+/, "").length;
+  digits = digits.slice(lead);
+  point -= lead;
+  digits = digits.replace(/0+$/, "");
+  if (!digits) return "0";
+  if (point < digits.length || point > MAX_INTEGRAL_DIGITS) return lexeme;
+  return m[1] + digits + "0".repeat(point - digits.length);
 }
 
 // A JSON-string field (tool-call arguments), redacted on its own text: one slot per
