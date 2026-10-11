@@ -623,6 +623,18 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   try { restoreArgObject(wide, argContext(v, false, "echo", wst, ALL_TOOLS)); } catch { threw = true; }
   ok("args object: a very deep object is refused without exhausting the stack", !threw && !!wst.rejected);
 
+  // A withheld top-level name that becomes an allowed field name ([EMAIL]) never authorizes
+  // its value: parsed input and JSON text judge the value by the name the model wrote.
+  {
+    const em2 = v.placeholderFor("jane@acme.com", "EMAIL");
+    const stripKey = parseRestoreTools("echo.[EMAIL]");
+    const obj = { [em]: em2 };
+    restoreArgObject(obj, argContext(v, false, "echo", { unresolved: 0 }, stripKey));
+    const text = restoreArgsWhole(JSON.stringify({ [em]: em2 }), argContext(v, true, "echo", { unresolved: 0 }, stripKey));
+    ok("args object: a withheld name renamed to an allowed field does not restore its value", JSON.stringify(obj) === '{"[EMAIL]":"[EMAIL]"}', JSON.stringify(obj));
+    ok("args parity: parsed input and JSON text withhold the same value", text === JSON.stringify(obj), text);
+  }
+
   // A call whose name may still be arriving: nothing restored or emitted until it ends.
   const names = { k: "send" };
   const sendOnly = parseRestoreTools("send");

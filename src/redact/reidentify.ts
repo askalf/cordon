@@ -333,8 +333,12 @@ export function restoreArgObject(obj: any, c: ArgContext): boolean {
       c.stats.rejected ??= `the arguments nest deeper than ${MAX_ARG_DEPTH} levels`;
       return changed;
     }
+    // The policy judges a value by the top-level name the model wrote, never by the name
+    // that name restored or was withheld to.
+    const written: Array<string | number> = Array.isArray(node) ? node.map((_: any, i: number) => i) : Object.keys(node);
+    let keys = written;
     if (!Array.isArray(node)) {
-      const entries = Object.keys(node).map((k) => [k, node[k]] as [string, any]);
+      const entries = written.map((k) => [k, node[k]] as [string, any]);
       const names = entries.map(([k]) => one(k, depth === 0 ? undefined : top));
       if (names.some((n, i) => n !== entries[i][0])) {
         if (new Set(names).size !== names.length) {
@@ -343,12 +347,14 @@ export function restoreArgObject(obj: any, c: ArgContext): boolean {
         }
         for (const [k] of entries) delete node[k];
         entries.forEach(([, v], i) => Object.defineProperty(node, names[i], { value: v, writable: true, enumerable: true, configurable: true }));
+        keys = names;
         changed = true;
       }
     }
-    for (const k of Array.isArray(node) ? node.map((_: any, i: number) => i) : Object.keys(node)) {
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
       const v = node[k];
-      const below = depth === 0 && !Array.isArray(node) ? String(k) : top;
+      const below = depth === 0 && !Array.isArray(node) ? String(written[i]) : top;
       if (typeof v === "string") {
         const r = one(v, below);
         if (r !== v) {
