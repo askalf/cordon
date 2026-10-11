@@ -505,6 +505,20 @@ const rawPost = (path, body) =>
     ok(`tool/unresolved/${label}: X-Cordon-Unresolved counts each one`, res.headers.get("x-cordon-unresolved") === "2", res.headers.get("x-cordon-unresolved"));
     ok(`tool/unresolved/${label}: no part of the call is delivered`, !t.includes("john@acme.com") && !t.includes("EMAIL_ABCDEF_7"), t);
   }
+  // A whole custom tool input that ends inside a placeholder is refused, as the stream is.
+  await reset();
+  res = await post("/v1/responses", rBody("TOOLCALL CUSTOM " + PII + " use <EMAIL_ABC", { tools: TOOL }));
+  {
+    const t = await res.text();
+    ok("tool/custom-truncated: a whole input ending inside a placeholder is a 502", res.status === 502, String(res.status) + " " + t.slice(0, 200));
+    ok("tool/custom-truncated: and no call is delivered", !t.includes("custom_tool_call") && !t.includes("john@acme.com"), t.slice(0, 200));
+  }
+  await reset();
+  res = await post("/v1/responses", rBody("TOOLCALL CUSTOM " + PII + " cat <README", { tools: TOOL }));
+  {
+    const item = (await res.json())?.output?.[0];
+    ok("tool/custom-tail: a whole input ending in `<README` is delivered as written", res.status === 200 && item?.input?.endsWith("cat <README"), JSON.stringify(item?.input));
+  }
   // The same foreign placeholder in prose is left as text, as before: only arguments fail.
   await reset();
   res = await post("/v1/responses", rBody("see <EMAIL_ABCDEF_7> and " + PII));

@@ -271,10 +271,16 @@ function checkArgKeys(before: string, after: string, stats: ArgStats): void {
   }
 }
 
-/** restoreArgs for a whole argument document: JSON text is also refused when the restore
- *  made two of its property names the same (as restoreArgObject refuses for objects). */
+/** restoreArgs for a whole argument document, refused as the streamed path refuses the
+ *  same text: when it ends inside a placeholder, and (JSON text) when the restore made two
+ *  of its property names the same (as restoreArgObject refuses for objects). */
 export function restoreArgsWhole(text: string, c: ArgContext): string {
   const out = restoreArgs(text, c);
+  const p = formingStart(text, c.json);
+  if (p !== -1 && truncatedToken(formingName(text.slice(p)), c.vault)) {
+    c.stats.unresolved++;
+    c.stats.rejected ??= "the arguments end inside a placeholder";
+  }
   if (c.json) checkArgKeys(text, out, c.stats);
   return out;
 }
@@ -419,7 +425,7 @@ export class ArgStream {
  */
 function truncatedToken(name: string, vault: Vault): boolean {
   if (!name) return false;
-  if (/^[A-Z][A-Z0-9_]*_(?:[0-9A-F]{6}_\d*|[0-9A-F]{8})$/.test(name)) return true;
+  if (/^[A-Z][A-Z0-9_]*_(?:[0-9A-F]{1,8}|[0-9A-F]{6}_\d*)$/.test(name)) return true;
   return vault.hasTokenPrefix(`<${name}`);
 }
 

@@ -612,6 +612,13 @@ ok("timeout: empty, zero, negative and Infinity -> default",
     ok("args stream tail: the start of a minted token is refused", cut.ts.rejected === "the arguments end inside a placeholder" && cut.ts.unresolved === 1, JSON.stringify(cut));
     const foreign = tail("x <PHONE_ABCDEF_", false);
     ok("args stream tail: a foreign minted shape is refused", foreign.ts.rejected === "the arguments end inside a placeholder", JSON.stringify(foreign));
+    // The whole document is judged the same way as the stream.
+    for (const [text, bad] of [["use <EMAIL_ABC", true], ["x " + tok.slice(0, 5), true], ["cat <README", false], ["x<Y", false]]) {
+      const ws = { unresolved: 0 };
+      const o = restoreArgsWhole(text, argContext(tv, false, "echo", ws, ALL_TOOLS));
+      const st = tail(text, false).ts;
+      ok(`args tail parity: \`${text}\` ${bad ? "refused" : "delivered"} whole and streamed`, !!ws.rejected === bad && !!st.rejected === bad && (bad || o === text), JSON.stringify({ ws, st, o }));
+    }
   }
 }
 

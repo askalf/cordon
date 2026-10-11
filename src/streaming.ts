@@ -472,7 +472,7 @@ export async function captureAndReidentify(
       }
       if (type === "response.custom_tool_call_input.done") {
         if (!flushPart(j)) return;
-        if (typeof j.input === "string") j.input = restoreArgs(j.input, argContext(vault, false, toolFor(j), stats));
+        if (typeof j.input === "string") j.input = restoreArgsWhole(j.input, argContext(vault, false, toolFor(j), stats));
         if (!guard()) return;
         send(reframe(frame, j));
         return;
