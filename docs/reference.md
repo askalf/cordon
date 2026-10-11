@@ -78,4 +78,6 @@ Upstream failures return a fixed message and a `requestId` (also in `X-Request-I
 
 ## Configuration
 
-See [`.env.example`](../.env.example). The knobs that matter: `FAIL_MODE` (default `closed`), `DEFAULT_MODE`, `ACTIVE_SETS`, `CONSISTENT_PSEUDONYMS` with `TENANT_SECRET`, `AUDIT_LOG`, `ADMIN_TOKEN`, `POLICY_STORE`, `OPENAI_BASE` / `ANTHROPIC_BASE`, `ALLOW_HEADER_OVERRIDE`, `TRUST_TENANT_HEADER`, `UPSTREAM_TIMEOUT_MS`.
+See [`.env.example`](../.env.example). The knobs that matter: `FAIL_MODE` (default `closed`), `DEFAULT_MODE`, `ACTIVE_SETS`, `CONSISTENT_PSEUDONYMS` with `TENANT_SECRET`, `AUDIT_LOG`, `ADMIN_TOKEN`, `POLICY_STORE`, `OPENAI_BASE` / `ANTHROPIC_BASE`, `ALLOW_HEADER_OVERRIDE`, `TRUST_TENANT_HEADER`, `UPSTREAM_TIMEOUT_MS`, `CORDON_RESTORE_TOOLS`.
+
+A response whose tool-call arguments hold a placeholder this request did not mint is refused: 502 with `X-Cordon-Unresolved: <count>` for a whole response, the dialect's error frame for a stream (code `cordon_unresolved_placeholder` on the OpenAI dialects, `api_error` on Messages).

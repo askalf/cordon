@@ -432,6 +432,108 @@ const rawPost = (path, body) =>
     ok("tool/responses/strip: placeholder persists in the arguments", typeof fc?.arguments === "string" && fc.arguments.includes("[EMAIL]") && !fc.arguments.includes("john@acme.com"), fc?.arguments);
   }
 
+  // ---- tool arguments: shapes, escaping, raw text, unresolved placeholders, the restore policy ----
+  // A PEM key carries newlines, and this one a quote and a backslash too: restored into a
+  // JSON string literal it must be escaped, restored into a custom tool's plain text it must not.
+  const PEM = '-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBgkqhkiG9w0"BAQ\\EFAASCAUAwggE8\n-----END PRIVATE KEY-----';
+  const argsOf = (j) => j?.output?.find((o) => o.type === "function_call" || o.type === "mcp_call")?.arguments;
+  const parse = (s) => { try { return JSON.parse(s); } catch { return null; } };
+  await reset();
+  res = await post("/v1/responses", rBody("TOOLCALL key " + PEM + " and " + PII, { tools: TOOL }));
+  {
+    const a = argsOf(await res.json());
+    const p = parse(a);
+    ok("tool/args: a restored PEM key (newline, quote, backslash) keeps the arguments valid JSON", p?.text?.includes(PEM), a);
+    ok("tool/args: a number beyond 2^53 keeps its digits", typeof a === "string" && a.includes('"n":9007199254740993'), a);
+    sent = JSON.stringify(await calls());
+    ok("tool/args: upstream never saw the key", !sent.includes("MIIBVgIBADANBgkqhkiG9w0"));
+  }
+  await reset();
+  res = await post("/v1/responses", rBody("TOOLCALL CUSTOM key " + PEM, { tools: TOOL }));
+  {
+    const item = (await res.json())?.output?.[0];
+    ok("tool/custom: a custom tool's plain-text input gets the raw value, newlines and all", item?.type === "custom_tool_call" && item.input.includes(PEM) && !item.input.includes("<PRIVATE_KEY"), JSON.stringify(item?.input));
+  }
+  await reset();
+  res = await post("/v1/responses", rBody("TOOLCALL MCP " + PII, { tools: TOOL }));
+  {
+    const a = argsOf(await res.json());
+    ok("tool/mcp: mcp_call arguments restored", parse(a)?.text?.includes("john@acme.com") && !a.includes("<EMAIL"), a);
+  }
+  await reset();
+  res = await post("/v1/responses", rBody("TOOLCALL ESCAPED " + PII, { tools: TOOL }));
+  {
+    const a = argsOf(await res.json());
+    ok("tool/escaped: \\u003c-spelled placeholders restored", parse(a)?.text?.includes("john@acme.com") && !/u003cEMAIL/.test(a), a);
+  }
+  await reset();
+  res = await post("/v1/chat/completions", oBody("TOOLCALL LEGACY " + PII, { functions: [TOOL[0]] }));
+  {
+    const fcall = (await res.json())?.choices?.[0]?.message?.function_call;
+    ok("tool/chat-legacy: function_call arguments restored", parse(fcall?.arguments)?.text?.includes("john@acme.com"), fcall?.arguments);
+  }
+  await reset();
+  res = await post("/v1/chat/completions", oBody("TOOLCALL CHOICE1 " + PII, { tools: [{ type: "function", function: TOOL[0] }], n: 2 }));
+  {
+    const ch = (await res.json())?.choices ?? [];
+    const a = ch[1]?.message?.tool_calls?.[0]?.function?.arguments;
+    ok("tool/chat-choices: the second choice's tool call is restored", parse(a)?.text?.includes("john@acme.com"), a);
+    ok("tool/chat-choices: the first choice's text is intact", ch[0]?.message?.content === "ok");
+  }
+  await reset();
+  res = await post("/v1/messages", aBody("TOOLCALL SERVER " + PII));
+  {
+    const content = (await res.json())?.content ?? [];
+    const srv = content.find((b) => b.type === "server_tool_use");
+    const mcp = content.find((b) => b.type === "mcp_tool_use");
+    ok("tool/anthropic-server: server_tool_use input restored", srv?.input?.query?.includes("john@acme.com"), JSON.stringify(srv?.input));
+    ok("tool/anthropic-mcp: mcp_tool_use input restored", mcp?.input?.q?.includes("john@acme.com"), JSON.stringify(mcp?.input));
+  }
+
+  // A placeholder this request never minted, in a tool call's arguments: the call is not
+  // delivered. 502, the count in X-Cordon-Unresolved, and the body (real values and all) withheld.
+  for (const [label, path, body] of [
+    ["responses", "/v1/responses", rBody("TOOLCALL FOREIGN " + PII, { tools: TOOL })],
+    ["chat", "/v1/chat/completions", oBody("TOOLCALL FOREIGN " + PII, { tools: [{ type: "function", function: TOOL[0] }] })],
+    ["anthropic", "/v1/messages", aBody("TOOLCALL FOREIGN " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] })],
+  ]) {
+    await reset();
+    res = await post(path, body);
+    const t = await res.text();
+    ok(`tool/unresolved/${label}: 502`, res.status === 502, String(res.status));
+    // The stub writes it into both `text` and `note`: two unresolved placeholders.
+    ok(`tool/unresolved/${label}: X-Cordon-Unresolved counts each one`, res.headers.get("x-cordon-unresolved") === "2", res.headers.get("x-cordon-unresolved"));
+    ok(`tool/unresolved/${label}: no part of the call is delivered`, !t.includes("john@acme.com") && !t.includes("EMAIL_ABCDEF_7"), t);
+  }
+  // The same foreign placeholder in prose is left as text, as before: only arguments fail.
+  await reset();
+  res = await post("/v1/responses", rBody("see <EMAIL_ABCDEF_7> and " + PII));
+  ok("tool/unresolved: a foreign placeholder in prose does not fail the reply", res.status === 200);
+
+  // CORDON_RESTORE_TOOLS=echo.text on :8813: only echo's `text` comes back real.
+  const post4 = postTo("http://localhost:8813");
+  await reset();
+  res = await post4("/v1/responses", rBody("TOOLCALL " + PII, { tools: TOOL }));
+  {
+    const a = argsOf(await res.json());
+    const p = parse(a);
+    ok("restore policy: 200 when a placeholder is withheld by policy", res.status === 200, String(res.status));
+    ok("restore policy: echo.text is restored", p?.text?.includes("john@acme.com"), a);
+    ok("restore policy: echo.note keeps its placeholder", /<EMAIL_[0-9A-F]{6}_1>/.test(p?.note ?? "") && !p.note.includes("john@acme.com"), a);
+  }
+  await reset();
+  res = await post4("/v1/responses", rBody("TOOLCALL " + PII, { tools: [{ ...TOOL[0], name: "other" }] }));
+  {
+    const a = argsOf(await res.json());
+    ok("restore policy: a tool not on the list gets nothing back", res.status === 200 && typeof a === "string" && !a.includes("john@acme.com") && a.includes("<EMAIL_"), a);
+  }
+  await reset();
+  res = await post4("/v1/messages", aBody("TOOLCALL " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }));
+  {
+    const tu = (await res.json())?.content?.find((b) => b.type === "tool_use");
+    ok("restore policy (Messages): text restored, note withheld", tu?.input?.text?.includes("john@acme.com") && /<EMAIL_/.test(tu?.input?.note ?? ""), JSON.stringify(tu?.input));
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

@@ -314,6 +314,156 @@ function validateSSE(sse) {
     ok("stream/tool/anthropic: upstream never saw the raw values", !sent.includes("john@acme.com") && !sent.includes("4012888888881881"));
   }
 
+  // ---- streamed tool arguments: done frames, shapes, escaping, ordering, unresolved, policy ----
+  const PEM = '-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBgkqhkiG9w0"BAQ\\EFAASCAUAwggE8\n-----END PRIVATE KEY-----';
+  const frames = (sse) => {
+    const out = [];
+    for (const frame of sse.split("\n\n")) {
+      const lines = frame.split("\n");
+      const ev = lines.find((l) => l.startsWith("event:"))?.slice(6).trim();
+      const line = lines.find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      const raw = line.slice(5).trim();
+      let j = null;
+      try { j = JSON.parse(raw); } catch {}
+      out.push({ ev, raw, j });
+    }
+    return out;
+  };
+  const respTool = (extra = "") => rBody("TOOLCALL " + extra + PII, { tools: TOOL });
+
+  // Responses: the deltas join into exactly what the done frame, the item and the completed
+  // response carry, raw text and all (a number beyond 2^53 keeps its digits).
+  await reset();
+  txt = await (await post("/v1/responses", respTool())).text();
+  {
+    const f = frames(txt);
+    const joined = f.filter((x) => x.j?.type === "response.function_call_arguments.delta").map((x) => x.j.delta).join("");
+    const done = f.find((x) => x.j?.type === "response.function_call_arguments.done")?.j?.arguments;
+    const item = f.find((x) => x.j?.type === "response.output_item.done")?.j?.item?.arguments;
+    const completed = f.find((x) => x.j?.type === "response.completed")?.j?.response?.output?.[0]?.arguments;
+    ok("stream/args: the deltas join into the done frame's arguments byte for byte", joined === done, JSON.stringify([joined, done]));
+    ok("stream/args: output_item.done and response.completed carry the same arguments", item === done && completed === done);
+    ok("stream/args: a number beyond 2^53 keeps its digits in the frame text", f.some((x) => x.j?.type === "response.function_call_arguments.done" && x.raw.includes("9007199254740993")));
+  }
+  await reset();
+  txt = await (await post("/v1/responses", rBody("TOOLCALL key " + PEM, { tools: TOOL }))).text();
+  {
+    const joined = frames(txt).filter((x) => x.j?.type === "response.function_call_arguments.delta").map((x) => x.j.delta).join("");
+    ok("stream/args: a PEM key restored across fragments, JSON-escaped, document parses", parsesTo(joined)?.text?.includes(PEM), joined);
+  }
+  await reset();
+  txt = await (await post("/v1/responses", respTool("ESCAPED "))).text();
+  {
+    const f = frames(txt);
+    const joined = f.filter((x) => x.j?.type === "response.function_call_arguments.delta").map((x) => x.j.delta).join("");
+    const done = f.find((x) => x.j?.type === "response.function_call_arguments.done")?.j?.arguments;
+    ok("stream/args: \\u003c-spelled placeholders restored in the deltas", parsesTo(joined)?.text?.includes("john@acme.com") && !/u003cEMAIL/.test(joined), joined);
+    ok("stream/args: and the deltas still match the done frame", joined === done);
+  }
+  await reset();
+  txt = await (await post("/v1/responses", rBody("TOOLCALL CUSTOM key " + PEM, { tools: TOOL }))).text();
+  {
+    const f = frames(txt);
+    const joined = f.filter((x) => x.j?.type === "response.custom_tool_call_input.delta").map((x) => x.j.delta).join("");
+    const done = f.find((x) => x.j?.type === "response.custom_tool_call_input.done")?.j?.input;
+    ok("stream/custom: a custom tool's streamed input gets the raw value, not a JSON-escaped one", joined.includes(PEM) && !joined.includes("\\n"), JSON.stringify(joined));
+    ok("stream/custom: the deltas match the done frame", joined === done);
+  }
+  await reset();
+  txt = await (await post("/v1/responses", respTool("MCP "))).text();
+  {
+    const f = frames(txt);
+    const joined = f.filter((x) => x.j?.type === "response.mcp_call_arguments.delta").map((x) => x.j.delta).join("");
+    const done = f.find((x) => x.j?.type === "response.mcp_call_arguments.done")?.j?.arguments;
+    ok("stream/mcp: mcp_call arguments restored across fragments", parsesTo(joined)?.text?.includes("john@acme.com"), joined);
+    ok("stream/mcp: the deltas match the done frame", joined === done);
+  }
+
+  // Chat: a frame carrying text and the first argument fragment keeps both.
+  const chatTool = (extra, more = {}) => oBody("TOOLCALL " + extra + PII, { tools: [{ type: "function", function: TOOL[0] }], ...more });
+  const chatArgs = (sse, ci = 0) =>
+    frames(sse).map((x) => (x.j?.choices ?? []).filter((c) => (c.index ?? 0) === ci).map((c) => (c.delta?.tool_calls ?? []).map((t) => t.function?.arguments ?? "").join("") + (c.delta?.function_call?.arguments ?? "")).join("")).join("");
+  await reset();
+  txt = await (await post("/v1/chat/completions", chatTool("MIXED "))).text();
+  {
+    const text = reconstruct(txt, "openai");
+    const args = chatArgs(txt);
+    ok("stream/chat-mixed: the text in the mixed frame survives", text.includes("Calling."), text);
+    ok("stream/chat-mixed: the argument fragment in the mixed frame survives", parsesTo(args)?.text?.includes("john@acme.com"), args);
+    ok("stream/chat-mixed: the tool call's id and name pass through", txt.includes("call_stub") && txt.includes('"name":"echo"'));
+  }
+  await reset();
+  txt = await (await post("/v1/chat/completions", chatTool("FINISHJOINED "))).text();
+  {
+    const f = frames(txt);
+    const args = chatArgs(txt);
+    const finishAt = f.findIndex((x) => x.j?.choices?.[0]?.finish_reason);
+    const fragAfter = f.slice(finishAt + 1).some((x) => (x.j?.choices?.[0]?.delta?.tool_calls ?? []).length);
+    ok("stream/chat-finish: the last fragment sharing the finish frame is kept", parsesTo(args)?.text?.includes("john@acme.com"), args);
+    ok("stream/chat-finish: no argument fragment comes after the finish", finishAt >= 0 && !fragAfter);
+  }
+  await reset();
+  txt = await (await post("/v1/chat/completions", chatTool("LEGACY ", { tools: undefined, functions: [TOOL[0]] }))).text();
+  {
+    const args = chatArgs(txt);
+    ok("stream/chat-legacy: function_call argument fragments restored", parsesTo(args)?.text?.includes("john@acme.com"), args);
+  }
+  await reset();
+  txt = await (await post("/v1/chat/completions", chatTool("CHOICE1 ", { n: 2 }))).text();
+  {
+    const args = chatArgs(txt, 1);
+    ok("stream/chat-choices: the second choice's argument fragments restored", parsesTo(args)?.text?.includes("john@acme.com"), args);
+    ok("stream/chat-choices: the first choice's text is intact", txt.includes('"content":"ok"'));
+  }
+
+  // A stream that stops inside a placeholder: the held argument tail is still flushed, resolved.
+  await reset();
+  txt = await (await post("/v1/chat/completions", chatTool("ARGTRUNC "))).text();
+  {
+    const args = chatArgs(txt);
+    ok("stream/chat-truncated: the held argument tail is flushed and resolved", args.includes("john@acme.com") && !args.includes("<EMA"), args);
+  }
+  await reset();
+  txt = await (await post("/v1/messages", aBody("TOOLCALL ARGTRUNC " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }))).text();
+  {
+    const args = joinFrames(txt, (j) => (j.type === "content_block_delta" && j.delta?.type === "input_json_delta" ? j.delta.partial_json : ""));
+    ok("stream/anthropic-truncated: the held input tail is flushed and resolved", args.includes("john@acme.com") && !args.includes("<EMA"), args);
+  }
+  await reset();
+  txt = await (await post("/v1/messages", aBody("TOOLCALL STARTINPUT " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }))).text();
+  {
+    const start = frames(txt).find((x) => x.j?.type === "content_block_start" && x.j.content_block?.type === "tool_use");
+    ok("stream/anthropic-start: an input given whole on content_block_start is restored", start?.j?.content_block?.input?.text?.includes("john@acme.com"), JSON.stringify(start?.j?.content_block?.input));
+  }
+
+  // A placeholder this request never minted: the dialect's error frame, and nothing after it.
+  for (const [label, path, body, isError] of [
+    ["responses", "/v1/responses", respTool("FOREIGN "), (x) => x.j?.type === "error" && x.j.code === "cordon_unresolved_placeholder"],
+    ["chat", "/v1/chat/completions", chatTool("FOREIGN "), (x) => x.j?.error?.code === "cordon_unresolved_placeholder"],
+    ["anthropic", "/v1/messages", aBody("TOOLCALL FOREIGN " + PII, { tools: [{ name: "echo", description: "echo", input_schema: TOOL[0].parameters }] }), (x) => x.j?.type === "error" && x.ev === "error"],
+  ]) {
+    await reset();
+    txt = await (await post(path, body)).text();
+    const f = frames(txt);
+    const at = f.findIndex(isError);
+    ok(`stream/unresolved/${label}: an error frame ends the stream`, at >= 0 && at === f.length - 1, JSON.stringify(f.map((x) => x.j?.type ?? (x.j?.error ? "error" : x.raw.slice(0, 20)))));
+    ok(`stream/unresolved/${label}: the foreign placeholder never reaches the client`, !txt.includes("EMAIL_ABCDEF_7"));
+  }
+
+  // CORDON_RESTORE_TOOLS=echo.text on :8813, streamed: same per-field decision as whole.
+  {
+    const post4 = (path, body) =>
+      fetch("http://localhost:8813" + path, { method: "POST", headers: { "content-type": "application/json", "x-api-key": "test-key", "anthropic-version": "2023-06-01" }, body: JSON.stringify(body) });
+    await reset();
+    txt = await (await post4("/v1/responses", respTool())).text();
+    const f = frames(txt);
+    const joined = f.filter((x) => x.j?.type === "response.function_call_arguments.delta").map((x) => x.j.delta).join("");
+    const p = parsesTo(joined);
+    ok("stream/policy: echo.text restored, echo.note withheld", p?.text?.includes("john@acme.com") && /<EMAIL_/.test(p?.note ?? ""), joined);
+    ok("stream/policy: a withheld placeholder does not end the stream", !f.some((x) => x.j?.type === "error"));
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

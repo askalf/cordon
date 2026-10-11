@@ -4,7 +4,8 @@ import { runAll, detector } from "./src/detect/index.ts";
 import { luhn, ibanMod97, abaRouting, ssnValid } from "./src/detect/validators.ts";
 import { Vault } from "./src/redact/vault.ts";
 import { applyRedaction, tally } from "./src/redact/apply.ts";
-import { reidentifyBody, StreamReidentifier } from "./src/redact/reidentify.ts";
+import { reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
+import { parseRestoreTools } from "./src/redact/restorePolicy.ts";
 import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN, parseTimeoutMs, DEFAULT_UPSTREAM_TIMEOUT_MS, MAX_TIMEOUT_MS } from "./src/config.ts";
 import { setPolicy, getPolicy, allPolicies, save as savePolicy, load as loadPolicy } from "./src/policy.ts";
 
@@ -375,6 +376,99 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   ok("policy persist: malformed file non-fatal, state preserved", getPolicy("acme").mode === "strip");
   try { rmSync(tmp, { force: true }); } catch {}
   try { rmSync(bad, { force: true }); } catch {}
+}
+
+// ---------------- tool-call arguments ----------------
+{
+  const ALL_TOOLS = parseRestoreTools("");
+  const v = new Vault("reversible");
+  // A value with a quote, a backslash and a newline: spliced into a JSON string literal raw,
+  // any one of them breaks the document.
+  const tricky = 'she said "hi" \\ then\nleft';
+  const tok = v.placeholderFor(tricky, "PRIVATE_KEY");
+  const em = v.placeholderFor("john@acme.com", "EMAIL");
+  const doc = `{"text":"pre ${tok} post","n":9007199254740993,"e":"${em}"}`;
+  const whole = restoreArgs(doc, argContext(v, true, "echo", { unresolved: 0 }, ALL_TOOLS));
+  let parsed = null;
+  try { parsed = JSON.parse(whole); } catch {}
+  ok("args: quote, backslash and newline are JSON-escaped and the document parses", parsed?.text === `pre ${tricky} post`, whole);
+  ok("args: the email is restored", parsed?.e === "john@acme.com");
+  ok("args: a number beyond 2^53 keeps its digits (raw text, never re-serialised)", whole.includes('"n":9007199254740993'), whole);
+
+  // Streamed one character, then three characters, at a time: the fragments join into exactly
+  // the whole-document restore (what a done frame carries).
+  const streamed = (text, size) => {
+    const s = new ArgStream(argContext(v, true, "echo", { unresolved: 0 }, ALL_TOOLS));
+    let out = "";
+    for (let i = 0; i < text.length; i += size) out += s.push(text.slice(i, i + size));
+    return out + s.end();
+  };
+  ok("args stream: 1-character fragments join into the whole-document restore", streamed(doc, 1) === whole, streamed(doc, 1));
+  ok("args stream: 3-character fragments join into the whole-document restore", streamed(doc, 3) === whole);
+
+  // A serializer that spells < and > as \u003c and \u003e: one placeholder all the same,
+  // in the whole document and in the fragments.
+  const esc = doc.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+  const wholeEsc = restoreArgs(esc, argContext(v, true, "echo", { unresolved: 0 }, ALL_TOOLS));
+  let pe = null;
+  try { pe = JSON.parse(wholeEsc); } catch {}
+  ok("args: \\u003c-spelled placeholders restored in the whole document", pe?.e === "john@acme.com" && pe?.text === `pre ${tricky} post`, wholeEsc);
+  ok("args stream: \\u003c-spelled placeholders restored across 1-character fragments", streamed(esc, 1) === wholeEsc, streamed(esc, 1));
+  ok("args stream: \\u003c-spelled placeholders restored across 3-character fragments", streamed(esc, 3) === wholeEsc);
+  // An unrelated \u escape near the end is held only while it could be an opening.
+  ok("args stream: a \\u00e9 escape passes through", streamed('{"a":"caf\\u00e9"}', 1) === '{"a":"caf\\u00e9"}');
+
+  // Plain-text input (a custom tool): the value goes back raw, not JSON-escaped.
+  const plain = restoreArgs(`pre ${tok}`, argContext(v, false, "echo", { unresolved: 0 }, ALL_TOOLS));
+  ok("args text: a custom tool's input gets the raw value, not a JSON-escaped one", plain === `pre ${tricky}`, JSON.stringify(plain));
+
+  // Placeholders this vault never minted: the counter form and the pseudonym form are
+  // counted; a caller's own literal of another shape is not.
+  const st = { unresolved: 0 };
+  restoreArgs('{"a":"<EMAIL_ABCDEF_7> <PHONE_0A1B2C3D> <EMAIL_1>"}', argContext(v, true, "echo", st, ALL_TOOLS));
+  ok("args: foreign counter-form and pseudonym-form placeholders are counted, a caller literal is not", st.unresolved === 2, String(st.unresolved));
+  const st2 = { unresolved: 0 };
+  restoreArgs('{"a":"\\u003cEMAIL_ABCDEF_7\\u003e"}', argContext(v, true, "echo", st2, ALL_TOOLS));
+  ok("args: a foreign placeholder in the \\u003c spelling is counted too", st2.unresolved === 1);
+  ok("isMintedPlaceholder: counter and pseudonym forms only", isMintedPlaceholder("<EMAIL_ABCDEF_7>") && isMintedPlaceholder("<US_ROUTING_0A1B2C3D>") && !isMintedPlaceholder("<EMAIL_1>") && !isMintedPlaceholder("<EMAIL_abcdef_1>"));
+
+  // The restore policy.
+  ok("restore policy: unset, blank or * restores everything", parseRestoreTools(undefined).all && parseRestoreTools("").all && parseRestoreTools(" * ").all);
+  const p = parseRestoreTools("echo.text, other");
+  ok("restore policy: tool.field allows only that field", p.forTool("echo")("text") && !p.forTool("echo")("note") && !p.forTool("echo")(undefined));
+  ok("restore policy: a bare tool allows all its fields", p.forTool("other")("anything") && p.forTool("other")(undefined));
+  ok("restore policy: an unlisted or unnamed tool gets nothing", !p.forTool("nope")("text") && !p.forTool(undefined)("text"));
+  const st3 = { unresolved: 0 };
+  const pol = restoreArgs(`{"text":"${em}","note":"${em}"}`, argContext(v, true, "echo", st3, p));
+  let pp = null;
+  try { pp = JSON.parse(pol); } catch {}
+  ok("restore policy: the allowed field is restored, the other keeps its placeholder", pp?.text === "john@acme.com" && pp?.note === em, pol);
+  ok("restore policy: a placeholder withheld by policy is not an unresolved one", st3.unresolved === 0);
+  const ps = new ArgStream(argContext(v, true, "echo", { unresolved: 0 }, p));
+  let pstream = "";
+  const pdoc = `{"text":"${em}","note":"${em}"}`;
+  for (const ch of pdoc) pstream += ps.push(ch);
+  pstream += ps.end();
+  ok("restore policy: the same per-field decision across 1-character fragments", pstream === pol, pstream);
+
+  // The top-level key a position belongs to.
+  const kt = new TopKeyTracker();
+  const keys = [];
+  for (const ch of '{"a":"x","b":{"c":"y"},"d":["z"],"e\\"q":"w"}') {
+    kt.feed(ch);
+    if ("xyzw".includes(ch)) keys.push(kt.key);
+  }
+  ok("top-level key tracker: nested values, arrays and escaped keys", JSON.stringify(keys) === JSON.stringify(["a", "b", "d", 'e"q']), JSON.stringify(keys));
+
+  // Whole bodies: an unresolved placeholder in a tool call's arguments is reported, not passed.
+  const body = { output: [{ type: "function_call", name: "echo", arguments: '{"a":"<EMAIL_ABCDEF_7>"}' }] };
+  const bst = { unresolved: 0 };
+  reidentifyBody(body, "openai", v, "responses", bst);
+  ok("reidentifyBody: an unresolved placeholder in arguments is counted", bst.unresolved === 1);
+  const fresh = new Vault("reversible");
+  const fst = { unresolved: 0 };
+  reidentifyBody(body, "openai", fresh, "responses", fst);
+  ok("reidentifyBody: counted even when the request redacted nothing", fst.unresolved === 1);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

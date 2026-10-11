@@ -1,7 +1,15 @@
 import type { Dialect, HttpRes, Provider } from "./types";
-import type { ProviderAdapter } from "./providers";
-import { reidentifyBody, restore, restoreJsonString, StreamReidentifier } from "./redact/reidentify";
-import { RESPONSES_ARGUMENT_DELTAS } from "./providers";
+import { ANTHROPIC_TOOL_BLOCKS, RESPONSES_ARGUMENT_DELTAS, RESPONSES_JSON_ARGUMENT_DELTAS, type ProviderAdapter } from "./providers";
+import {
+  ArgStream,
+  argContext,
+  reidentifyBody,
+  restore,
+  restoreArgObject,
+  restoreArgs,
+  StreamReidentifier,
+  unresolvedMessage,
+} from "./redact/reidentify";
 import type { Vault } from "./redact/vault";
 
 /** Pipe an upstream Response straight to the client, verbatim (strip / off / errors). */
@@ -33,12 +41,32 @@ function reframe(frame: string, j: unknown): string {
 }
 
 /**
+ * The dialect's own error frame for a tool call whose arguments hold placeholders this
+ * request did not mint. Response headers are already sent by the time a stream finds
+ * one, so the error travels in the stream (a whole response gets a 502 and
+ * X-Cordon-Unresolved instead); the stream ends after it.
+ */
+function unresolvedFrame(provider: Provider, dialect: Dialect, n: number): string {
+  const message = unresolvedMessage(n);
+  if (provider === "anthropic")
+    return `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message } })}\n\n`;
+  if (dialect === "responses")
+    return `event: error\ndata: ${JSON.stringify({ type: "error", code: "cordon_unresolved_placeholder", message, param: null })}\n\n`;
+  return `data: ${JSON.stringify({ error: { message, type: "cordon_unresolved_placeholder", code: "cordon_unresolved_placeholder" } })}\n\n`;
+}
+
+const RESPONSES_TOOL_ITEMS = new Set(["function_call", "custom_tool_call", "mcp_call"]);
+const RESPONSES_JSON_ARGUMENT_DONE = new Set(["response.function_call_arguments.done", "response.mcp_call_arguments.done"]);
+
+/**
  * Reversible streaming: tee the upstream SSE stream while restoring real values in
  * flight. Text-carrying frames are suppressed and re-emitted (re-identified) via the
  * adapter; structural frames (message_start, usage, finish, [DONE]) pass through
  * verbatim. The held-back tail is flushed right before each text block closes, so a
  * placeholder split across a frame boundary is still restored before the client sees
- * the block end.
+ * the block end. Tool-call arguments are restored the same way through ArgStream, under
+ * the restore policy, and a placeholder in them that this request did not mint ends the
+ * stream with an error frame instead of reaching the client's tool.
  */
 export async function captureAndReidentify(
   upBody: ReadableStream<Uint8Array>,
@@ -51,90 +79,164 @@ export async function captureAndReidentify(
   res.setHeader("content-type", "text/event-stream");
   res.setHeader("cache-control", "no-cache");
 
+  // Placeholders in tool arguments that this vault cannot resolve, across the stream.
+  const stats = { unresolved: 0 };
+  let stopped = false;
+  /** True while the stream may go on; on the first unresolved placeholder, writes the
+   *  error frame instead and stops the stream. Checked before every argument write. */
+  const guard = (): boolean => {
+    if (stopped) return false;
+    if (!stats.unresolved) return true;
+    stopped = true;
+    res.write(unresolvedFrame(provider, dialect, stats.unresolved));
+    return false;
+  };
+
   const reider = new StreamReidentifier(vault);
   // The content-block index our re-emitted text frames target. Anthropic responses can
   // interleave blocks (a `thinking` block at index 0, the `text` block at index 1, plus
   // tool_use blocks); a re-emitted text_delta MUST carry the matching block index or the
-  // client SDK throws "Content block is not a text block". OpenAI has no block index → 0.
+  // client SDK throws "Content block is not a text block".
   let emitIndex = 0;
   // Responses addresses a delta by item_id / output_index / content_index; a re-emitted
   // delta carries the addressing of the frame it stands in for.
-  let emitCtx: Record<string, unknown> = {};
-  const emitText = (chunk: string, index = emitIndex, ctx = emitCtx) => {
+  const emitText = (chunk: string, index = emitIndex, ctx: Record<string, unknown> = {}) => {
     if (chunk) res.write(adapter.frameFromText(chunk, index, ctx));
   };
-  const flushTail = () => emitText(reider.end(), emitIndex);
 
-  // A Responses stream can carry several content parts at once (two output items, or two
-  // content indices of one item) and their deltas interleave. One buffer for all of them
-  // would splice part B's text into a placeholder part A had half-written, and re-emit it
-  // under B's address. Each part gets its own re-identifier and its own addressing, and
-  // is flushed and dropped when that part's own done frame arrives.
-  const parts = new Map<string, { reider: StreamReidentifier; ctx: Record<string, unknown> }>();
-  const partKey = (j: any) => `${j?.item_id ?? ""}/${j?.output_index ?? 0}/${j?.content_index ?? 0}`;
-  // A tool call's arguments stream as fragments of JSON string literals, so that part's
-  // re-identifier escapes what it restores (json), where a text part restores as is.
-  const partFor = (j: any, ctx: Record<string, unknown>, json = false) => {
-    const key = partKey(j);
-    const found = parts.get(key);
-    if (found) { found.ctx = ctx; return found; }
-    const made = { reider: new StreamReidentifier(vault, { json }), ctx };
-    parts.set(key, made);
-    return made;
-  };
-  // Anthropic tool_use blocks stream their input as input_json_delta fragments, one
-  // re-identifier per block index, flushed when that block stops.
-  const jsonBlocks = new Map<number, StreamReidentifier>();
+  // ---- Anthropic: tool blocks by index, each with its name and its input's ArgStream ----
+  const toolBlocks = new Map<number, { name?: string; args?: ArgStream }>();
   const emitJson = (index: number, chunk: string) => {
     if (!chunk) return;
     const data = { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: chunk } };
     res.write(`event: content_block_delta\ndata: ${JSON.stringify(data)}\n\n`);
   };
-  // OpenAI chat streams a tool call's arguments as fragments on delta.tool_calls[i], one
-  // re-identifier per tool-call index, flushed on the finish frame.
-  const chatArgs = new Map<number, StreamReidentifier>();
-  const emitChatArgs = (index: number, chunk: string) => {
-    if (!chunk) return;
-    const data = { choices: [{ index: 0, delta: { tool_calls: [{ index, function: { arguments: chunk } }] } }] };
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  const flushToolBlock = (index: number): boolean => {
+    const blk = toolBlocks.get(index);
+    toolBlocks.delete(index);
+    if (!blk?.args) return true;
+    const chunk = blk.args.end();
+    if (!guard()) return false;
+    emitJson(index, chunk);
+    return true;
+  };
+
+  // ---- Responses: a re-identifier per content part, tool names per output item ----
+  // A Responses stream can carry several content parts at once (two output items, or two
+  // content indices of one item) and their deltas interleave. One buffer for all of them
+  // would splice part B's text into a placeholder part A had half-written, and re-emit it
+  // under B's address. Each part gets its own re-identifier and its own addressing, and
+  // is flushed and dropped when that part's own done frame arrives.
+  type Part = { r: { push(s: string): string; end(): string }; ctx: Record<string, unknown> };
+  const parts = new Map<string, Part>();
+  const partKey = (j: any) => `${j?.item_id ?? ""}/${j?.output_index ?? 0}/${j?.content_index ?? 0}`;
+  const partFor = (j: any, ctx: Record<string, unknown>, make: () => Part["r"]) => {
+    const key = partKey(j);
+    const found = parts.get(key);
+    if (found) {
+      found.ctx = ctx;
+      return found;
+    }
+    const made = { r: make(), ctx };
+    parts.set(key, made);
+    return made;
+  };
+  // The tool a call's argument frames belong to, from its output_item.added: the restore
+  // policy is per tool, and argument deltas carry only the item id and index.
+  const itemTools = new Map<string, string | undefined>();
+  const indexTools = new Map<number, string | undefined>();
+  const toolFor = (j: any): string | undefined =>
+    j?.item_id !== undefined && itemTools.has(j.item_id) ? itemTools.get(j.item_id) : indexTools.get(Number(j?.output_index));
+  /** Flush the parts matching `pick`, each under its own addressing, and forget them. */
+  const flushParts = (pick: (key: string, ctx: Record<string, unknown>) => boolean): boolean => {
+    for (const [key, part] of parts) {
+      if (!pick(key, part.ctx)) continue;
+      const chunk = part.r.end();
+      parts.delete(key);
+      if (!guard()) return false;
+      emitText(chunk, 0, part.ctx);
+    }
+    return true;
   };
   /** Flush one part's held tail under its own addressing and forget it. */
-  const flushPart = (j: any) => {
-    const key = partKey(j);
-    const part = parts.get(key);
-    if (!part) return;
-    emitText(part.reider.end(), 0, part.ctx);
-    parts.delete(key);
-  };
-  /** Flush the parts matching `pick`, each under its own addressing, and forget them. */
-  const flushParts = (pick: (ctx: Record<string, unknown>) => boolean) => {
-    for (const [key, part] of parts) {
-      if (!pick(part.ctx)) continue;
-      emitText(part.reider.end(), 0, part.ctx);
-      parts.delete(key);
-    }
+  const flushPart = (j: any): boolean => {
+    const k = partKey(j);
+    return flushParts((key) => key === k);
   };
   /** Every part still open: only for the frames that close the whole response. */
   const flushAllParts = () => flushParts(() => true);
-  /**
-   * Whatever this dialect is holding, for the paths that end a stream rather than
-   * close it: the terminal frame, the reader throwing, and an upstream that simply
-   * stops. Responses keeps its held text in the per-part map, so calling the single
-   * `flushTail` buffer there emits nothing and the client loses the tail.
-   */
-  const flushHeld = () => (dialect === "responses" ? flushAllParts() : flushTail());
   /**
    * The parts of ONE output item, on its `output_item.done`. Closing item A must not
    * end item B's re-identifier: B may be holding a half-written placeholder, and
    * ending it early emits the resolved value and then B's own suffix separately.
    */
-  const flushOutputItem = (j: any) => {
+  const flushOutputItem = (j: any): boolean => {
     const id = j?.item?.id;
     const idx = j?.output_index;
-    flushParts((ctx) => (id !== undefined && ctx["item_id"] === id) || (idx !== undefined && ctx["output_index"] === idx));
+    return flushParts((_k, ctx) => (id !== undefined && ctx["item_id"] === id) || (idx !== undefined && ctx["output_index"] === idx));
+  };
+
+  // ---- Chat completions: everything per choice (a request with n > 1 streams several) ----
+  // A choice's text and each of its tool calls (by tool-call index, or "fc" for the legacy
+  // function_call) hold their own tails; a call's name arrives on its first fragment.
+  type Choice = { text: StreamReidentifier; args: Map<string, ArgStream>; names: Map<string, string | undefined> };
+  const choices = new Map<number, Choice>();
+  const choiceFor = (ci: number): Choice => {
+    let st = choices.get(ci);
+    if (!st) {
+      st = { text: new StreamReidentifier(vault), args: new Map(), names: new Map() };
+      choices.set(ci, st);
+    }
+    return st;
+  };
+  const argsFor = (st: Choice, key: string): ArgStream => {
+    let a = st.args.get(key);
+    if (!a) {
+      a = new ArgStream(argContext(vault, true, st.names.get(key), stats));
+      st.args.set(key, a);
+    }
+    return a;
+  };
+  const chatFrame = (ci: number, delta: unknown) => `data: ${JSON.stringify({ choices: [{ index: ci, delta }] })}\n\n`;
+  const argDelta = (key: string, chunk: string) =>
+    key === "fc" ? { function_call: { arguments: chunk } } : { tool_calls: [{ index: Number(key.slice(1)), function: { arguments: chunk } }] };
+  /** Everything one choice still holds, except what the current frame already carried. */
+  const flushChoice = (ci: number, st: Choice, skipText: boolean, skipArgs: Set<string>): boolean => {
+    if (!skipText) {
+      const t = st.text.end();
+      if (t) res.write(chatFrame(ci, { content: t }));
+    }
+    for (const [key, a] of st.args) {
+      if (skipArgs.has(key)) continue;
+      const chunk = a.end();
+      if (!guard()) return false;
+      if (chunk) res.write(chatFrame(ci, argDelta(key, chunk)));
+    }
+    return true;
+  };
+
+  /**
+   * Whatever is still held, for the paths that end a stream rather than close it: the
+   * terminal [DONE], the reader throwing, and an upstream that simply stops. Text tails
+   * and tool-argument tails alike, in every dialect.
+   */
+  const flushHeld = () => {
+    if (stopped) return;
+    if (provider === "anthropic") {
+      emitText(reider.end(), emitIndex);
+      for (const index of [...toolBlocks.keys()]) if (!flushToolBlock(index)) return;
+      return;
+    }
+    if (dialect === "responses") {
+      flushAllParts();
+      return;
+    }
+    for (const [ci, st] of choices) if (!flushChoice(ci, st, false, new Set())) return;
+    choices.clear();
   };
 
   const handleFrame = (frame: string) => {
+    if (stopped) return;
     const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
     const data = dataLine ? dataLine.slice(5).trim() : "";
     if (!data) {
@@ -143,7 +245,7 @@ export async function captureAndReidentify(
     }
     if (data === "[DONE]") {
       flushHeld();
-      res.write(frame);
+      if (!stopped) res.write(frame);
       return;
     }
 
@@ -153,20 +255,38 @@ export async function captureAndReidentify(
         j = JSON.parse(data);
       } catch {}
       const type = j?.type;
+      if (type === "content_block_start") {
+        const cb = j?.content_block;
+        if (cb && ANTHROPIC_TOOL_BLOCKS.has(cb.type)) {
+          const index = Number(j.index ?? 0);
+          const name = typeof cb.name === "string" ? cb.name : undefined;
+          toolBlocks.set(index, { name });
+          // An input given whole at the start (not streamed as input_json_delta) is
+          // restored here; the frame passes byte-for-byte when nothing in it changes.
+          if (cb.input && typeof cb.input === "object") {
+            const changed = restoreArgObject(cb.input, argContext(vault, false, name, stats));
+            if (!guard()) return;
+            res.write(changed ? reframe(frame, j) : frame);
+            return;
+          }
+        }
+        res.write(frame);
+        return;
+      }
       if (type === "content_block_delta") {
-        // Re-identify ONLY text deltas (matching the non-streaming path, which restores
-        // type:"text" blocks only). thinking_delta / signature_delta / input_json_delta
-        // carry no restorable assistant text and pass through verbatim at their own index.
+        // Text deltas and a tool block's input fragments are restored; thinking_delta and
+        // signature_delta carry nothing restorable and pass through at their own index.
         if (j.delta?.type === "text_delta") {
           emitIndex = j.index ?? emitIndex;
           emitText(reider.push(j.delta.text ?? ""), emitIndex); // suppress original, re-emit restored
         } else if (j.delta?.type === "input_json_delta") {
-          // A tool_use block's arguments: the values the caller's tool will run on, so a
-          // placeholder in them is restored (JSON-escaped) before the client parses them.
           const index = Number(j.index ?? 0);
-          let r = jsonBlocks.get(index);
-          if (!r) { r = new StreamReidentifier(vault, { json: true }); jsonBlocks.set(index, r); }
-          emitJson(index, r.push(j.delta.partial_json ?? ""));
+          let blk = toolBlocks.get(index);
+          if (!blk) toolBlocks.set(index, (blk = {}));
+          blk.args ??= new ArgStream(argContext(vault, true, blk.name, stats));
+          const chunk = blk.args.push(j.delta.partial_json ?? "");
+          if (!guard()) return;
+          emitJson(index, chunk);
         } else {
           res.write(frame);
         }
@@ -174,13 +294,13 @@ export async function captureAndReidentify(
       }
       if (type === "content_block_stop") {
         const index = Number(j?.index ?? emitIndex);
-        const jr = jsonBlocks.get(index);
-        if (jr) { emitJson(index, jr.end()); jsonBlocks.delete(index); }
-        else emitText(reider.end(), index); // flush held text BEFORE this block closes (no-op for non-text)
+        if (toolBlocks.has(index)) {
+          if (!flushToolBlock(index)) return;
+        } else emitText(reider.end(), index); // flush held text BEFORE this block closes
         res.write(frame);
         return;
       }
-      res.write(frame); // content_block_start / message_start / message_delta / message_stop / ping
+      res.write(frame); // message_start / message_delta / message_stop / ping / error
       return;
     }
 
@@ -190,23 +310,47 @@ export async function captureAndReidentify(
         j = JSON.parse(data);
       } catch {}
       const type = j?.type;
-      if (RESPONSES_ARGUMENT_DELTAS.has(type)) {
-        // A tool call's arguments or a custom tool's input, fragment by fragment: the
-        // values the caller's tool will run on, restored before they reach it.
-        const { delta: _d, ...ctx } = j;
-        const part = partFor(j, ctx, true);
-        emitText(part.reider.push(j.delta ?? ""), 0, part.ctx);
+      if (type === "response.output_item.added" && j.item && typeof j.item === "object") {
+        if (RESPONSES_TOOL_ITEMS.has(j.item.type)) {
+          const name = typeof j.item.name === "string" ? j.item.name : undefined;
+          if (j.item.id !== undefined) itemTools.set(j.item.id, name);
+          if (j.output_index !== undefined) indexTools.set(Number(j.output_index), name);
+          // Arguments given whole on the added frame (not streamed) are restored here.
+          if ((typeof j.item.arguments === "string" && j.item.arguments) || (typeof j.item.input === "string" && j.item.input)) {
+            const item = reidentifyBody({ output: [j.item] }, provider, vault, dialect, stats).output[0];
+            if (!guard()) return;
+            res.write(reframe(frame, { ...j, item }));
+            return;
+          }
+        }
+        res.write(frame);
         return;
       }
-      if (type === "response.function_call_arguments.done") {
-        flushPart(j);
-        if (typeof j.arguments === "string") j.arguments = restoreJsonString(j.arguments, vault);
+      if (RESPONSES_ARGUMENT_DELTAS.has(type)) {
+        // A tool call's arguments or a custom tool's input, fragment by fragment: the
+        // values the caller's tool will run on. A function or MCP call's arguments are
+        // JSON (values JSON-escaped); a custom tool's input is plain text.
+        const { delta: _d, ...ctx } = j;
+        const json = RESPONSES_JSON_ARGUMENT_DELTAS.has(type);
+        const part = partFor(j, ctx, () => new ArgStream(argContext(vault, json, toolFor(j), stats)));
+        const chunk = part.r.push(j.delta ?? "");
+        if (!guard()) return;
+        emitText(chunk, 0, part.ctx);
+        return;
+      }
+      if (RESPONSES_JSON_ARGUMENT_DONE.has(type)) {
+        // The whole document, restored on its raw text: byte-for-byte what the deltas
+        // above joined into.
+        if (!flushPart(j)) return;
+        if (typeof j.arguments === "string") j.arguments = restoreArgs(j.arguments, argContext(vault, true, toolFor(j), stats));
+        if (!guard()) return;
         res.write(reframe(frame, j));
         return;
       }
       if (type === "response.custom_tool_call_input.done") {
-        flushPart(j);
-        if (typeof j.input === "string") j.input = restore(j.input, vault);
+        if (!flushPart(j)) return;
+        if (typeof j.input === "string") j.input = restoreArgs(j.input, argContext(vault, false, toolFor(j), stats));
+        if (!guard()) return;
         res.write(reframe(frame, j));
         return;
       }
@@ -216,77 +360,103 @@ export async function captureAndReidentify(
         // text would break a client that reads refusal events; the possibly-forming
         // tail stays held in the re-identifier.
         const { delta: _d, ...ctx } = j;
-        const part = partFor(j, ctx);
-        emitText(part.reider.push(j.delta ?? ""), 0, part.ctx);
+        const part = partFor(j, ctx, () => new StreamReidentifier(vault));
+        emitText(part.r.push(j.delta ?? ""), 0, part.ctx);
         return;
       }
       // Every frame below carries the text in full, so the held tail is flushed first
       // (a placeholder split across deltas is then already restored on the client) and
       // the frame's own text is restored before it passes.
       if (type === "response.output_text.done" || type === "response.refusal.done") {
-        flushPart(j);
+        if (!flushPart(j)) return;
         if (typeof j.text === "string") j.text = restore(j.text, vault);
         if (typeof j.refusal === "string") j.refusal = restore(j.refusal, vault);
         res.write(reframe(frame, j));
         return;
       }
       if (type === "response.content_part.done" && j.part && typeof j.part === "object") {
-        flushPart(j);
+        if (!flushPart(j)) return;
         if (typeof j.part.text === "string") j.part.text = restore(j.part.text, vault);
         if (typeof j.part.refusal === "string") j.part.refusal = restore(j.part.refusal, vault);
         res.write(reframe(frame, j));
         return;
       }
       if (type === "response.output_item.done" && j.item && typeof j.item === "object") {
-        flushOutputItem(j);
-        res.write(reframe(frame, { ...j, item: reidentifyBody({ output: [j.item] }, provider, vault, dialect).output[0] }));
+        if (!flushOutputItem(j)) return;
+        const item = reidentifyBody({ output: [j.item] }, provider, vault, dialect, stats).output[0];
+        if (!guard()) return;
+        res.write(reframe(frame, { ...j, item }));
         return;
       }
       if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
-        flushAllParts();
-        if (j.response && typeof j.response === "object")
-          res.write(reframe(frame, { ...j, response: reidentifyBody(j.response, provider, vault, dialect) }));
-        else res.write(frame);
+        if (!flushAllParts()) return;
+        if (j.response && typeof j.response === "object") {
+          const response = reidentifyBody(j.response, provider, vault, dialect, stats);
+          if (!guard()) return;
+          res.write(reframe(frame, { ...j, response }));
+        } else res.write(frame);
         return;
       }
-      res.write(frame); // response.created / in_progress / output_item.added / content_part.added / ping
+      res.write(frame); // response.created / in_progress / content_part.added / ping / error
       return;
     }
 
-    // openai
+    // ---- chat completions ----
+    // Each frame is rewritten in place, so a frame carrying text and tool-call fragments
+    // together (or a finish_reason with its last fragment) keeps all of them, and the
+    // provider's other fields (id, model, created, a tool call's id and name) pass as sent.
     let oj: any;
-    let ch: any;
     try {
       oj = JSON.parse(data);
-      ch = oj.choices?.[0];
     } catch {}
-    const content = ch?.delta?.content;
-    if (typeof content === "string" && content.length) {
-      emitText(reider.push(content)); // suppress original
+    if (!oj || !Array.isArray(oj.choices)) {
+      res.write(frame); // an error object or anything else without choices
       return;
     }
-    const toolCalls = ch?.delta?.tool_calls;
-    if (Array.isArray(toolCalls) && toolCalls.some((tc: any) => typeof tc?.function?.arguments === "string")) {
-      // The frame keeps its id, type and name fields; only the argument fragments are
-      // replaced by what is safe to emit now, the forming tail held per tool-call index.
-      for (const tc of toolCalls) {
-        if (typeof tc?.function?.arguments !== "string") continue;
-        const index = Number(tc.index ?? 0);
-        let r = chatArgs.get(index);
-        if (!r) { r = new StreamReidentifier(vault, { json: true }); chatArgs.set(index, r); }
-        tc.function.arguments = r.push(tc.function.arguments);
+    let changed = false;
+    const finishing: Array<{ ci: number; st: Choice; hadText: boolean; hadArgs: Set<string> }> = [];
+    for (const ch of oj.choices) {
+      if (!ch || typeof ch !== "object") continue;
+      const ci = Number(ch.index ?? 0);
+      const st = choiceFor(ci);
+      const d = ch.delta;
+      const fin = ch.finish_reason != null;
+      let hadText = false;
+      const hadArgs = new Set<string>();
+      if (d && typeof d.content === "string" && d.content.length) {
+        d.content = st.text.push(d.content) + (fin ? st.text.end() : "");
+        changed = hadText = true;
       }
-      res.write(reframe(frame, oj));
-      return;
+      for (const tc of Array.isArray(d?.tool_calls) ? d.tool_calls : []) {
+        const key = `t${Number(tc?.index ?? 0)}`;
+        if (typeof tc?.function?.name === "string") st.names.set(key, tc.function.name);
+        if (typeof tc?.function?.arguments === "string") {
+          const a = argsFor(st, key);
+          tc.function.arguments = a.push(tc.function.arguments) + (fin ? a.end() : "");
+          changed = true;
+          hadArgs.add(key);
+        }
+      }
+      const fc = d?.function_call;
+      if (fc && typeof fc === "object") {
+        if (typeof fc.name === "string") st.names.set("fc", fc.name);
+        if (typeof fc.arguments === "string") {
+          const a = argsFor(st, "fc");
+          fc.arguments = a.push(fc.arguments) + (fin ? a.end() : "");
+          changed = true;
+          hadArgs.add("fc");
+        }
+      }
+      if (fin) finishing.push({ ci, st, hadText, hadArgs });
     }
-    if (ch?.finish_reason != null) {
-      flushTail();
-      for (const [index, r] of chatArgs) emitChatArgs(index, r.end());
-      chatArgs.clear();
-      res.write(frame);
-      return;
+    if (!guard()) return;
+    // A choice that finishes in this frame: whatever it still holds that this frame did
+    // not carry goes out first, so the finish comes after every argument fragment.
+    for (const f of finishing) {
+      if (!flushChoice(f.ci, f.st, f.hadText, f.hadArgs)) return;
+      choices.delete(f.ci);
     }
-    res.write(frame); // role frame / empty delta / other
+    res.write(changed ? reframe(frame, oj) : frame);
   };
 
   const reader = upBody.getReader();
@@ -303,12 +473,18 @@ export async function captureAndReidentify(
         buf = buf.slice(i + 2);
         handleFrame(frame);
       }
+      if (stopped) break;
     }
-    if (buf.length) handleFrame(buf); // trailing frame without a terminating blank line
+    if (buf.length && !stopped) handleFrame(buf); // trailing frame without a terminating blank line
   } catch {
     flushHeld(); // best-effort restore of whatever was held
     res.end();
     return;
+  }
+  if (stopped) {
+    try {
+      await reader.cancel();
+    } catch {}
   }
 
   flushHeld(); // safety: flush if the stream ended without an explicit close frame
