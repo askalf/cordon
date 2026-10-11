@@ -291,12 +291,12 @@ export async function captureAndReidentify(
     return st;
   };
   // A call's name can arrive in fragments, so a policy that depends on the name waits for
-  // the call to end (DeferredArgs). With no policy every name restores alike and the
-  // arguments stream as they come.
+  // the call to end (DeferredArgs). When every name is treated alike ("*", or nothing
+  // restored) the arguments stream as they come.
   const argsFor = (st: Choice, key: string): ArgStream | DeferredArgs => {
     let a = st.args.get(key);
     if (!a) {
-      a = restorePolicy.all
+      a = restorePolicy.all || restorePolicy.none
         ? new ArgStream(argContext(vault, true, undefined, stats))
         : new DeferredArgs(() => argContext(vault, true, st.names.get(key), stats));
       st.args.set(key, a);

@@ -380,7 +380,7 @@ ok("timeout: empty, zero, negative and Infinity -> default",
 
 // ---------------- tool-call arguments ----------------
 {
-  const ALL_TOOLS = parseRestoreTools("");
+  const ALL_TOOLS = parseRestoreTools("*");
   const v = new Vault("reversible");
   // A value with a quote, a backslash and a newline: spliced into a JSON string literal raw,
   // any one of them breaks the document.
@@ -433,7 +433,14 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   ok("isMintedPlaceholder: counter and pseudonym forms only", isMintedPlaceholder("<EMAIL_ABCDEF_7>") && isMintedPlaceholder("<US_ROUTING_0A1B2C3D>") && !isMintedPlaceholder("<EMAIL_1>") && !isMintedPlaceholder("<EMAIL_abcdef_1>"));
 
   // The restore policy.
-  ok("restore policy: unset, blank or * restores everything", parseRestoreTools(undefined).all && parseRestoreTools("").all && parseRestoreTools(" * ").all);
+  for (const [label, raw] of [["unset", undefined], ["empty", ""], ["spaces", "   "], ["only commas", " , ,"]]) {
+    const np = parseRestoreTools(raw);
+    ok(`restore policy: ${label} restores no tool's arguments`, np.none && !np.all && !np.forTool("echo")("text") && !np.forTool(undefined)(undefined));
+    const out = restoreArgs(`{"text":"${em}"}`, argContext(v, true, "echo", { unresolved: 0 }, np));
+    ok(`restore policy: ${label} sends the strip form, never the value`, out === '{"text":"[EMAIL]"}', out);
+  }
+  const star = parseRestoreTools(" * ");
+  ok("restore policy: * is the opt-in that restores everything", star.all && !star.none && star.forTool("anything")(undefined));
   const p = parseRestoreTools("echo.text, other");
   ok("restore policy: tool.field allows only that field", p.forTool("echo")("text") && !p.forTool("echo")("note") && !p.forTool("echo")(undefined));
   ok("restore policy: a bare tool allows all its fields", p.forTool("other")("anything") && p.forTool("other")(undefined));

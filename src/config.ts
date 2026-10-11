@@ -88,7 +88,7 @@ export const config = {
   upstreamTimeoutMs: parseTimeoutMs(env.UPSTREAM_TIMEOUT_MS),
 
   // Which tool arguments reversible mode restores: tools or tool.field pairs, comma
-  // separated. Unset restores every tool's arguments (redact/restorePolicy.ts).
+  // separated. Unset restores none; "*" restores every tool's (redact/restorePolicy.ts).
   restoreTools: env.CORDON_RESTORE_TOOLS ?? "",
 
   upstream: {

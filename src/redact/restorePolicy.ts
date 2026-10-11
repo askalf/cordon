@@ -8,15 +8,18 @@ import { config } from "../config";
  * field). Deciding which destinations a tool may reach stays the runner's job; this is
  * the narrower lever cordon can offer: CORDON_RESTORE_TOOLS lists the tools, or
  * tool.field pairs (a top-level argument key), whose arguments are restored. Unset, empty
- * or "*" restores every tool's arguments. A value the policy withholds stays a
- * placeholder, which the tool receives as such.
+ * or blank restores none (tool arguments stay redacted, as before the list existed); "*"
+ * is the explicit opt-in to restore every tool's arguments. A value the policy withholds
+ * goes to the tool in strip form ([EMAIL]).
  *
  * Tool names (OpenAI and Anthropic both allow [A-Za-z0-9_-]) carry no dot, so the first
  * dot separates the tool from the field.
  */
 export interface RestorePolicy {
-  /** True when every tool's arguments are restored (the default). */
+  /** True when every tool's arguments are restored ("*"). */
   readonly all: boolean;
+  /** True when no tool's arguments are restored (unset, empty or blank: the default). */
+  readonly none: boolean;
   /** For one tool (undefined: a call whose name the stream has not shown), whether a
    *  value at a top-level argument key may be restored. `key` is undefined for a
    *  position outside any top-level key (a plain-text input, a document that is not an
@@ -24,11 +27,13 @@ export interface RestorePolicy {
   forTool(name: string | undefined): (key: string | undefined) => boolean;
 }
 
-const EVERYTHING: RestorePolicy = { all: true, forTool: () => () => true };
+const EVERYTHING: RestorePolicy = { all: true, none: false, forTool: () => () => true };
+const NOTHING: RestorePolicy = { all: false, none: true, forTool: () => () => false };
 
 export function parseRestoreTools(raw: string | undefined): RestorePolicy {
   const s = (raw ?? "").trim();
-  if (!s || s === "*") return EVERYTHING;
+  if (!s) return NOTHING;
+  if (s === "*") return EVERYTHING;
   // tool -> true (every field) or the set of fields
   const tools = new Map<string, true | Set<string>>();
   for (const entry of s.split(",").map((e) => e.trim()).filter(Boolean)) {
@@ -45,8 +50,10 @@ export function parseRestoreTools(raw: string | undefined): RestorePolicy {
     if (cur) cur.add(field);
     else tools.set(tool, new Set([field]));
   }
+  if (tools.size === 0) return NOTHING;
   return {
     all: false,
+    none: false,
     forTool(name) {
       const rule = name === undefined ? undefined : tools.get(name);
       if (rule === undefined) return () => false;
