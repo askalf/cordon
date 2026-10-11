@@ -96,7 +96,15 @@ function streamResponses(res, text, n) {
 function streamResponsesInterleaved(res, text, n) {
   res.setHeader("content-type", "text/event-stream");
   let seq = 0;
-  const f = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...d })}\n\n`);
+  // SPACED: "sequence_number": N, as valid JSON may be written, numbered in steps of two.
+  const spaced = text.includes("SPACED ");
+  text = text.replace("SPACED ", "");
+  const f = (type, d) => {
+    let data = JSON.stringify({ type, sequence_number: seq, ...d });
+    seq += spaced ? 2 : 1;
+    if (spaced) data = data.replace('"sequence_number":', '"sequence_number": ');
+    res.write(`event: ${type}\ndata: ${data}\n\n`);
+  };
   const a = { item_id: "msg_stub" + n + "a", output_index: 0, content_index: 0 };
   const b = { item_id: "msg_stub" + n + "b", output_index: 1, content_index: 0 };
   const aText = text.replace("INTERLEAVE ", "");
@@ -193,6 +201,157 @@ function streamAnthropic(res, text, body = {}) {
   res.end();
 }
 
+// A TOOL CALL instead of a text reply: the model answers by calling the request's first
+// tool (or `echo`) with the received text, in each dialect's own shape. The arguments
+// document is written by hand, `{"text":T,"note":T,"n":9007199254740993}`, so a test can
+// see that a number beyond 2^53 keeps its digits. Streams chunk the arguments in
+// 3-character fragments, so a placeholder inside a JSON string literal is split across
+// frames the same way text placeholders are above. Words in the request text pick a
+// variant (the word itself is dropped from the echoed text):
+//   ESCAPED      the arguments spell < and > as \u003c and \u003e (Go's encoder does)
+//   FOREIGN      a placeholder this request never minted is added to the arguments
+//   CUSTOM / MCP (Responses) a custom tool call with plain-text input / an MCP call
+//   LEGACY       (chat) the single function_call instead of tool_calls
+//   CHOICE1      (chat) two choices: plain text at index 0, the tool call at index 1
+//   MIXED        (chat stream) the first frame carries text and the first fragment
+//   FINISHJOINED (chat stream) the last fragment and finish_reason share a frame
+//   ARGTRUNC     (chat / Messages stream) the stream stops inside a placeholder
+//   SPACED       (Responses stream) frames written with a space after the colons of
+//                "type" and "sequence_number", as valid JSON may be, numbered in steps
+//                of two (increasing is all a client may assume)
+//   SERVER       (Messages) a server_tool_use and an mcp_tool_use block
+//   STARTINPUT   (Messages stream) the input arrives whole on content_block_start
+const TOOL_FLAGS = ["TOOLCALL", "ESCAPED", "FOREIGN", "CUSTOM", "MCP", "LEGACY", "CHOICE1", "MIXED", "FINISHJOINED", "ARGTRUNC", "SERVER", "STARTINPUT", "NAMESPLIT", "SPACED"];
+const FOREIGN_PLACEHOLDER = "<EMAIL_ABCDEF_7>";
+function toolSpec(body, text) {
+  const flags = new Set(TOOL_FLAGS.filter((f) => text.includes(f)));
+  let t = text;
+  for (const f of TOOL_FLAGS) t = t.split(f + " ").join("").split(f).join("");
+  t = t.trim();
+  if (flags.has("FOREIGN")) t += " " + FOREIGN_PLACEHOLDER;
+  const name = body.tools?.[0]?.name || body.tools?.[0]?.function?.name || body.functions?.[0]?.name || "echo";
+  let args = `{"text":${JSON.stringify(t)},"note":${JSON.stringify(t)},"n":9007199254740993}`;
+  if (flags.has("ESCAPED")) args = args.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+  return { flags, t, name, args };
+}
+const toolResponsesBody = (n, s) => ({
+  id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status: "completed",
+  output: [
+    s.flags.has("CUSTOM") ? { id: "ctc_stub" + n, type: "custom_tool_call", status: "completed", call_id: "call_stub" + n, name: s.name, input: s.t }
+    : s.flags.has("MCP") ? { id: "mcp_stub" + n, type: "mcp_call", status: "completed", name: s.name, server_label: "srv", arguments: s.args }
+    : { id: "fc_stub" + n, type: "function_call", status: "completed", call_id: "call_stub" + n, name: s.name, arguments: s.args },
+  ],
+  usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }, _stub_call: n,
+});
+function toolOpenAIBody(n, s) {
+  const call = s.flags.has("LEGACY")
+    ? { role: "assistant", content: null, function_call: { name: s.name, arguments: s.args } }
+    : { role: "assistant", content: null, tool_calls: [{ id: "call_stub" + n, type: "function", function: { name: s.name, arguments: s.args } }] };
+  const choices = s.flags.has("CHOICE1")
+    ? [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }, { index: 1, message: call, finish_reason: "tool_calls" }]
+    : [{ index: 0, message: call, finish_reason: s.flags.has("LEGACY") ? "function_call" : "tool_calls" }];
+  return { id: "stub-" + n, object: "chat.completion", model: "gpt-4o-mini", choices, usage: { prompt_tokens: 10, completion_tokens: 5 }, _stub_call: n };
+}
+const toolAnthropicBody = (n, s) => ({
+  id: "stub-" + n, type: "message", role: "assistant", model: "claude-haiku-4-5-20251001",
+  content: s.flags.has("SERVER")
+    ? [
+        { type: "server_tool_use", id: "srvtoolu_stub" + n, name: "web_search", input: { query: s.t } },
+        { type: "mcp_tool_use", id: "mcptoolu_stub" + n, name: "lookup", server_name: "srv", input: { q: s.t } },
+      ]
+    : [{ type: "tool_use", id: "toolu_stub" + n, name: s.name, input: { text: s.t, note: s.t } }],
+  stop_reason: "tool_use",
+  usage: { input_tokens: 10, output_tokens: 5 }, _stub_call: n,
+});
+function streamToolResponses(res, s, n) {
+  res.setHeader("content-type", "text/event-stream");
+  let seq = 0;
+  const spaced = s.flags.has("SPACED");
+  const f = (type, d) => {
+    let data = JSON.stringify({ type, sequence_number: seq, ...d });
+    seq += spaced ? 2 : 1;
+    if (spaced) data = data.replace('"type":', '"type": ').replace('"sequence_number":', '"sequence_number": ');
+    res.write(`event: ${type}\ndata: ${data}\n\n`);
+  };
+  const custom = s.flags.has("CUSTOM");
+  const mcp = s.flags.has("MCP");
+  const addr = { item_id: (custom ? "ctc_stub" : mcp ? "mcp_stub" : "fc_stub") + n, output_index: 0 };
+  const shell = (status) => ({ id: "resp_stub" + n, object: "response", model: "gpt-4o-mini", status, output: [] });
+  const item = (status, a) =>
+    custom ? { id: addr.item_id, type: "custom_tool_call", status, call_id: "call_stub" + n, name: s.name, input: a }
+    : mcp ? { id: addr.item_id, type: "mcp_call", status, name: s.name, server_label: "srv", arguments: a }
+    : { id: addr.item_id, type: "function_call", status, call_id: "call_stub" + n, name: s.name, arguments: a };
+  const whole = custom ? s.t : s.args;
+  const deltaType = custom ? "response.custom_tool_call_input.delta" : mcp ? "response.mcp_call_arguments.delta" : "response.function_call_arguments.delta";
+  const doneType = custom ? "response.custom_tool_call_input.done" : mcp ? "response.mcp_call_arguments.done" : "response.function_call_arguments.done";
+  f("response.created", { response: shell("in_progress") });
+  f("response.output_item.added", { output_index: 0, item: item("in_progress", "") });
+  for (const c of chunk3(whole)) f(deltaType, { ...addr, delta: c });
+  f(doneType, { ...addr, ...(custom ? { input: whole } : { arguments: whole }) });
+  f("response.output_item.done", { output_index: 0, item: item("completed", whole) });
+  f("response.completed", { response: { ...shell("completed"), output: [item("completed", whole)], usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } });
+  res.end();
+}
+function streamToolOpenAI(res, s, n) {
+  res.setHeader("content-type", "text/event-stream");
+  const ci = s.flags.has("CHOICE1") ? 1 : 0;
+  const legacy = s.flags.has("LEGACY");
+  const f = (d, extra = {}) => res.write(`data: ${JSON.stringify({ id: "stub-" + n, choices: [{ index: ci, delta: d, ...extra }] })}\n\n`);
+  const frag = (c) => (legacy ? { function_call: { arguments: c } } : { tool_calls: [{ index: 0, function: { arguments: c } }] });
+  const chunks = chunk3(s.args);
+  if (s.flags.has("CHOICE1")) res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: "stop" }] })}\n\n`);
+  const opening = legacy ? { function_call: { name: s.name, arguments: "" } } : { tool_calls: [{ index: 0, id: "call_stub" + n, type: "function", function: { name: s.name, arguments: "" } }] };
+  if (s.flags.has("MIXED")) {
+    opening.content = "Calling. ";
+    if (legacy) opening.function_call.arguments = chunks.shift();
+    else opening.tool_calls[0].function.arguments = chunks.shift();
+  }
+  if (s.flags.has("NAMESPLIT")) {
+    // The name in two fragments: the first one alone is a prefix of the real name.
+    const first = chunks.shift();
+    if (legacy) { opening.function_call.name = s.name.slice(0, 4); f({ role: "assistant", ...opening }); f({ function_call: { name: s.name.slice(4), arguments: first } }); }
+    else { opening.tool_calls[0].function.name = s.name.slice(0, 4); f({ role: "assistant", ...opening }); f({ tool_calls: [{ index: 0, function: { name: s.name.slice(4), arguments: first } }] }); }
+  } else f({ role: "assistant", ...opening });
+  if (s.flags.has("ARGTRUNC")) {
+    // Stop four characters into the first placeholder: no finish, no [DONE].
+    const cut = s.args.indexOf("<") + 4;
+    for (const c of chunk3(s.args.slice(0, cut))) f(frag(c));
+    res.end();
+    return;
+  }
+  const last = s.flags.has("FINISHJOINED") ? chunks.pop() : undefined;
+  for (const c of chunks) f(frag(c));
+  if (last !== undefined) f(frag(last), { finish_reason: legacy ? "function_call" : "tool_calls" });
+  else res.write(`data: ${JSON.stringify({ choices: [{ index: ci, delta: {}, finish_reason: legacy ? "function_call" : "tool_calls" }] })}\n\n`);
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+function streamToolAnthropic(res, s, n) {
+  res.setHeader("content-type", "text/event-stream");
+  const f = (e, d) => res.write(`event: ${e}\ndata: ${JSON.stringify({ type: e, ...d })}\n\n`);
+  f("message_start", { message: { id: "stub", type: "message", role: "assistant", model: "claude-haiku-4-5-20251001", content: [], usage: { input_tokens: 10, output_tokens: 0 } } });
+  f("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
+  f("content_block_delta", { index: 0, delta: { type: "text_delta", text: "Calling the tool." } });
+  f("content_block_stop", { index: 0 });
+  if (s.flags.has("STARTINPUT")) {
+    // Written by hand so the input can carry an integer beyond 2^53.
+    res.write(`event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_stub${n}","name":${JSON.stringify(s.name)},"input":${s.args}}}\n\n`);
+  } else {
+    f("content_block_start", { index: 1, content_block: { type: "tool_use", id: "toolu_stub" + n, name: s.name, input: {} } });
+    if (s.flags.has("ARGTRUNC")) {
+      const cut = s.args.indexOf("<") + 4;
+      for (const c of chunk3(s.args.slice(0, cut))) f("content_block_delta", { index: 1, delta: { type: "input_json_delta", partial_json: c } });
+      res.end();
+      return;
+    }
+    for (const c of chunk3(s.args)) f("content_block_delta", { index: 1, delta: { type: "input_json_delta", partial_json: c } });
+  }
+  f("content_block_stop", { index: 1 });
+  f("message_delta", { delta: { stop_reason: "tool_use" }, usage: { output_tokens: 5 } });
+  f("message_stop", {});
+  res.end();
+}
+
 http
   .createServer((req, res) => {
     let b = "";
@@ -218,6 +377,14 @@ http
       if (req.url.includes("count_tokens")) return json(res, { input_tokens: 42, _stub_call: n, _url: req.url });
       if (req.method === "GET" && req.url.startsWith("/v1/models"))
         return json(res, { object: "list", data: [], _url: req.url });
+
+      // A request whose text asks for a TOOLCALL is answered with one in each dialect.
+      if (text.includes("TOOLCALL")) {
+        const s = toolSpec(body, text);
+        if (req.url.includes("/chat/completions")) return body.stream ? streamToolOpenAI(res, s, n) : json(res, toolOpenAIBody(n, s));
+        if (req.url.includes("/responses")) return body.stream ? streamToolResponses(res, s, n) : json(res, toolResponsesBody(n, s));
+        if (req.url.includes("/messages")) return body.stream ? streamToolAnthropic(res, s, n) : json(res, toolAnthropicBody(n, s));
+      }
 
       // Echo the received text back as the assistant reply.
       if (req.url.includes("/chat/completions"))

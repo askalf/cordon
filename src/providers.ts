@@ -17,9 +17,29 @@ export interface ProviderAdapter {
    *  output_index, content_index) plus the upstream event `type`, copied from the
    *  frame being re-emitted. */
   frameFromText(text: string, index?: number, ctx?: Record<string, unknown>): string;
-  /** Walk a non-streaming response body's assistant-text fields (for re-identify). */
-  responseTextSlots(body: any): Array<{ get(): string; set(v: string): void }>;
+  /** Walk a non-streaming response body's restorable fields (for re-identify): assistant
+   *  text, and every tool call's arguments with the tool's name (redact/reidentify.ts
+   *  restores arguments under the restore policy). */
+  responseTextSlots(body: any): Array<ResponseSlot>;
 }
+
+export type ResponseSlot =
+  /** Assistant prose. */
+  | { kind: "text"; get(): string; set(v: string): void }
+  /** A tool call's arguments as a string: a JSON document (`json`) or a custom tool's
+   *  plain-text input. */
+  | { kind: "args"; json: boolean; tool: string | undefined; get(): string; set(v: string): void }
+  /** A tool call's arguments already parsed into an object (Anthropic `input`). */
+  | { kind: "args-object"; tool: string | undefined; obj: any };
+
+const textSlot = (obj: any, key: string): ResponseSlot => ({ kind: "text", get: () => obj[key], set: (v) => (obj[key] = v) });
+const argsSlot = (obj: any, key: string, tool: unknown, json = true): ResponseSlot => ({
+  kind: "args",
+  json,
+  tool: typeof tool === "string" ? tool : undefined,
+  get: () => obj[key],
+  set: (v) => (obj[key] = v),
+});
 
 // ----------------------------- OpenAI (chat.completions) -----------------------------
 export const openai: ProviderAdapter = {
@@ -37,16 +57,24 @@ export const openai: ProviderAdapter = {
     return `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n`;
   },
   responseTextSlots(body) {
-    const slots: Array<{ get(): string; set(v: string): void }> = [];
+    const slots: ResponseSlot[] = [];
+    // Every choice, not only the first: a request with n > 1 gets one message per choice.
     for (const ch of body?.choices ?? []) {
       const msg = ch?.message;
       if (msg && typeof msg.content === "string") {
-        slots.push({ get: () => msg.content, set: (v) => (msg.content = v) });
+        slots.push(textSlot(msg, "content"));
       } else if (msg && Array.isArray(msg.content)) {
         for (const part of msg.content)
-          if (part?.type === "text" && typeof part.text === "string")
-            slots.push({ get: () => part.text, set: (v) => (part.text = v) });
+          if (part?.type === "text" && typeof part.text === "string") slots.push(textSlot(part, "text"));
       }
+      // The arguments the model chose for a tool, a JSON string per call.
+      for (const tc of Array.isArray(msg?.tool_calls) ? msg.tool_calls : []) {
+        const fn = tc?.function;
+        if (fn && typeof fn.arguments === "string") slots.push(argsSlot(fn, "arguments", fn.name));
+      }
+      // The legacy single function call (functions / function_call request fields).
+      const fc = msg?.function_call;
+      if (fc && typeof fc.arguments === "string") slots.push(argsSlot(fc, "arguments", fc.name));
     }
     return slots;
   },
@@ -69,19 +97,32 @@ export const anthropic: ProviderAdapter = {
     return `event: content_block_delta\ndata: ${JSON.stringify(data)}\n\n`;
   },
   responseTextSlots(body) {
-    const slots: Array<{ get(): string; set(v: string): void }> = [];
-    for (const block of body?.content ?? [])
-      if (block?.type === "text" && typeof block.text === "string")
-        slots.push({ get: () => block.text, set: (v) => (block.text = v) });
+    const slots: ResponseSlot[] = [];
+    for (const block of body?.content ?? []) {
+      if (block?.type === "text" && typeof block.text === "string") slots.push(textSlot(block, "text"));
+      // A tool call's input arrives parsed. Client tools (tool_use), server tools
+      // (server_tool_use) and MCP connector tools (mcp_tool_use) all carry one.
+      else if (ANTHROPIC_TOOL_BLOCKS.has(block?.type) && block.input && typeof block.input === "object")
+        slots.push({ kind: "args-object", tool: typeof block.name === "string" ? block.name : undefined, obj: block.input });
+    }
     return slots;
   },
 };
+
+/** Anthropic content blocks that carry a tool call's input. */
+export const ANTHROPIC_TOOL_BLOCKS = new Set(["tool_use", "server_tool_use", "mcp_tool_use"]);
 
 // ----------------------------- OpenAI (responses) -----------------------------
 /** Streamed Responses events carrying restorable assistant text. Output text and a
  *  refusal are DISTINCT event types and a client consuming refusals reads only its
  *  own, so a refusal delta must be re-emitted as a refusal delta. */
 const RESPONSES_TEXT_DELTAS = new Set(["response.output_text.delta", "response.refusal.delta"]);
+/** The streamed fragments of a tool call's arguments, re-emitted under their own event
+ *  type once restored, like a refusal delta. Function and MCP calls stream a JSON
+ *  document; a custom tool streams plain text. */
+export const RESPONSES_JSON_ARGUMENT_DELTAS = new Set(["response.function_call_arguments.delta", "response.mcp_call_arguments.delta"]);
+export const RESPONSES_ARGUMENT_DELTAS = new Set([...RESPONSES_JSON_ARGUMENT_DELTAS, "response.custom_tool_call_input.delta"]);
+const RESPONSES_REEMITTED = new Set([...RESPONSES_TEXT_DELTAS, ...RESPONSES_ARGUMENT_DELTAS]);
 
 export const openaiResponses: ProviderAdapter = {
   parseDelta(data) {
@@ -99,21 +140,29 @@ export const openaiResponses: ProviderAdapter = {
     // not by a single block index; `ctx` carries those from the frame being re-emitted,
     // along with that frame's event type so a refusal delta stays a refusal delta.
     const type =
-      typeof ctx.type === "string" && RESPONSES_TEXT_DELTAS.has(ctx.type)
+      typeof ctx.type === "string" && RESPONSES_REEMITTED.has(ctx.type)
         ? ctx.type
         : "response.output_text.delta";
     const data = { ...ctx, type, delta: text };
     return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
   },
   responseTextSlots(body) {
-    const slots: Array<{ get(): string; set(v: string): void }> = [];
+    const slots: ResponseSlot[] = [];
     for (const item of body?.output ?? []) {
+      // A function or MCP call's arguments are a JSON string and a custom tool's input
+      // plain text: the values the caller's tool (or the MCP server) runs on.
+      if ((item?.type === "function_call" || item?.type === "mcp_call") && typeof item.arguments === "string") {
+        slots.push(argsSlot(item, "arguments", item.name));
+        continue;
+      }
+      if (item?.type === "custom_tool_call" && typeof item.input === "string") {
+        slots.push(argsSlot(item, "input", item.name, false));
+        continue;
+      }
       if (item?.type !== "message" || !Array.isArray(item.content)) continue;
       for (const part of item.content) {
-        if (part?.type === "output_text" && typeof part.text === "string")
-          slots.push({ get: () => part.text, set: (v) => (part.text = v) });
-        else if (part?.type === "refusal" && typeof part.refusal === "string")
-          slots.push({ get: () => part.refusal, set: (v) => (part.refusal = v) });
+        if (part?.type === "output_text" && typeof part.text === "string") slots.push(textSlot(part, "text"));
+        else if (part?.type === "refusal" && typeof part.refusal === "string") slots.push(textSlot(part, "refusal"));
       }
     }
     return slots;

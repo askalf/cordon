@@ -5,7 +5,7 @@ import { getPolicy } from "./policy";
 import { adapterFor, forwardUpstream, UpstreamTimeout } from "./providers";
 import { detector } from "./detect";
 import { applyRedaction, tally } from "./redact/apply";
-import { reidentifyBody } from "./redact/reidentify";
+import { argsFailed, failMessage, reidentifyBody, type ArgStats } from "./redact/reidentify";
 import { Vault } from "./redact/vault";
 import { captureAndReidentify, pipeUpstream } from "./streaming";
 import { audit } from "./audit";
@@ -111,7 +111,24 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
 
   const body = await up.json();
   res.setHeader("content-type", "application/json");
-  res.end(JSON.stringify(r.mode === "reversible" ? reidentifyBody(body, r.provider, vault, r.dialect) : body));
+  if (r.mode !== "reversible") {
+    res.end(JSON.stringify(body));
+    metrics.timing("full", t0);
+    return;
+  }
+  // A placeholder in a tool call's arguments that this request did not mint (a stale one
+  // from another conversation, a forged one) would reach the client's tool as data. The
+  // call is not delivered: 502 with the count in X-Cordon-Unresolved, the body withheld.
+  const stats: ArgStats = { unresolved: 0 };
+  const restored = reidentifyBody(body, r.provider, vault, r.dialect, stats);
+  if (argsFailed(stats)) {
+    res.statusCode = 502;
+    res.setHeader("X-Cordon-Unresolved", String(stats.unresolved));
+    res.end(JSON.stringify({ error: failMessage(stats) }));
+    metrics.timing("error", t0);
+    return;
+  }
+  res.end(JSON.stringify(restored));
   metrics.timing("full", t0);
 }
 

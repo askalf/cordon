@@ -30,22 +30,48 @@ const numSlot = (obj: any, key: string | number): Slot => ({
   numeric: true,
 });
 
+// The deepest a structured field is walked: the same 64 levels the response side
+// restores tool arguments to (reidentify.ts MAX_ARG_DEPTH), so whatever came back real in
+// a tool call is read again when the runner replays that call as history. Deeper is
+// refused (a throw is a fail-closed 422 in the proxy), never walked part way.
+const MAX_LEAF_DEPTH = 64;
+const tooDeep = (what: string) =>
+  new Error(`${what} nested deeper than ${MAX_LEAF_DEPTH} levels; refusing to forward unread fields`);
+
 // Recursively push a slot for every string leaf — and every numeric leaf — of an
 // object/array. Used for model-visible structured fields that carry user data
 // (tool_use inputs, tool schemas, tool_call arguments) — a raw email/card hiding
-// in any of them would otherwise reach the model. Depth-capped so a pathological
-// schema can't blow the stack (a redaction crash would fail the request closed,
-// but cheap to avoid).
-const MAX_LEAF_DEPTH = 16;
-function pushStringLeaves(node: any, slots: Slot[], depth = 0): void {
-  if (depth > MAX_LEAF_DEPTH || !node || typeof node !== "object") return;
+// in any of them would otherwise reach the model. With `finalizers` (tool-call
+// arguments) the property names are redacted too: the response side restores a value
+// in a property name as it does in a value, and the replayed call must not carry it.
+function pushStringLeaves(node: any, slots: Slot[], depth = 0, finalizers?: (() => void)[]): void {
+  if (!node || typeof node !== "object") return;
+  if (depth > MAX_LEAF_DEPTH) throw tooDeep("A structured field");
   const keys = Array.isArray(node) ? node.map((_: any, i: number) => i) : Object.keys(node);
+  if (finalizers && !Array.isArray(node)) pushKeySlots(node, keys as string[], slots, finalizers);
   for (const k of keys) {
     const v = (node as any)[k];
     if (typeof v === "string") slots.push(slot(node, k));
     else if (typeof v === "number" || typeof v === "bigint") slots.push(numSlot(node, k));
-    else if (v && typeof v === "object") pushStringLeaves(v, slots, depth + 1);
+    else if (v && typeof v === "object") pushStringLeaves(v, slots, depth + 1, finalizers);
   }
+}
+
+// One slot per property name of an argument object. A redacted name is applied after
+// every value is written (a finalizer, ahead of any re-serialisation pushed later), with
+// the object's key order kept. Two names that redact to the same name refuse the request
+// rather than drop one of the values.
+function pushKeySlots(obj: any, keys: string[], slots: Slot[], finalizers: (() => void)[]): void {
+  const renamed = new Map<string, string>();
+  for (const k of keys) slots.push({ get: () => k, set: (v) => { renamed.set(k, v); } });
+  finalizers.push(() => {
+    if (renamed.size === 0) return;
+    const entries = keys.map((k) => [renamed.get(k) ?? k, obj[k]] as [string, any]);
+    if (new Set(entries.map(([k]) => k)).size !== entries.length)
+      throw new Error("two tool-call argument names redact to the same name; refusing to forward the request");
+    for (const k of keys) delete obj[k];
+    for (const [k, v] of entries) Object.defineProperty(obj, k, { value: v, writable: true, enumerable: true, configurable: true });
+  });
 }
 
 // A JSON-string field (tool-call arguments): parse → redact its leaves (incl. NUMERIC
@@ -56,7 +82,7 @@ function pushJsonString(obj: any, key: string, slots: Slot[], finalizers: (() =>
   let parsed: any;
   try { parsed = JSON.parse(obj[key]); } catch { parsed = undefined; }
   if (parsed && typeof parsed === "object") {
-    pushStringLeaves(parsed, slots);
+    pushStringLeaves(parsed, slots, 0, finalizers);
     finalizers.push(() => { obj[key] = JSON.stringify(parsed); });
   } else {
     slots.push(slot(obj, key));
@@ -96,8 +122,7 @@ const RESPONSES_MEDIA_TYPES = new Set(["input_image", "input_file", "image_gener
  * deeper leaves unread, and a throw is a fail-closed 422 in the proxy.
  */
 function pushResponsesLeaves(node: any, slots: Slot[], finalizers: (() => void)[], depth = 0): void {
-  if (depth > MAX_LEAF_DEPTH)
-    throw new Error(`Responses input nested deeper than ${MAX_LEAF_DEPTH} levels; refusing to forward unread fields`);
+  if (depth > MAX_LEAF_DEPTH) throw tooDeep("Responses input");
   if (!Array.isArray(node) && RESPONSES_MEDIA_TYPES.has(node.type)) return;
   const keys = Array.isArray(node) ? node.map((_: any, i: number) => i) : Object.keys(node);
   for (const k of keys) {
@@ -118,8 +143,10 @@ function pushResponsesLeaves(node: any, slots: Slot[], finalizers: (() => void)[
  * model-visible structured field that can carry user data: OpenAI message `name` +
  * assistant `tool_calls[].function.arguments`, tool definitions (descriptions +
  * parameter schemas), and Anthropic `tool_use` inputs. Responses input items are walked
- * fail-closed (see pushResponsesLeaves). Only image / file parts, the structural
- * Responses keys above and raw provider-auth headers are intentionally left untouched.
+ * fail-closed (see pushResponsesLeaves). Chat and Messages content is read by part and
+ * block type: media (image, audio, file and document file sources, search_result
+ * sources), thinking blocks, ids, tool names, and any type not handled here pass as sent;
+ * README "Fronting an agent runner" lists both sides.
  */
 function requestTextSlots(
   body: any,
@@ -149,13 +176,34 @@ function requestTextSlots(
           slots.push(slot(part, "text"));
         } else if (part.type === "refusal" && typeof part.refusal === "string") {
           slots.push(slot(part, "refusal"));
-        } else if (part.type === "tool_result") {
+        } else if (part.type === "tool_result" || part.type === "mcp_tool_result") {
           // Anthropic tool_result content can itself be a string or block array.
           if (typeof part.content === "string") slots.push(slot(part, "content"));
           else if (Array.isArray(part.content)) pushContent(part, "content");
-        } else if (part.type === "tool_use" && part.input && typeof part.input === "object") {
-          // Anthropic tool_use args are user-supplied data, not a fixed schema.
-          pushStringLeaves(part.input, slots);
+        } else if (
+          (part.type === "tool_use" || part.type === "server_tool_use" || part.type === "mcp_tool_use") &&
+          part.input && typeof part.input === "object"
+        ) {
+          // Tool inputs are user-supplied data, not a fixed schema; an earlier reply's call
+          // comes back here with its real values restored.
+          pushStringLeaves(part.input, slots, 0, finalizers);
+        } else if (part.type === "document") {
+          // A document's title and context are read by the model, and so is a plain-text
+          // source (its data is the text) or a content source (text blocks). A base64 or
+          // URL source is a file, left as sent.
+          if (typeof part.title === "string") slots.push(slot(part, "title"));
+          if (typeof part.context === "string") slots.push(slot(part, "context"));
+          const src = part.source;
+          if (src?.type === "text" && typeof src.data === "string") slots.push(slot(src, "data"));
+          else if (src?.type === "content") {
+            if (typeof src.content === "string") slots.push(slot(src, "content"));
+            else if (Array.isArray(src.content)) pushContent(src, "content");
+          }
+        } else if (part.type === "search_result") {
+          // A search result's title and text blocks are content; its source is the
+          // result's identifier (a URL), cited back by the model as given.
+          if (typeof part.title === "string") slots.push(slot(part, "title"));
+          if (Array.isArray(part.content)) pushContent(part, "content");
         }
       }
     }
@@ -224,8 +272,12 @@ function requestTextSlots(
     // OpenAI carries the system prompt as a role:"system" message — skip it too.
     if (!redactSystem && msg.role === "system") continue;
     if (typeof msg.content === "string" || Array.isArray(msg.content)) pushContent(msg, "content");
-    // OpenAI: participant `name` and assistant `tool_calls` arguments are model-visible.
+    // OpenAI: participant `name`, an assistant's `refusal`, and its `tool_calls` and
+    // legacy `function_call` arguments are model-visible.
     if (typeof msg.name === "string") slots.push(slot(msg, "name"));
+    if (typeof msg.refusal === "string") slots.push(slot(msg, "refusal"));
+    if (msg.function_call && typeof msg.function_call.arguments === "string")
+      pushJsonString(msg.function_call, "arguments", slots, finalizers);
     if (Array.isArray(msg.tool_calls))
       for (const tc of msg.tool_calls) {
         const fn = tc?.function;

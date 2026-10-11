@@ -87,6 +87,10 @@ export const config = {
   // Generous by default: non-streaming completions only send headers when they finish.
   upstreamTimeoutMs: parseTimeoutMs(env.UPSTREAM_TIMEOUT_MS),
 
+  // Which tool arguments reversible mode restores: tools or tool.field pairs, comma
+  // separated. Unset restores none; "*" restores every tool's (redact/restorePolicy.ts).
+  restoreTools: env.CORDON_RESTORE_TOOLS ?? "",
+
   upstream: {
     openai: env.OPENAI_BASE ?? "https://api.openai.com",
     anthropic: env.ANTHROPIC_BASE ?? "https://api.anthropic.com",

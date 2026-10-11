@@ -13,11 +13,11 @@ const base = { OPENAI_BASE: STUB, ANTHROPIC_BASE: STUB };
 const instances = {
   // Primary instance: has a strong TENANT_SECRET, so consistent-pseudonym requests work, and
   // opts in to X-Tenant (TRUST_TENANT_HEADER) so the tenant-selection rule is exercised.
-  8810: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test.jsonl", CORDON_TEST_HOOKS: "1", TENANT_SECRET: "test-secret-0123456789abcdef", TRUST_TENANT_HEADER: "true" },
+  8810: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test.jsonl", CORDON_RESTORE_TOOLS: "*", CORDON_TEST_HOOKS: "1", TENANT_SECRET: "test-secret-0123456789abcdef", TRUST_TENANT_HEADER: "true" },
   // Secret-less instance: consistent pseudonyms enabled per-tenant here must FAIL CLOSED
   // (no ALLOW_WEAK_PSEUDONYM_SECRET) — exercises the per-request pseudonym-secret guard.
   // TRUST_TENANT_HEADER is left at its default, so X-Tenant is ignored here.
-  8811: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test_nosecret.jsonl" },
+  8811: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test_nosecret.jsonl", CORDON_RESTORE_TOOLS: "*" },
   // No ADMIN_TOKEN; an Anthropic upstream accepts connections but never answers.
   // The proxy suite opens it on :8901 with a short timeout for the 504 path.
   8812: {
@@ -25,6 +25,8 @@ const instances = {
     ANTHROPIC_BASE: "http://127.0.0.1:8901",
     UPSTREAM_TIMEOUT_MS: "500",
   },
+  // A restore allowlist: only the `text` argument of the `echo` tool gets real values back.
+  8813: { AUDIT_LOG: "./_audit_test_restore.jsonl", CORDON_RESTORE_TOOLS: "echo.text,send" },
 };
 
 // Suites importing TS modules directly run under the tsx loader.
@@ -32,7 +34,7 @@ const TSX_SUITES = new Set(["_test_unit.mjs", "_test_fuzz.js"]);
 const suites = ["_test_unit.mjs", "_test_fuzz.js", "_test_proxy.mjs", "_test_stream.mjs", "_test_labeler_config.mjs", "_test_release_notes.mjs", "_test_build_inputs.mjs"];
 
 // Fresh audit chains + scratch files each run.
-for (const f of ["./_audit_test.jsonl", "./_audit_test_nosecret.jsonl", "./_audit_test_noadmin.jsonl", "./_policy_unit.json", "./_policy_bad.json"])
+for (const f of ["./_audit_test.jsonl", "./_audit_test_nosecret.jsonl", "./_audit_test_noadmin.jsonl", "./_audit_test_restore.jsonl", "./_policy_unit.json", "./_policy_bad.json"])
   try { rmSync(f, { force: true }); } catch {}
 
 /**
