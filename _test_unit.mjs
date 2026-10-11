@@ -261,7 +261,13 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
   const out = reidentifyBody(resp, "anthropic", v, "messages").content[0].citations;
   ok("citations: an offset after a placeholder is the caller's", out[0].start_char_index === orig.indexOf("Then") && out[0].end_char_index === orig.indexOf("Then") + 4 && out[0].cited_text === "Then", JSON.stringify(out[0]));
   ok("citations: a range over a placeholder covers the whole value, cited_text restored", out[1].start_char_index === 0 && out[1].end_char_index === orig.indexOf(" today") && out[1].cited_text === "Contact jane@corp.io", JSON.stringify(out[1]));
-  ok("citations: a range inside a placeholder maps to the value it replaced", out[2].start_char_index === orig.indexOf("jane") && out[2].end_char_index === orig.indexOf(" today"), JSON.stringify(out[2]));
+  ok("citations: a range inside a placeholder maps to the value it replaced", out[2].start_char_index === orig.indexOf("jane") && out[2].end_char_index === orig.indexOf(" today") && out[2].cited_text === "jane@corp.io", JSON.stringify(out[2]));
+  // One endpoint inside a placeholder: the range widens to the whole value, and cited_text
+  // quotes the caller's text over the widened range, never a piece of the token.
+  const startIn = reidentifyBody({ content: [{ type: "text", text: "s", citations: [cite(red.indexOf(tok) + 3, red.indexOf("today") + 5)] }] }, "anthropic", v, "messages").content[0].citations[0];
+  ok("citations: a range starting inside a placeholder quotes the caller's text", startIn.start_char_index === orig.indexOf("jane") && startIn.end_char_index === orig.indexOf("today") + 5 && startIn.cited_text === "jane@corp.io today", JSON.stringify(startIn));
+  const endIn = reidentifyBody({ content: [{ type: "text", text: "e", citations: [cite(0, red.indexOf(tok) + 4)] }] }, "anthropic", v, "messages").content[0].citations[0];
+  ok("citations: a range ending inside a placeholder quotes the caller's text", endIn.start_char_index === 0 && endIn.end_char_index === orig.indexOf(" today") && endIn.cited_text === "Contact jane@corp.io", JSON.stringify(endIn));
   ok("citations: document_title restored", out[0].document_title === "notes for jane@corp.io", out[0].document_title);
   // A document cordon did not change, or another document_index, is left as cited.
   const plain = reidentifyBody({ content: [{ type: "text", text: "x", citations: [{ type: "char_location", cited_text: "ab", document_index: 0, start_char_index: 3, end_char_index: 5 }] }] }, "anthropic", v, "messages").content[0].citations[0];

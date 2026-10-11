@@ -518,19 +518,27 @@ export function restoreCitation(c: any, vault: Vault): void {
   if (!c || typeof c !== "object") return;
   if (typeof c.cited_text === "string") c.cited_text = restore(c.cited_text, vault);
   if (typeof c.document_title === "string") c.document_title = restore(c.document_title, vault);
-  const map = c.type === "char_location" ? vault.documents.get(Number(c.document_index)) : undefined;
-  if (!map) return;
+  const doc = c.type === "char_location" ? vault.documents.get(Number(c.document_index)) : undefined;
+  if (!doc) return;
+  // An offset inside a placeholder cuts the token, so cited_text holds a piece of it that
+  // restore cannot resolve: the range then quotes the caller's text instead.
+  let cut = false;
   const back = (i: number, end: boolean): number => {
     let shift = 0;
-    for (const s of map) {
+    for (const s of doc.map) {
       if (i <= s.rStart) break;
-      if (i < s.rEnd) return end ? s.oEnd : s.oStart;
+      if (i < s.rEnd) {
+        cut = true;
+        return end ? s.oEnd : s.oStart;
+      }
       shift = s.rEnd - s.oEnd;
     }
     return i - shift;
   };
   if (typeof c.start_char_index === "number") c.start_char_index = back(c.start_char_index, false);
   if (typeof c.end_char_index === "number") c.end_char_index = back(c.end_char_index, true);
+  if (cut && typeof c.cited_text === "string" && typeof c.start_char_index === "number" && typeof c.end_char_index === "number")
+    c.cited_text = Array.from(doc.source).slice(c.start_char_index, c.end_char_index).join("");
 }
 
 export function reidentifyBody(

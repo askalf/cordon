@@ -462,7 +462,7 @@ export function applyRedaction(
       spans = spans.filter((s) => NUMERIC_PII.has(s.type) && s.start === 0 && s.end === text.length);
     if (!spans.length) continue;
     sl.set(replaceSpans(text, spans, vault));
-    if (sl.doc !== undefined) vault.documents.set(sl.doc, documentMap(text, spans, vault));
+    if (sl.doc !== undefined) vault.documents.set(sl.doc, { source: text, map: documentMap(text, spans, vault) });
     all.push(...spans);
   }
   for (const f of finalizers) f(); // re-serialize parsed JSON-string fields (tool_calls.arguments)
