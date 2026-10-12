@@ -15,6 +15,7 @@ image and creates the GitHub release from this file.
 
 ### Fixed
 
+- A tool-call argument number made of a long run of zeros ending in another digit no longer stalls redaction: its trailing zeros are counted in linear time instead of by a backtracking regular expression.
 - Tool-call argument strings in a request are redacted on their own text, so a number the walk does not change keeps its digits (an integer beyond 2^53 was rounded, legacy `function_call` and `tool_calls` alike) and the arguments keep their spacing.
 - Streamed JSON tool arguments are released when the call ends and its whole-document checks pass, instead of fragment by fragment, so a refused call never reaches the client in part.
 - Chat completions custom tool calls (`tool_calls[].custom.input`) are restored, whole and streamed, and redacted again when replayed as history.

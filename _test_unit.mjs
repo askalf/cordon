@@ -233,6 +233,13 @@ ok("ssnValid accepts normal", ssnValid("123-45-6789") === true);
     const out = legacy('{"n":1e999999999,"m":5e-999999999}');
     ok("apply: a huge exponent is left as written, quickly", out === '{"n":1e999999999,"m":5e-999999999}' && Date.now() - t0 < 1000, out);
   }
+  {
+    // A long run of zeros ending in another digit is trimmed in linear time.
+    const lex = "1" + "0".repeat(200000) + "1";
+    const t0 = Date.now();
+    const out = exactDecimal(lex);
+    ok("exactDecimal: a long zero run ending in a digit is decided quickly", out === lex && Date.now() - t0 < 1000, Date.now() - t0);
+  }
   for (const lex of ["4111111111111111.0", "4.111111111111111e15", "4111111111111111" + "0".repeat(401) + "e-401"]) {
     const out = legacy(`{"card":${lex},"f":1.50}`);
     ok(`apply: a card written ${lex} is redacted whole, other numbers byte for byte`, out === '{"card":"[CREDIT_CARD]","f":1.50}', out);

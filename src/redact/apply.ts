@@ -97,7 +97,11 @@ export function exactDecimal(lexeme: string): string {
   const lead = digits.length - digits.replace(/^0+/, "").length;
   digits = digits.slice(lead);
   point -= lead;
-  digits = digits.replace(/0+$/, "");
+  // Trailing zeros are counted by hand: /0+$/ backtracks quadratically on a long run of
+  // zeros that ends in another digit, and a literal's length is the caller's to choose.
+  let end = digits.length;
+  while (end > 0 && digits.charCodeAt(end - 1) === 48) end--;
+  digits = digits.slice(0, end);
   if (!digits) return "0";
   if (point < digits.length || point > MAX_INTEGRAL_DIGITS) return lexeme;
   return m[1] + digits + "0".repeat(point - digits.length);

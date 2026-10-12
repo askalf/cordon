@@ -6,7 +6,6 @@ import {
   reidentifyBody,
   restore,
   restoreArgObject,
-  restoreArgs,
   restoreArgsWhole,
   restoreCitation,
   StreamReidentifier,
