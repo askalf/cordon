@@ -237,7 +237,11 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
   // A one-token name is matched only this way, so "Will" never matches "we will" or "willing".
   for (const t of tokens)
     if (t.length >= 3 && !COMMON.has(t.toLowerCase())) exact.add(`(?<![\\p{L}\\p{N}])${esc(t[0].toUpperCase())}${tok(t.slice(1))}(?![\\p{L}\\p{N}])`);
-  if (tokens.length === 1 && tokens[0].length >= 5 && !COMMON.has(tokens[0].toLowerCase())) folded.add(alnum(tokens[0]));
+  // At egress a one-token name is also read separator-blind; one too short to be a needle
+  // ("Zora") is read word-bounded with any separators, so "Z o r a" is caught and "zoras" is not.
+  if (tokens.length === 1 && !COMMON.has(tokens[0].toLowerCase()))
+    if (tokens[0].length >= 5) folded.add(alnum(tokens[0]));
+    else for (const p of egressSpread(tokens[0])) egress.add(p);
   return { patterns: [...patterns], exact: [...exact], folded: [...folded], egress: [...egress] };
 }
 

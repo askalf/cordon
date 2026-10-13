@@ -83,6 +83,17 @@ ok("name: a lower-case single token is not a name", !hit("he will mark it").leng
   ok("name: a single token declared alone is redacted when capitalised and whole", /SUBJECT1_NAME/.test(red("met Okonkwo today")));
   ok("name: a single token declared alone is not matched inside a word", red("the okonkwoish style") === "the okonkwoish style");
 }
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Zora"] }] })), "k");
+  const text = "Z o r a";
+  const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+  ok("egress: a short single-token name spread out that detection leaves is caught", out.messages[0].content === text && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+  ok("egress: a short single-token name inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "zoras, azora and zorathustra" }] }, c).length === 0);
+}
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Rose"] }] })), "k");
+  ok("egress: a short common word declared alone and spread out is not a hit", egressViolations({ messages: [{ role: "user", content: "a r o s e garden" }] }, c).length === 0);
+}
 
 // ---- contact details ----
 ok("email: the whole address wins over its local part", /^<SUBJECT1_EMAIL_[0-9A-F]+_\d+>$/.test(redact("MQVance77@Example.com")));
