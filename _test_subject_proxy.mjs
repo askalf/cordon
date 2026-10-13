@@ -252,6 +252,11 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   res = await post("/v1/messages", aBody("hello", { system: "DOB: 7 / 14 / 1986" }), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ...PERSON, dates: ["1986-07-14"] }] }) }, "sys-key");
   const dobRefusal = await res.json().catch(() => ({}));
   ok("egress: a spaced numeric date of birth is refused, upstream never called", res.status === 422 && (await calls()).total === 0 && /SUBJECT1_DOB/.test(dobRefusal.detail ?? ""), `${res.status} ${JSON.stringify(dobRefusal)}`);
+  // The same date with the digits of the day and year spread apart.
+  await reset();
+  res = await post("/v1/messages", aBody("hello", { system: "DOB: 7 / 1 4 / 1 9 8 6" }), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ...PERSON, dates: ["1986-07-14"] }] }) }, "sys-key");
+  const spreadRefusal = await res.json().catch(() => ({}));
+  ok("egress: a numeric date of birth with spread digits is refused, upstream never called", res.status === 422 && (await calls()).total === 0 && /SUBJECT1_DOB/.test(spreadRefusal.detail ?? ""), `${res.status} ${JSON.stringify(spreadRefusal)}`);
   // A spelled-out date of birth with its month spaced out, in the same unredacted system prompt.
   for (const dob of ["DOB: J u l y 14, 1986", "DOB: 1 4 J u l 1986"]) {
     await reset();
