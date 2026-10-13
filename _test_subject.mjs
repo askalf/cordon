@@ -91,6 +91,12 @@ ok("name: a lower-case single token is not a name", !hit("he will mark it").leng
   ok("egress: a short single-token name inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "zoras, azora and zorathustra" }] }, c).length === 0);
 }
 {
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Zoe"] }] })), "k");
+  const out = applyRedaction({ model: "m", messages: [{ role: "user", content: "Z o e" }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+  ok("egress: a three-letter single-token name spread out that detection leaves is caught", out.messages[0].content === "Z o e" && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+  ok("egress: a three-letter single-token name inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "zoes, ozone and azoed" }] }, c).length === 0);
+}
+{
   const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Rose"] }] })), "k");
   ok("egress: a short common word declared alone and spread out is not a hit", egressViolations({ messages: [{ role: "user", content: "a r o s e garden" }] }, c).length === 0);
 }

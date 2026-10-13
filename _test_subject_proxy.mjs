@@ -240,6 +240,12 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/messages", aBody("see zoras and zorathustra"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ names: ["Zora"] }] }) });
   ok("name: longer words beside a short single-token name are forwarded", res.status === 200 && (await calls()).total === 1, String(res.status));
+  await reset();
+  res = await post("/v1/messages", aBody("Z o e"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ names: ["Zoe"] }] }) });
+  ok("name: a three-letter single-token name spread out is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  await reset();
+  res = await post("/v1/messages", aBody("see zoes and the ozone"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ names: ["Zoe"] }] }) });
+  ok("name: longer words beside a three-letter single-token name are forwarded", res.status === 200 && (await calls()).total === 1, String(res.status));
 
   // A phone sent as a JSON number in exponent form, in replayed tool arguments: redacted
   // whole, never forwarded in any spelling.

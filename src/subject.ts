@@ -157,9 +157,10 @@ const digitPattern = (d: string) => d.split("").join("[^\\p{L}\\p{N}]{0,8}");
  *  another digit, so "4    0    4 ..." is caught and two numbers split by a word are not joined. */
 const egressDigitPattern = (d: string) => d.split("").join("[^\\p{L}\\p{N}]*");
 /** The egress reading of a short literal (handles, other): its letters and digits with any run
- *  of separators between them, word-bounded, so "a b c d" is caught and "abcdef" is not. */
-const egressSpread = (s: string) =>
-  alnum(s).length >= 4 ? [`(?<![\\p{L}\\p{N}])${[...alnum(s)].map(esc).join("[^\\p{L}\\p{N}]*")}(?![\\p{L}\\p{N}])`] : [];
+ *  of separators between them, word-bounded, so "a b c d" is caught and "abcdef" is not.
+ *  Shorter than `min` characters gives no pattern. */
+const egressSpread = (s: string, min = 4) =>
+  alnum(s).length >= min ? [`(?<![\\p{L}\\p{N}])${[...alnum(s)].map(esc).join("[^\\p{L}\\p{N}]*")}(?![\\p{L}\\p{N}])`] : [];
 
 // Common words that are also given names or surnames. Alone and capitalised they still
 // read as words often enough ("Will you", "Hope Street") that redacting them would corrupt
@@ -238,10 +239,11 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
   for (const t of tokens)
     if (t.length >= 3 && !COMMON.has(t.toLowerCase())) exact.add(`(?<![\\p{L}\\p{N}])${esc(t[0].toUpperCase())}${tok(t.slice(1))}(?![\\p{L}\\p{N}])`);
   // At egress a one-token name is also read separator-blind; one too short to be a needle
-  // ("Zora") is read word-bounded with any separators, so "Z o r a" is caught and "zoras" is not.
+  // ("Zora", "Zoe") is read word-bounded with any separators, down to the three letters the
+  // capitalised match accepts, so "Z o e" is caught and "zoes" is not.
   if (tokens.length === 1 && !COMMON.has(tokens[0].toLowerCase()))
     if (tokens[0].length >= 5) folded.add(alnum(tokens[0]));
-    else for (const p of egressSpread(tokens[0])) egress.add(p);
+    else for (const p of egressSpread(tokens[0], 3)) egress.add(p);
   return { patterns: [...patterns], exact: [...exact], folded: [...folded], egress: [...egress] };
 }
 
