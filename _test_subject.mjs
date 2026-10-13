@@ -127,6 +127,12 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: a redacted body passes", egressViolations(deidBody, comp).length === 0);
   const leak = (s) => egressViolations({ model: "m", messages: [{ role: "user", content: s }] }, comp);
   ok("egress: a spaced-out name is caught", leak("m a r i s o l q u i n t e r o v a n c e").includes("SUBJECT1_NAME"));
+  {
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Henry Grace"] }] })), "k");
+    const text = "w i l l h e n r y g r a c e";
+    const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+    ok("egress: a spaced-out three-part name that detection leaves is caught", out.messages[0].content === text && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+  }
   ok("egress: a phone with odd separators is caught", leak("4 0 4 / 5 5 5 / 0 1 8 7").includes("SUBJECT1_PHONE"));
   ok("egress: full-width digits are caught", leak("４０４５５５０１８７").includes("SUBJECT1_PHONE"));
   ok("egress: zero-width characters do not hide a name", leak("Mari​sol Quin‌tero-Vance").includes("SUBJECT1_NAME"));

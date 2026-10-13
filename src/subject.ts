@@ -219,6 +219,8 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
         folded.add(alnum(h));
       }
     folded.add(alnum(first + last));
+    // The whole name in order, middle names included: "w i l l h e n r y g r a c e".
+    folded.add(alnum(tokens.join("")));
   }
   // Single tokens alone (word-bounded, capitalised): skipped for short and common words.
   // A one-token name is matched only this way, so "Will" never matches "we will" or "willing".
