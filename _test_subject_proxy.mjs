@@ -85,6 +85,18 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   res = await post("/v1/messages", aBody(img), { "x-cordon-subject": SUBJECT({ media: "allow" }) }, "media-key");
   ok("media: policy and header together allow it", res.status === 200, String(res.status));
 
+  // A tool input shaped like an image is tool data, not media: allowing media does not exempt it.
+  await reset();
+  res = await post("/v1/messages", {
+    model: "claude-haiku-4-5",
+    messages: [
+      { role: "user", content: "look this up" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input: { type: "image", data: "m a r i s o l q u i n t e r o v a n c e" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "no match" }] },
+    ],
+  }, { "x-cordon-subject": SUBJECT({ media: "allow" }) }, "media-key");
+  ok("media: a media-shaped tool input is checked and refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+
   // ---- mask mode: identifiers painted over in the image, which is read again before it goes ----
   {
     const sharp = (await import("sharp")).default;
@@ -166,6 +178,17 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/messages", aBody("hello", { system: "Client lives at 1428 E l m S t." }), { "x-cordon-subject": SUBJECT() }, "sys-key");
   ok("egress: a spaced-out abbreviated address is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+
+  // :8811 has no TENANT_SECRET, so a consistent-pseudonym tenant fails at the secret guard; with
+  // failMode open that would forward the raw body, but never for a request that names subjects.
+  await fetch("http://localhost:8811/admin/tenant", { method: "POST", headers: { "content-type": "application/json", "x-admin-token": ADMIN }, body: JSON.stringify({ tenant: keyTenant("open-key"), consistentPseudonyms: true, failMode: "open" }) });
+  await reset();
+  res = await fetch("http://localhost:8811/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "open-key", "anthropic-version": "2023-06-01", "x-cordon-subject": SUBJECT() },
+    body: JSON.stringify(aBody(TEXT)),
+  });
+  ok("fail open: a subject request at the pseudonym-secret guard is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
 
   await setTenant({ tenant: keyTenant("off-key"), mode: "off" });
   await reset();

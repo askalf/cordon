@@ -65,8 +65,7 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
     const det = subjects ? withSubjects(detector, subjects) : detector;
     ({ deidBody, spans } = applyRedaction(r.raw, r.provider, vault, r.activeSets, det, redactSystem, r.dialect));
   } catch (e) {
-    // A request that named its subjects is never forwarded raw, whatever the fail mode.
-    return onRedactionError(r, res, e, r.subject ? "closed" : failMode, t0);
+    return onRedactionError(r, res, e, failMode, t0);
   }
 
   const counts = tally(spans);
@@ -224,6 +223,7 @@ async function passthrough(r: CanonicalRequest, res: HttpRes, reason: string) {
 /**
  * Detection / audit failure. Default (closed): block with 4xx, upstream NOT called.
  * Open (explicit dev escape hatch): forward the original body, audited as a bypass.
+ * A request that named its subjects is never forwarded raw, whatever the fail mode.
  */
 async function onRedactionError(
   r: CanonicalRequest,
@@ -233,7 +233,7 @@ async function onRedactionError(
   t0: number,
   stage = "detect",
 ) {
-  if (failMode === "open") {
+  if (failMode === "open" && !r.subject) {
     metrics.bypass(`fail-open:${stage}`);
     try {
       const up = await forwardUpstream(r); // ⚠ forwards raw — dev only

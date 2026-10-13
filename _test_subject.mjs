@@ -61,6 +61,20 @@ ok("name: the first subject's tokens say SUBJECT1", /SUBJECT1_NAME/.test(redact(
   ok("name: common words alone are left as words", out.startsWith("Will you check? Grace period ends.") && !out.includes("Will Grace"), out);
 }
 ok("name: a lower-case single token is not a name", !hit("he will mark it").length);
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will"] }] })), "k");
+  const d = withSubjects(detector, c);
+  const text = "We will help. Will you check? He is willing.";
+  const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], d, true, "messages").deidBody.messages[0].content;
+  ok("name: a common word declared alone is never redacted", out === text, out);
+  ok("name: a common word declared alone is not an egress hit", egressViolations({ system: text, messages: [{ role: "user", content: "hi" }] }, c).length === 0);
+}
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Okonkwo"] }] })), "k");
+  const red = (t) => applyRedaction({ model: "m", messages: [{ role: "user", content: t }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody.messages[0].content;
+  ok("name: a single token declared alone is redacted when capitalised and whole", /SUBJECT1_NAME/.test(red("met Okonkwo today")));
+  ok("name: a single token declared alone is not matched inside a word", red("the okonkwoish style") === "the okonkwoish style");
+}
 
 // ---- contact details ----
 ok("email: the whole address wins over its local part", /^<SUBJECT1_EMAIL_[0-9A-F]+_\d+>$/.test(redact("MQVance77@Example.com")));
@@ -111,6 +125,11 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: unrelated digits are not a hit", leak("order 4045 shipped 5550 units, 187 left").length === 0);
   const img = { model: "m", messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "TWFyaXNvbCBRdWludGVyby1WYW5jZQ4045550187" } }] }] };
   ok("egress: base64 image data is skipped, not read", egressViolations(img, comp).length === 0);
+  const toolImg = { model: "m", messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "f", input: { type: "image", data: "m a r i s o l q u i n t e r o v a n c e" } }] }] };
+  ok("egress: a media-shaped tool input is read, not skipped", egressViolations(toolImg, comp).includes("SUBJECT1_NAME"));
+  ok("media: a media-shaped tool input is not counted", countMedia(toolImg) === 0);
+  const resultImg = { model: "m", messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "TWFyaXNvbCBRdWludGVyby1WYW5jZQ" } }] }] }] };
+  ok("media: an image inside a tool result is counted and its data skipped", countMedia(resultImg) === 1 && egressViolations(resultImg, comp).length === 0);
   ok("media: an image part is counted", countMedia(img) === 1);
   const doc = { model: "m", messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "Marisol Quintero-Vance" } }] }] };
   ok("media: a text document is not media", countMedia(doc) === 0);

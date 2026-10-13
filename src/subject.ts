@@ -200,8 +200,8 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
   const last = tokens[tokens.length - 1];
   const middle = tokens.slice(1, -1);
   const S = "[\\s.,'’\\-_]+";
-  patterns.add(tokens.map(tok).join(S)); // as given
   if (tokens.length >= 2) {
+    patterns.add(tokens.map(tok).join(S)); // as given
     patterns.add(`${tok(first)}${S}${tok(last)}`); // first last
     patterns.add(`${tok(last)}\\s*,\\s*${tok(first)}(?:${S}${middle.map(tok).join(S)})?`); // last, first [middle]
     patterns.add(`${esc(first[0])}\\.?${S}${middle.length ? `(?:${middle.map((m) => `${esc(m[0])}\\.?`).join(S)}${S})?` : ""}${tok(last)}`); // M. [L.] Vance
@@ -215,9 +215,10 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
     folded.add(alnum(first + last));
   }
   // Single tokens alone (word-bounded, capitalised): skipped for short and common words.
+  // A one-token name is matched only this way, so "Will" never matches "we will" or "willing".
   for (const t of tokens)
     if (t.length >= 3 && !COMMON.has(t.toLowerCase())) exact.add(`(?<![\\p{L}\\p{N}])${esc(t[0].toUpperCase())}${tok(t.slice(1))}(?![\\p{L}\\p{N}])`);
-  if (tokens.length === 1 && tokens[0].length >= 5) folded.add(alnum(tokens[0]));
+  if (tokens.length === 1 && tokens[0].length >= 5 && !COMMON.has(tokens[0].toLowerCase())) folded.add(alnum(tokens[0]));
   return { patterns: [...patterns], exact: [...exact], folded: [...folded] };
 }
 
@@ -339,7 +340,7 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             if (alnum(value).length >= 6) folded = [alnum(value)];
           }
         }
-        if (!patterns.length) continue;
+        if (!patterns.length && !exact.length) continue;
         if (kind === "NAME" || kind === "ADDRESS" || kind === "OTHER") {
           const plain = unaccent(value);
           if (plain !== value) {
@@ -409,26 +410,50 @@ const MEDIA_PAYLOAD_KEYS = new Set(["data", "file_data", "result", "image_url", 
 const isMediaPart = (node: any): boolean =>
   !!node && typeof node === "object" && typeof node.type === "string" &&
   (MEDIA_TYPES.has(node.type) || (node.type === "document" && BINARY_SOURCES.has(node.source?.type)));
+/** The media parts of a body, found only where the provider schemas carry them: a message's
+ *  content parts, a tool result's content, a Responses input item or its output parts. An
+ *  object of the same shape anywhere else (tool_use input, function arguments, metadata) is
+ *  ordinary data and is read in full. */
+function mediaPartsOf(body: any): Set<object> {
+  const found = new Set<object>();
+  const parts = (list: any) => {
+    if (!Array.isArray(list)) return;
+    for (const p of list) {
+      if (isMediaPart(p)) found.add(p);
+      else if (p?.type === "tool_result" || p?.type === "function_call_output") {
+        parts(p.content);
+        parts(p.output);
+      }
+    }
+  };
+  if (!body || typeof body !== "object") return found;
+  for (const m of Array.isArray(body.messages) ? body.messages : []) parts(m?.content);
+  if (Array.isArray(body.input))
+    for (const item of body.input) {
+      if (isMediaPart(item)) found.add(item);
+      else {
+        parts(item?.content);
+        parts(item?.output);
+      }
+    }
+  return found;
+}
 /** A payload string the egress check does not read: inside a media part only, base64 data
  *  or a data: URL under one of the payload keys. The same key anywhere else (a metadata
  *  "result", a "data" field) is ordinary text and is read. */
 const isPayload = (key: string, v: string) =>
   MEDIA_PAYLOAD_KEYS.has(key) && (v.startsWith("data:") || key === "data" || key === "file_data" || key === "result");
 
-/** Count media parts (image, file, audio) anywhere in a request body. */
-export function countMedia(body: any, depth = 0): number {
-  if (!body || typeof body !== "object" || depth > 64) return 0;
-  if (isMediaPart(body)) return 1;
-  let n = 0;
-  for (const v of Array.isArray(body) ? body : Object.values(body)) n += countMedia(v, depth + 1);
-  return n;
+/** Count media parts (image, file, audio) in a request body's content locations. */
+export function countMedia(body: any): number {
+  return mediaPartsOf(body).size;
 }
 
 const NUMBER_LITERAL = /-?\d+(?:\.\d+)?[eE][+-]?\d+|-?\d+\.\d+/g;
 
 /** Every string leaf and object key, with media payloads skipped (they are counted, not read).
  *  `inMedia` is true below a recognised media part, the only place a payload is skipped. */
-function leaves(node: any, out: string[], depth = 0, inMedia = false): void {
+function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia = false): void {
   if (depth > 64) throw new Error("body nested deeper than 64 levels; refusing to forward unread fields");
   if (typeof node === "string") {
     out.push(node);
@@ -445,15 +470,15 @@ function leaves(node: any, out: string[], depth = 0, inMedia = false): void {
     return;
   }
   if (!node || typeof node !== "object") return;
-  const media = inMedia || isMediaPart(node);
+  const media = inMedia || parts.has(node);
   if (Array.isArray(node)) {
-    for (const v of node) leaves(v, out, depth + 1, media);
+    for (const v of node) leaves(v, out, parts, depth + 1, media);
     return;
   }
   for (const [k, v] of Object.entries(node)) {
     out.push(k);
     if (media && typeof v === "string" && isPayload(k, v)) continue; // base64 or a data: URL
-    leaves(v, out, depth + 1, media);
+    leaves(v, out, parts, depth + 1, media);
   }
 }
 
@@ -466,7 +491,7 @@ function leaves(node: any, out: string[], depth = 0, inMedia = false): void {
 export function egressViolations(deidBody: any, compiled: CompiledSubjects): string[] {
   const found = new Set<string>();
   const texts: string[] = [];
-  leaves(deidBody, texts);
+  leaves(deidBody, texts, mediaPartsOf(deidBody));
   for (const raw of texts) {
     if (!raw) continue;
     const folded = foldText(raw);
