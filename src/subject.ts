@@ -238,12 +238,14 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
   // A one-token name is matched only this way, so "Will" never matches "we will" or "willing".
   for (const t of tokens)
     if (t.length >= 3 && !COMMON.has(t.toLowerCase())) exact.add(`(?<![\\p{L}\\p{N}])${esc(t[0].toUpperCase())}${tok(t.slice(1))}(?![\\p{L}\\p{N}])`);
-  // At egress a one-token name is also read separator-blind; one too short to be a needle
-  // ("Zora", "Zoe") is read word-bounded with any separators, down to the three letters the
-  // capitalised match accepts, so "Z o e" is caught and "zoes" is not.
-  if (tokens.length === 1 && !COMMON.has(tokens[0].toLowerCase()))
-    if (tokens[0].length >= 5) folded.add(alnum(tokens[0]));
-    else for (const p of egressSpread(tokens[0], 3)) egress.add(p);
+  // At egress every token matched alone is also read word-bounded with any separators, down to
+  // the three letters the capitalised match accepts, whether the name was declared as one token
+  // or several: "Z o e" and "M a r i s o l" (from "Marisol Quintero-Vance") are caught, "zoes"
+  // and "marisols" are not. A one-token name long enough to be a needle is read separator-blind
+  // as well.
+  for (const t of tokens)
+    if (t.length >= 3 && !COMMON.has(t.toLowerCase())) for (const p of egressSpread(t, 3)) egress.add(p);
+  if (tokens.length === 1 && tokens[0].length >= 5 && !COMMON.has(tokens[0].toLowerCase())) folded.add(alnum(tokens[0]));
   return { patterns: [...patterns], exact: [...exact], folded: [...folded], egress: [...egress] };
 }
 
