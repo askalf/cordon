@@ -162,6 +162,16 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
     ok("egress: a short surname-first initial spread out is caught", egressViolations({ messages: [{ role: "user", content: "R-A-Y W" }] }, c).includes("SUBJECT1_NAME"));
     ok("egress: a short initial form inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "wrays, swray and rayws" }] }, c).length === 0);
   }
+  {
+    // A token of a full-name declaration, written alone and spread out: detection leaves it,
+    // egress refuses it, the same as the capitalised token detection would have redacted.
+    const out = applyRedaction({ model: "m", messages: [{ role: "user", content: "M a r i s o l" }] }, "anthropic", new Vault("reversible"), ["pii"], det, true, "messages").deidBody;
+    ok("egress: a spaced-out first name from a full-name declaration that detection leaves is caught", out.messages[0].content === "M a r i s o l" && egressViolations(out, comp).includes("SUBJECT1_NAME"), out.messages[0].content);
+    ok("egress: a spaced-out surname from a full-name declaration is caught", leak("q u i n t e r o - v a n c e").includes("SUBJECT1_NAME") && leak("O.K.O.N.K.W.O").includes("SUBJECT2_NAME"));
+    ok("egress: a token of a full-name declaration inside a longer word is not a hit", leak("marisols, amarisol and okonkwoish").length === 0);
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Grace"] }] })), "k");
+    ok("egress: common-word tokens of a full-name declaration spread out alone are not a hit", egressViolations({ messages: [{ role: "user", content: "w i l l and g r a c e" }] }, c).length === 0);
+  }
   ok("egress: a phone with odd separators is caught", leak("4 0 4 / 5 5 5 / 0 1 8 7").includes("SUBJECT1_PHONE"));
   ok("egress: full-width digits are caught", leak("４０４５５５０１８７").includes("SUBJECT1_PHONE"));
   ok("egress: zero-width characters do not hide a name", leak("Mari​sol Quin‌tero-Vance").includes("SUBJECT1_NAME"));
