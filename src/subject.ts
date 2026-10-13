@@ -59,7 +59,8 @@ interface Matcher {
   folded: string[];
   /** Digit sequences for the egress check, matched with up to 3 separators between digits. */
   digits: string[];
-  /** The digit sequences as regexes, compiled once per request. */
+  /** The digit sequences as regexes, compiled once per request, plus any egress-only
+   *  numeric forms (dates with spaced separators). */
   digitRes: RegExp[];
 }
 
@@ -243,14 +244,14 @@ function addressForms(addr: string): { patterns: string[]; folded: string[] } {
   return { patterns, folded: [...new Set([alnum(street), ...spellings.map(alnum)])] };
 }
 
-function dateForms(date: string): { patterns: string[]; digits: string[] } {
+function dateForms(date: string): { patterns: string[]; digits: string[]; egress: string[] } {
   let y: number, m: number, d: number;
   const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(date);
   const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(date);
   if (iso) [y, m, d] = [Number(iso[1]), Number(iso[2]), Number(iso[3])];
   else if (us) [y, m, d] = [Number(us[3]), Number(us[1]), Number(us[2])];
-  else return { patterns: [loose(date)], digits: [] };
-  if (m < 1 || m > 12 || d < 1 || d > 31) return { patterns: [loose(date)], digits: [] };
+  else return { patterns: [loose(date)], digits: [], egress: [] };
+  if (m < 1 || m > 12 || d < 1 || d > 31) return { patterns: [loose(date)], digits: [], egress: [] };
   const mm = String(m).padStart(2, "0");
   const dd = String(d).padStart(2, "0");
   const yy = String(y).slice(2);
@@ -265,7 +266,12 @@ function dateForms(date: string): { patterns: string[]; digits: string[] } {
     nb(`${y}${mm}${dd}`), // 19850302
     nb(`${mm}${dd}${y}`), // 03021985
   ];
-  return { patterns, digits: [`${y}${mm}${dd}`, `${mm}${dd}${y}`] };
+  // The egress reading of the separated numeric forms, padded or not and with either year:
+  // any run of separators between the parts ("3 / 2 / 1985", "3 - 2 - 85"), at least one,
+  // so a bare short number such as 3285 is never read as the date.
+  const SEP = "[^\\p{L}\\p{N}]+";
+  const egress = [nb(`${y}${SEP}0?${m}${SEP}0?${d}`), nb(`0?${m}${SEP}0?${d}${SEP}(?:${y}|${yy})`)];
+  return { patterns, digits: [`${y}${mm}${dd}`, `${mm}${dd}${y}`], egress };
 }
 
 /** Compile a spec into matchers. Identifiers too short to match safely are dropped. */
@@ -279,6 +285,7 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
         let exact: string[] = [];
         let folded: string[] = [];
         let digits: string[] = [];
+        let egress: string[] = [];
         switch (kind) {
           case "NAME": {
             const f = nameForms(value);
@@ -317,6 +324,7 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             const f = dateForms(value);
             patterns = f.patterns;
             digits = f.digits;
+            egress = f.egress;
             break;
           }
           case "ID": {
@@ -353,7 +361,10 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
         // matches at a position, so "mqvance77" would win over "mqvance77@example.com". Every
         // form's spans are collected and withSubjects keeps the longest of any overlap.
         const res = [...patterns.map((p) => new RegExp(p, "giud")), ...exact.map((p) => new RegExp(p, "gud"))];
-        const digitRes = digits.map((d) => new RegExp(`(?<!\\d)${egressDigitPattern(d)}(?!\\d)`, "u"));
+        const digitRes = [
+          ...digits.map((d) => new RegExp(`(?<!\\d)${egressDigitPattern(d)}(?!\\d)`, "u")),
+          ...egress.map((p) => new RegExp(p, "u")),
+        ];
         matchers.push({ type: `SUBJECT${n}_${kind}`, res, folded, digits, digitRes });
       }
     }

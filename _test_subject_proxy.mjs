@@ -227,6 +227,11 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/messages", aBody("hello", { system: "Client lives at 1428 E l m S t." }), { "x-cordon-subject": SUBJECT() }, "sys-key");
   ok("egress: a spaced-out abbreviated address is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // A date of birth with spaces around its separators, in the same unredacted system prompt.
+  await reset();
+  res = await post("/v1/messages", aBody("hello", { system: "DOB: 7 / 14 / 1986" }), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ...PERSON, dates: ["1986-07-14"] }] }) }, "sys-key");
+  const dobRefusal = await res.json().catch(() => ({}));
+  ok("egress: a spaced numeric date of birth is refused, upstream never called", res.status === 422 && (await calls()).total === 0 && /SUBJECT1_DOB/.test(dobRefusal.detail ?? ""), `${res.status} ${JSON.stringify(dobRefusal)}`);
 
   // :8811 has no TENANT_SECRET, so a consistent-pseudonym tenant fails at the secret guard; with
   // failMode open that would forward the raw body, but never for a request that names subjects.

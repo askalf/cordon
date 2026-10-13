@@ -111,6 +111,9 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: an object key is read too", egressViolations({ messages: [{ role: "user", content: [{ type: "text", text: "x", "Marisol Quintero-Vance": 1 }] }] }, comp).includes("SUBJECT1_NAME"));
   ok("egress: any run of separators between digits is caught", leak("4    0    4    5    5    5    0    1    8    7").includes("SUBJECT1_PHONE") && leak("4\n\n\n\n\n0 4 - - - - 555 . . . 0187").includes("SUBJECT1_PHONE"));
   ok("egress: digits split by a word are not joined", leak("room 404 and then 5550187 later").length === 0);
+  for (const d of ["DOB: 7 / 14 / 1986", "7 - 14 - 86", "07 / 14 / 1986", "1986 / 7 / 14", "7 . 14 . 86"])
+    ok(`egress: a spaced numeric date of birth is caught: ${d}`, leak(d).includes("SUBJECT1_DOB"), d);
+  ok("egress: a spaced date that is not the subject's is not a hit", leak("7 / 14 / 1987 and 7 / 15 / 86").length === 0);
   ok("egress: a payload key outside media is read", egressViolations({ input: "x", metadata: { result: "Marisol Quintero-Vance" } }, comp).includes("SUBJECT1_NAME"));
   ok("egress: a data: string outside media is read", egressViolations({ input: "x", metadata: { url: "data:text/plain,Marisol Quintero-Vance" } }, comp).includes("SUBJECT1_NAME"));
   ok("egress: a spaced-out address in its abbreviated spelling is caught", leak("1428 E l m S t").includes("SUBJECT1_ADDRESS") && leak("1 4 2 8 . E L M . S T R E E T").includes("SUBJECT1_ADDRESS"));
