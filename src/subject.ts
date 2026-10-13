@@ -195,12 +195,13 @@ const MONTHS = ["january", "february", "march", "april", "may", "june", "july", 
 
 // ---- per-kind matchers ----
 
-function nameForms(name: string): { patterns: string[]; exact: string[]; folded: string[] } {
+function nameForms(name: string): { patterns: string[]; exact: string[]; folded: string[]; egress: string[] } {
   const tokens = name.split(/[\s,]+/).map((t) => t.replace(/\.$/, "")).filter(Boolean);
   const patterns = new Set<string>();
   const exact = new Set<string>();
   const folded = new Set<string>();
-  if (!tokens.length) return { patterns: [], exact: [], folded: [] };
+  const egress = new Set<string>();
+  if (!tokens.length) return { patterns: [], exact: [], folded: [], egress: [] };
   const first = tokens[0];
   const last = tokens[tokens.length - 1];
   const middle = tokens.slice(1, -1);
@@ -213,11 +214,13 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
     patterns.add(`(?<![\\p{L}\\p{N}])${tok(last)}\\s*,\\s*${esc(first[0])}\\.?${middle.length ? `(?:${S}${middle.map((m) => `${esc(m[0])}\\.?`).join(S)})?` : ""}(?![\\p{L}\\p{N}])`); // Vance, M. [L.]
     if (middle.length) patterns.add(`${tok(first)}${S}${middle.map((m) => `${esc(m[0])}\\.?`).join(S)}${S}${tok(last)}`); // Marisol L. Vance
     // Handles and concatenations: marisolvance, marisol.vance, mvance, vancem
+    // A form too short to be a needle or a handle ("Will Ray" as wray, rayw) is still read at
+    // egress word-bounded with any separators, so "w . r a y" is caught and "wrays" is not.
     for (const h of [first + last, last + first, first[0] + last, last + first[0]])
       if (h.length >= 6) {
         patterns.add(esc(h.toLowerCase()));
         folded.add(alnum(h));
-      }
+      } else for (const p of egressSpread(h)) egress.add(p);
     folded.add(alnum(first + last));
     // The whole name in order, middle names included: "w i l l h e n r y g r a c e".
     folded.add(alnum(tokens.join("")));
@@ -227,6 +230,7 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
       const initials = middle.map((m) => m[0]).join("");
       for (const h of [first[0] + initials + last, first + initials + last, last + first[0] + initials])
         if (alnum(h).length >= 6) folded.add(alnum(h));
+        else for (const p of egressSpread(h)) egress.add(p);
     }
   }
   // Single tokens alone (word-bounded, capitalised): skipped for short and common words.
@@ -234,7 +238,7 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
   for (const t of tokens)
     if (t.length >= 3 && !COMMON.has(t.toLowerCase())) exact.add(`(?<![\\p{L}\\p{N}])${esc(t[0].toUpperCase())}${tok(t.slice(1))}(?![\\p{L}\\p{N}])`);
   if (tokens.length === 1 && tokens[0].length >= 5 && !COMMON.has(tokens[0].toLowerCase())) folded.add(alnum(tokens[0]));
-  return { patterns: [...patterns], exact: [...exact], folded: [...folded] };
+  return { patterns: [...patterns], exact: [...exact], folded: [...folded], egress: [...egress] };
 }
 
 function addressForms(addr: string): { patterns: string[]; folded: string[] } {
@@ -317,6 +321,7 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             patterns = f.patterns;
             exact = f.exact;
             folded = f.folded;
+            egress = f.egress;
             break;
           }
           case "EMAIL": {

@@ -137,6 +137,14 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
     ok("egress: an initialled name with its surname spread out that detection leaves is caught", out2.messages[0].content === initialled && egressViolations(out2, c).includes("SUBJECT1_NAME"), out2.messages[0].content);
     ok("egress: a spread first name with a middle initial is caught", egressViolations({ messages: [{ role: "user", content: "w i l l h g r a c e" }] }, c).includes("SUBJECT1_NAME"));
   }
+  {
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Ray"] }] })), "k");
+    const text = "w . r a y";
+    const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+    ok("egress: a short initial and surname spread out that detection leaves is caught", out.messages[0].content === text && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+    ok("egress: a short surname-first initial spread out is caught", egressViolations({ messages: [{ role: "user", content: "R-A-Y W" }] }, c).includes("SUBJECT1_NAME"));
+    ok("egress: a short initial form inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "wrays, swray and rayws" }] }, c).length === 0);
+  }
   ok("egress: a phone with odd separators is caught", leak("4 0 4 / 5 5 5 / 0 1 8 7").includes("SUBJECT1_PHONE"));
   ok("egress: full-width digits are caught", leak("４０４５５５０１８７").includes("SUBJECT1_PHONE"));
   ok("egress: zero-width characters do not hide a name", leak("Mari​sol Quin‌tero-Vance").includes("SUBJECT1_NAME"));
