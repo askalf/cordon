@@ -14,7 +14,7 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { Detector, RedactSet, Span } from "../types";
-import { egressViolations, withSubjects, type CompiledSubjects } from "../subject";
+import { egressViolations, mediaPartsOf, withSubjects, type CompiledSubjects } from "../subject";
 import { detector as catalog } from "../detect";
 
 /** A media part the request carries that this module cannot read. */
@@ -157,7 +157,7 @@ async function maskOne(img: ImageRef, subjects: CompiledSubjects, sets: RedactSe
   throw new MediaRefusal("an image could not be masked");
 }
 
-// ---- finding the media parts in a body ----
+// ---- reading the media parts of a body ----
 
 const DATA_URL = /^data:([a-z]+\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i;
 const IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"]);
@@ -170,43 +170,33 @@ function fromDataUrl(url: string, set: (v: string) => void): ImageRef | MediaRef
   return { mime, bytes: Buffer.from(m[2], "base64"), replace: (t, b) => set(`data:${t};base64,${b.toString("base64")}`) };
 }
 
-/** Every media part in a body, as an image to mask or the reason it cannot be. */
-export function mediaParts(node: any, out: Array<ImageRef | MediaRefusal> = [], depth = 0): Array<ImageRef | MediaRefusal> {
-  if (!node || typeof node !== "object" || depth > 64) return out;
-  if (Array.isArray(node)) {
-    for (const v of node) mediaParts(v, out, depth + 1);
-    return out;
-  }
+/** One media part (as found by mediaPartsOf), as an image to mask or the reason it cannot be. */
+function mediaPart(node: any): ImageRef | MediaRefusal {
   const t = node.type;
-  if (t === "image" && node.source) {
+  if (t === "image") {
     const s = node.source;
-    if (s.type === "base64" && typeof s.data === "string" && IMAGE_MIME.has(String(s.media_type).toLowerCase()))
-      out.push({ mime: String(s.media_type).toLowerCase(), bytes: Buffer.from(s.data, "base64"), replace: (m, b) => { s.media_type = m; s.data = b.toString("base64"); } });
-    else out.push(new MediaRefusal(`an image given as ${s.type} cannot be read here`));
-    return out;
+    if (s?.type === "base64" && typeof s.data === "string" && IMAGE_MIME.has(String(s.media_type).toLowerCase()))
+      return { mime: String(s.media_type).toLowerCase(), bytes: Buffer.from(s.data, "base64"), replace: (m, b) => { s.media_type = m; s.data = b.toString("base64"); } };
+    return new MediaRefusal(`an image given as ${s?.type} cannot be read here`);
   }
   if (t === "image_url") {
     const holder = node.image_url;
     const url = typeof holder === "string" ? holder : holder?.url;
-    if (typeof url !== "string") out.push(new MediaRefusal("an image part has no URL"));
-    else out.push(fromDataUrl(url, (v) => { if (typeof holder === "string") node.image_url = v; else holder.url = v; }));
-    return out;
+    if (typeof url !== "string") return new MediaRefusal("an image part has no URL");
+    return fromDataUrl(url, (v) => { if (typeof holder === "string") node.image_url = v; else holder.url = v; });
   }
   if (t === "input_image") {
-    if (typeof node.image_url === "string") out.push(fromDataUrl(node.image_url, (v) => { node.image_url = v; }));
-    else out.push(new MediaRefusal("an image given by file id cannot be read here"));
-    return out;
+    if (typeof node.image_url === "string") return fromDataUrl(node.image_url, (v) => { node.image_url = v; });
+    return new MediaRefusal("an image given by file id cannot be read here");
   }
-  if (t === "document" && node.source && node.source.type !== "text" && node.source.type !== "content") {
-    out.push(new MediaRefusal("a document given as a file cannot be read here"));
-    return out;
-  }
-  if (t === "input_file" || t === "file" || t === "input_audio" || t === "audio" || t === "image_generation_call") {
-    out.push(new MediaRefusal(`a ${t} part cannot be read here`));
-    return out;
-  }
-  for (const v of Object.values(node)) mediaParts(v, out, depth + 1);
-  return out;
+  if (t === "document") return new MediaRefusal("a document given as a file cannot be read here");
+  return new MediaRefusal(`a ${t} part cannot be read here`);
+}
+
+/** Every media part in a body, found where the provider schemas carry media (the same parts
+ *  countMedia counts and the egress check skips), so tool data shaped like media is left alone. */
+export function mediaParts(body: any): Array<ImageRef | MediaRefusal> {
+  return [...mediaPartsOf(body)].map(mediaPart);
 }
 
 /**

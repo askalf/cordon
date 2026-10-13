@@ -411,17 +411,17 @@ const isMediaPart = (node: any): boolean =>
   !!node && typeof node === "object" && typeof node.type === "string" &&
   (MEDIA_TYPES.has(node.type) || (node.type === "document" && BINARY_SOURCES.has(node.source?.type)));
 /** The media parts of a body, found only where the provider schemas carry them: a message's
- *  content parts, a tool result's content, a document's content source, a Responses input
- *  item or its output parts. An
+ *  content parts, a tool or MCP tool result's content, a document's content source, a
+ *  Responses input item or its output parts. An
  *  object of the same shape anywhere else (tool_use input, function arguments, metadata) is
- *  ordinary data and is read in full. */
-function mediaPartsOf(body: any): Set<object> {
+ *  ordinary data and is read in full. Counting, the egress check and masking all use this. */
+export function mediaPartsOf(body: any): Set<object> {
   const found = new Set<object>();
   const parts = (list: any) => {
     if (!Array.isArray(list)) return;
     for (const p of list) {
       if (isMediaPart(p)) found.add(p);
-      else if (p?.type === "tool_result" || p?.type === "function_call_output") {
+      else if (p?.type === "tool_result" || p?.type === "mcp_tool_result" || p?.type === "function_call_output") {
         parts(p.content);
         parts(p.output);
       } else if (p?.type === "document" && p.source?.type === "content") parts(p.source.content);

@@ -4,6 +4,7 @@ import { parseSubjectHeader, compileSubjects, withSubjects, subjectSpans, egress
 import { detector } from "./src/detect/index.ts";
 import { applyRedaction } from "./src/redact/apply.ts";
 import { Vault } from "./src/redact/vault.ts";
+import { mediaParts, MediaRefusal } from "./src/media/mask.ts";
 
 let pass = 0, fail = 0;
 const ok = (n, c, e = "") => { c ? pass++ : fail++; console.log(`${c ? "PASS" : "FAIL"}  ${n}${e ? "   (" + e + ")" : ""}`); };
@@ -134,6 +135,11 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("media: a media-shaped tool input is not counted", countMedia(toolImg) === 0);
   const resultImg = { model: "m", messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "TWFyaXNvbCBRdWludGVyby1WYW5jZQ" } }] }] }] };
   ok("media: an image inside a tool result is counted and its data skipped", countMedia(resultImg) === 1 && egressViolations(resultImg, comp).length === 0);
+  const mcpImg = { model: "m", messages: [{ role: "user", content: [{ type: "mcp_tool_result", tool_use_id: "m1", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "TWFyaXNvbCBRdWludGVyby1WYW5jZQ" } }] }] }] };
+  ok("media: an image inside an MCP tool result is counted and its data skipped", countMedia(mcpImg) === 1 && egressViolations(mcpImg, comp).length === 0);
+  ok("mask: an image inside an MCP tool result is found for masking", mediaParts(mcpImg).length === 1 && !(mediaParts(mcpImg)[0] instanceof MediaRefusal));
+  const toolFile = { model: "m", messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "save", input: { type: "file", name: "notes", nested: { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } } } }] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }, ...img.messages[0].content] }] };
+  ok("mask: media-shaped tool input is neither refused nor taken as an image", mediaParts(toolFile).length === 1 && mediaParts(toolFile)[0].mime === "image/png" && countMedia(toolFile) === 1);
   ok("media: an image part is counted", countMedia(img) === 1);
   const doc = { model: "m", messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "Marisol Quintero-Vance" } }] }] };
   ok("media: a text document is not media", countMedia(doc) === 0);

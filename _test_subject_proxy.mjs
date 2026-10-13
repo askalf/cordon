@@ -83,6 +83,12 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   res = await post("/v1/messages", aBody(docImg), { "x-cordon-subject": SUBJECT() });
   ok("media: an image inside a content-source document is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
 
+  // An image inside an MCP tool result is media like any other image part.
+  await reset();
+  const mcpImg = [{ type: "mcp_tool_result", tool_use_id: "mcptoolu_1", content: [{ type: "text", text: "screenshot" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } }] }];
+  res = await post("/v1/messages", aBody(mcpImg), { "x-cordon-subject": SUBJECT() });
+  ok("media: an image inside an MCP tool result is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+
   await reset();
   res = await post("/v1/messages", aBody(img), { "x-cordon-subject": SUBJECT({ media: "allow" }) });
   ok("media: the header alone cannot allow media (the policy must too)", res.status === 422, String(res.status));
@@ -139,6 +145,30 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
       ok("mask: an image inside a content-source document is masked", res.status === 200 && typeof docSent?.source?.data === "string" && docSent.source.data !== shot, String(res.status));
       const docText = docSent ? (await ocr.recognize(Buffer.from(docSent.source.data, "base64"))).data.text : "";
       ok("mask: the document's image the model got shows no identifier", !/Marisol|Quintero|mqvance|555/i.test(docText), docText.replace(/\s+/g, " "));
+
+      // The same image inside an MCP tool result is masked before it goes.
+      await reset();
+      const mcpPart = [{ type: "mcp_tool_result", tool_use_id: "mcptoolu_1", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: shot } }] }];
+      res = await post("/v1/messages", aBody(mcpPart), { "x-cordon-subject": SUBJECT() }, "mask-key");
+      const mcpSent = (await calls()).bodies?.[0]?.body?.messages?.[0]?.content?.[0]?.content?.find?.((b) => b.type === "image");
+      ok("mask: an image inside an MCP tool result is masked", res.status === 200 && typeof mcpSent?.source?.data === "string" && mcpSent.source.data !== shot, String(res.status));
+      const mcpText = mcpSent ? (await ocr.recognize(Buffer.from(mcpSent.source.data, "base64"))).data.text : "";
+      ok("mask: the MCP tool result's image the model got shows no identifier", !/Marisol|Quintero|mqvance|555/i.test(mcpText), mcpText.replace(/\s+/g, " "));
+
+      // Tool input shaped like media is tool data: neither refused as media nor rewritten.
+      await reset();
+      const toolInput = { type: "file", name: "notes", thumb: { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } } };
+      res = await post("/v1/messages", {
+        model: "claude-haiku-4-5",
+        messages: [
+          { role: "user", content: "save my notes" },
+          { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "save", input: toolInput }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "saved" }, ...part] },
+        ],
+      }, { "x-cordon-subject": SUBJECT() }, "mask-key");
+      const toolSent = (await calls()).bodies?.[0]?.body?.messages?.[1]?.content?.[0]?.input;
+      ok("mask: media-shaped tool input is not refused as media", res.status === 200, String(res.status));
+      ok("mask: media-shaped tool input is not rewritten", JSON.stringify(toolSent) === JSON.stringify(toolInput));
       
       await reset();
       const pdf = [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQK" } }];
