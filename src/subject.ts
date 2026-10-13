@@ -60,7 +60,7 @@ interface Matcher {
   /** Digit sequences for the egress check, matched with up to 3 separators between digits. */
   digits: string[];
   /** The digit sequences as regexes, compiled once per request, plus any egress-only
-   *  numeric forms (dates with spaced separators). */
+   *  forms (dates with spaced separators, IDs with any run of separators). */
   digitRes: RegExp[];
 }
 
@@ -206,6 +206,7 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
     patterns.add(`${tok(first)}${S}${tok(last)}`); // first last
     patterns.add(`${tok(last)}\\s*,\\s*${tok(first)}(?:${S}${middle.map(tok).join(S)})?`); // last, first [middle]
     patterns.add(`${esc(first[0])}\\.?${S}${middle.length ? `(?:${middle.map((m) => `${esc(m[0])}\\.?`).join(S)}${S})?` : ""}${tok(last)}`); // M. [L.] Vance
+    patterns.add(`(?<![\\p{L}\\p{N}])${tok(last)}\\s*,\\s*${esc(first[0])}\\.?${middle.length ? `(?:${S}${middle.map((m) => `${esc(m[0])}\\.?`).join(S)})?` : ""}(?![\\p{L}\\p{N}])`); // Vance, M. [L.]
     if (middle.length) patterns.add(`${tok(first)}${S}${middle.map((m) => `${esc(m[0])}\\.?`).join(S)}${S}${tok(last)}`); // Marisol L. Vance
     // Handles and concatenations: marisolvance, marisol.vance, mvance, vancem
     for (const h of [first + last, last + first, first[0] + last, last + first[0]])
@@ -331,6 +332,9 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             const d = value.replace(/[^A-Za-z0-9]/g, "");
             if (d.length < 4) continue;
             patterns = [`(?<![\\p{L}\\p{N}])${d.split("").map(esc).join("[^\\p{L}\\p{N}]{0,8}")}(?![\\p{L}\\p{N}])`];
+            // The egress reading: any run of separators between the characters, word-bounded,
+            // so a short ID spread wider than detection reaches is still caught.
+            egress = [`(?<![\\p{L}\\p{N}])${d.toLowerCase().split("").map(esc).join("[^\\p{L}\\p{N}]*")}(?![\\p{L}\\p{N}])`];
             if (/^\d+$/.test(d) && d.length >= 7) digits = [d];
             else if (d.length >= 6) folded = [alnum(d)];
             break;

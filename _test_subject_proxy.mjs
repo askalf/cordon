@@ -209,6 +209,13 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/messages", aBody("call " + "4045550187".split("").join(" ".repeat(12))), { "x-cordon-subject": SUBJECT() });
   ok("phone: twelve spaces between digits is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  await reset();
+  res = await post("/v1/messages", aBody("acct " + "1234".split("").join(" ".repeat(12))), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ids: ["1234"] }] }) });
+  ok("id: a short ID with twelve spaces between digits is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  await reset();
+  res = await post("/v1/messages", aBody("signed by Grace, W. today"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ names: ["Will Grace"] }] }) });
+  up = await seen();
+  ok("name: surname-first initial of a common-word name never reaches upstream", res.status === 200 && !/Grace, W/.test(up), `${res.status} ${up.slice(0, 300)}`);
 
   // A phone sent as a JSON number in exponent form, in replayed tool arguments: redacted
   // whole, never forwarded in any spelling.

@@ -63,6 +63,13 @@ ok("name: the first subject's tokens say SUBJECT1", /SUBJECT1_NAME/.test(redact(
 }
 ok("name: a lower-case single token is not a name", !hit("he will mark it").length);
 {
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Grace"] }] })), "k");
+  const red = (t) => applyRedaction({ model: "m", messages: [{ role: "user", content: t }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody.messages[0].content;
+  ok("name: surname-first with an initial, for common-word names", !/Grace, W/.test(red("signed by Grace, W. today")), red("signed by Grace, W. today"));
+  ok("egress: surname-first with an initial is caught", egressViolations({ system: "signed by Grace, W. today", messages: [{ role: "user", content: "hi" }] }, c).includes("SUBJECT1_NAME"));
+  ok("name: surname-first initial needs the initial alone", !subjectSpans("Grace, we went", c).length);
+}
+{
   const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will"] }] })), "k");
   const d = withSubjects(detector, c);
   const text = "We will help. Will you check? He is willing.";
@@ -90,6 +97,13 @@ for (const d of ["1986-07-14", "07/14/1986", "7/14/86", "July 14, 1986", "Jul 14
   ok(`date of birth: ${d}`, hit(`born ${d}`).length > 0, d);
 ok("date of birth: another date is not it", !hit("born 1986-07-15 or 7/14/1987").length);
 for (const id of ["123-45-6789", "123 45 6789", "123456789"]) ok(`id: ${id}`, clean(`ssn ${id}`, "6789"));
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["1234", "ab12c"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a short ID spread wider than detection reaches is caught", leak("acct " + "1234".split("").join(" ".repeat(12))).includes("SUBJECT1_ID"));
+  ok("egress: a short alphanumeric ID spread out is caught", leak("A B 1 2 C").includes("SUBJECT1_ID"));
+  ok("egress: a short ID inside a longer number is not a hit", leak("order 912345 and 12340").length === 0);
+}
 ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mari.q"));
 
 // ---- the catalog still runs beside the subjects ----
