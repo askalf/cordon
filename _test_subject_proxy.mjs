@@ -228,6 +228,9 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/messages", aBody("w i l l h e n r y g r a c e"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ names: ["Will Henry Grace"] }] }) });
   ok("name: a spaced-out three-part name is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  await reset();
+  res = await post("/v1/messages", aBody("w . h . g r a c e"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ names: ["Will Henry Grace"] }] }) });
+  ok("name: an initialled name with its surname spread out is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
 
   // A phone sent as a JSON number in exponent form, in replayed tool arguments: redacted
   // whole, never forwarded in any spelling.

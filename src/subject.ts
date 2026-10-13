@@ -221,6 +221,13 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
     folded.add(alnum(first + last));
     // The whole name in order, middle names included: "w i l l h e n r y g r a c e".
     folded.add(alnum(tokens.join("")));
+    // The middle-initial forms detection accepts, read separator-blind: "w . h . g r a c e",
+    // "will h grace", "grace, w. h.".
+    if (middle.length) {
+      const initials = middle.map((m) => m[0]).join("");
+      for (const h of [first[0] + initials + last, first + initials + last, last + first[0] + initials])
+        if (alnum(h).length >= 6) folded.add(alnum(h));
+    }
   }
   // Single tokens alone (word-bounded, capitalised): skipped for short and common words.
   // A one-token name is matched only this way, so "Will" never matches "we will" or "willing".

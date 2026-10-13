@@ -132,6 +132,10 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
     const text = "w i l l h e n r y g r a c e";
     const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
     ok("egress: a spaced-out three-part name that detection leaves is caught", out.messages[0].content === text && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+    const initialled = "w . h . g r a c e";
+    const out2 = applyRedaction({ model: "m", messages: [{ role: "user", content: initialled }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+    ok("egress: an initialled name with its surname spread out that detection leaves is caught", out2.messages[0].content === initialled && egressViolations(out2, c).includes("SUBJECT1_NAME"), out2.messages[0].content);
+    ok("egress: a spread first name with a middle initial is caught", egressViolations({ messages: [{ role: "user", content: "w i l l h g r a c e" }] }, c).includes("SUBJECT1_NAME"));
   }
   ok("egress: a phone with odd separators is caught", leak("4 0 4 / 5 5 5 / 0 1 8 7").includes("SUBJECT1_PHONE"));
   ok("egress: full-width digits are caught", leak("４０４５５５０１８７").includes("SUBJECT1_PHONE"));
