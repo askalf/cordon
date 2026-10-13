@@ -156,6 +156,10 @@ const digitPattern = (d: string) => d.split("").join("[^\\p{L}\\p{N}]{0,8}");
 /** The egress reading: any run of separators between the digits, but never a letter or
  *  another digit, so "4    0    4 ..." is caught and two numbers split by a word are not joined. */
 const egressDigitPattern = (d: string) => d.split("").join("[^\\p{L}\\p{N}]*");
+/** The egress reading of a short literal (handles, other): its letters and digits with any run
+ *  of separators between them, word-bounded, so "a b c d" is caught and "abcdef" is not. */
+const egressSpread = (s: string) =>
+  alnum(s).length >= 4 ? [`(?<![\\p{L}\\p{N}])${[...alnum(s)].map(esc).join("[^\\p{L}\\p{N}]*")}(?![\\p{L}\\p{N}])`] : [];
 
 // Common words that are also given names or surnames. Alone and capitalised they still
 // read as words often enough ("Will you", "Hope Street") that redacting them would corrupt
@@ -354,12 +358,14 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             const h = value.replace(/^@/, "");
             if (h.length < 4) continue;
             patterns = [`@?${loose(h)}`];
+            egress = egressSpread(h);
             if (alnum(h).length >= 6) folded = [alnum(h)];
             break;
           }
           default: {
             if (value.length < 4) continue;
             patterns = [loose(value)];
+            egress = egressSpread(value);
             if (alnum(value).length >= 6) folded = [alnum(value)];
           }
         }
@@ -546,7 +552,7 @@ export function egressViolations(deidBody: any, compiled: CompiledSubjects): str
         found.add(m.type);
         continue;
       }
-      if (m.digitRes.some((re) => re.test(folded))) found.add(m.type);
+      if (m.digitRes.some((re) => re.test(folded) || re.test(plain))) found.add(m.type);
     }
   }
   return [...found];

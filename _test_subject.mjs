@@ -105,6 +105,14 @@ for (const id of ["123-45-6789", "123 45 6789", "123456789"]) ok(`id: ${id}`, cl
   ok("egress: a short ID inside a longer number is not a hit", leak("order 912345 and 12340").length === 0);
 }
 ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mari.q"));
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ handles: ["@abcd"], other: ["zq9x7"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a short handle spread out is caught", leak("profile: a b c d").includes("SUBJECT1_HANDLE"));
+  ok("egress: a short handle spread wide is caught", leak("@ A - B - C       D").includes("SUBJECT1_HANDLE"));
+  ok("egress: a short other literal spread out is caught", leak("code Z Q 9 X 7").includes("SUBJECT1_OTHER"));
+  ok("egress: other letters spread between a short handle's or literal's are not a hit", leak("a b x c d and z q 9 x 8 7 and abxcd").length === 0);
+}
 
 // ---- the catalog still runs beside the subjects ----
 {
