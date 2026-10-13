@@ -149,8 +149,11 @@ const loose = (s: string) =>
     .filter(Boolean)
     .map(esc)
     .join("[\\s.,'’\\-_]*");
-/** Digits with up to 3 separator characters between each (phones, IDs, dates written as numbers). */
-const digitPattern = (d: string) => d.split("").join("[^\\p{L}\\p{N}]{0,3}");
+/** Digits with up to 8 separator characters between each (phones, IDs), for detection. */
+const digitPattern = (d: string) => d.split("").join("[^\\p{L}\\p{N}]{0,8}");
+/** The egress reading: any run of separators between the digits, but never a letter or
+ *  another digit, so "4    0    4 ..." is caught and two numbers split by a word are not joined. */
+const egressDigitPattern = (d: string) => d.split("").join("[^\\p{L}\\p{N}]*");
 
 // Common words that are also given names or surnames. Alone and capitalised they still
 // read as words often enough ("Will you", "Hope Street") that redacting them would corrupt
@@ -310,7 +313,7 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
           case "ID": {
             const d = value.replace(/[^A-Za-z0-9]/g, "");
             if (d.length < 4) continue;
-            patterns = [`(?<![\\p{L}\\p{N}])${d.split("").map(esc).join("[^\\p{L}\\p{N}]{0,3}")}(?![\\p{L}\\p{N}])`];
+            patterns = [`(?<![\\p{L}\\p{N}])${d.split("").map(esc).join("[^\\p{L}\\p{N}]{0,8}")}(?![\\p{L}\\p{N}])`];
             if (/^\d+$/.test(d) && d.length >= 7) digits = [d];
             else if (d.length >= 6) folded = [alnum(d)];
             break;
@@ -341,7 +344,7 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
         // matches at a position, so "mqvance77" would win over "mqvance77@example.com". Every
         // form's spans are collected and withSubjects keeps the longest of any overlap.
         const res = [...patterns.map((p) => new RegExp(p, "giud")), ...exact.map((p) => new RegExp(p, "gud"))];
-        const digitRes = digits.map((d) => new RegExp(`(?<!\\d)${digitPattern(d)}(?!\\d)`, "u"));
+        const digitRes = digits.map((d) => new RegExp(`(?<!\\d)${egressDigitPattern(d)}(?!\\d)`, "u"));
         matchers.push({ type: `SUBJECT${n}_${kind}`, res, folded, digits, digitRes });
       }
     }
@@ -395,9 +398,11 @@ const MEDIA_PAYLOAD_KEYS = new Set(["data", "file_data", "result", "image_url", 
 const isMediaPart = (node: any): boolean =>
   !!node && typeof node === "object" && typeof node.type === "string" &&
   (MEDIA_TYPES.has(node.type) || (node.type === "document" && BINARY_SOURCES.has(node.source?.type)));
-/** A payload string the egress check does not read: base64 data or a data: URL. */
-const isPayload = (key: string, v: string, node: any) =>
-  MEDIA_PAYLOAD_KEYS.has(key) && (v.startsWith("data:") || node?.type === "base64" || key === "file_data" || key === "result" || (key === "data" && isMediaPart(node)));
+/** A payload string the egress check does not read: inside a media part only, base64 data
+ *  or a data: URL under one of the payload keys. The same key anywhere else (a metadata
+ *  "result", a "data" field) is ordinary text and is read. */
+const isPayload = (key: string, v: string) =>
+  MEDIA_PAYLOAD_KEYS.has(key) && (v.startsWith("data:") || key === "data" || key === "file_data" || key === "result");
 
 /** Count media parts (image, file, audio) anywhere in a request body. */
 export function countMedia(body: any, depth = 0): number {
@@ -408,8 +413,9 @@ export function countMedia(body: any, depth = 0): number {
   return n;
 }
 
-/** Every string leaf and object key, with media payloads skipped (they are counted, not read). */
-function leaves(node: any, out: string[], depth = 0): void {
+/** Every string leaf and object key, with media payloads skipped (they are counted, not read).
+ *  `inMedia` is true below a recognised media part, the only place a payload is skipped. */
+function leaves(node: any, out: string[], depth = 0, inMedia = false): void {
   if (depth > 64) throw new Error("body nested deeper than 64 levels; refusing to forward unread fields");
   if (typeof node === "string") {
     out.push(node);
@@ -420,14 +426,15 @@ function leaves(node: any, out: string[], depth = 0): void {
     return;
   }
   if (!node || typeof node !== "object") return;
+  const media = inMedia || isMediaPart(node);
   if (Array.isArray(node)) {
-    for (const v of node) leaves(v, out, depth + 1);
+    for (const v of node) leaves(v, out, depth + 1, media);
     return;
   }
   for (const [k, v] of Object.entries(node)) {
     out.push(k);
-    if (typeof v === "string" && isPayload(k, v, node)) continue; // base64 or a data: URL
-    leaves(v, out, depth + 1);
+    if (media && typeof v === "string" && isPayload(k, v)) continue; // base64 or a data: URL
+    leaves(v, out, depth + 1, media);
   }
 }
 

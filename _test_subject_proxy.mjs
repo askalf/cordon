@@ -135,6 +135,20 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   ok("egress: the stub was not called", (await calls()).total === 0);
   ok("egress: the refusal names the kind, not the value", /SUBJECT1_NAME/.test(refusal.detail ?? "") && !/Marisol/.test(JSON.stringify(refusal)), JSON.stringify(refusal));
 
+  // A payload-looking key outside any media part is ordinary text: read, and refused here
+  // because Responses metadata is not redacted.
+  await reset();
+  res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { result: "Marisol Quintero-Vance", data: "data:x" } }, { "x-cordon-subject": SUBJECT() });
+  ok("egress: a declared name in metadata.result is refused, not skipped", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // Digits spread wider than detection reaches are still caught on the way out.
+  await reset();
+  res = await post("/v1/messages", aBody("call 4    0    4    5    5    5    0    1    8    7"), { "x-cordon-subject": SUBJECT() });
+  up = await seen();
+  ok("phone: four spaces between digits is redacted", res.status === 200 && !/4\s+0\s+4\s+5/.test(up), String(res.status));
+  await reset();
+  res = await post("/v1/messages", aBody("call " + "4045550187".split("").join(" ".repeat(12))), { "x-cordon-subject": SUBJECT() });
+  ok("phone: twelve spaces between digits is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+
   await setTenant({ tenant: keyTenant("off-key"), mode: "off" });
   await reset();
   res = await post("/v1/messages", aBody(TEXT), { "x-cordon-subject": SUBJECT() }, "off-key");
