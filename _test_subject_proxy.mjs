@@ -149,6 +149,24 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   res = await post("/v1/messages", aBody("call " + "4045550187".split("").join(" ".repeat(12))), { "x-cordon-subject": SUBJECT() });
   ok("phone: twelve spaces between digits is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
 
+  // A phone sent as a JSON number in exponent form, in replayed tool arguments: redacted
+  // whole, never forwarded in any spelling.
+  await reset();
+  res = await post("/v1/chat/completions", {
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "user", content: "look this up" },
+      { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "lookup", arguments: '{"phone":4.045550187e9}' } }] },
+      { role: "tool", tool_call_id: "c1", content: "no match" },
+    ],
+  }, { "x-cordon-subject": SUBJECT() });
+  up = await seen();
+  ok("numeric: an exponent-form subject phone never reaches upstream", res.status === 200 && !/4\.045550187e9|4045550187/.test(up), `${res.status} ${up.match(/arguments[^}]*\}/)?.[0]}`);
+  // An abbreviated, spaced-out address in a system prompt this tenant leaves unredacted.
+  await reset();
+  res = await post("/v1/messages", aBody("hello", { system: "Client lives at 1428 E l m S t." }), { "x-cordon-subject": SUBJECT() }, "sys-key");
+  ok("egress: a spaced-out abbreviated address is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+
   await setTenant({ tenant: keyTenant("off-key"), mode: "off" });
   await reset();
   res = await post("/v1/messages", aBody(TEXT), { "x-cordon-subject": SUBJECT() }, "off-key");

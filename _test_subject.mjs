@@ -98,6 +98,15 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: digits split by a word are not joined", leak("room 404 and then 5550187 later").length === 0);
   ok("egress: a payload key outside media is read", egressViolations({ input: "x", metadata: { result: "Marisol Quintero-Vance" } }, comp).includes("SUBJECT1_NAME"));
   ok("egress: a data: string outside media is read", egressViolations({ input: "x", metadata: { url: "data:text/plain,Marisol Quintero-Vance" } }, comp).includes("SUBJECT1_NAME"));
+  ok("egress: a spaced-out address in its abbreviated spelling is caught", leak("1428 E l m S t").includes("SUBJECT1_ADDRESS") && leak("1 4 2 8 . E L M . S T R E E T").includes("SUBJECT1_ADDRESS"));
+  ok("egress: a phone in exponent notation inside tool arguments is caught", egressViolations({ messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9}' } }] }] }, comp).includes("SUBJECT1_PHONE"));
+  ok("egress: a phone written with a decimal point is caught", leak('{"phone":4045550187.0}').includes("SUBJECT1_PHONE"));
+  {
+    const body = { model: "m", messages: [{ role: "user", content: "x" }, { role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9,"n":3}' } }] }] };
+    const { deidBody } = applyRedaction(body, "openai", new Vault("reversible"), ["pii"], det, true, "chat");
+    const args = deidBody.messages[1].tool_calls[0].function.arguments;
+    ok("numeric: a subject phone sent as a JSON number is redacted whole", /SUBJECT1_PHONE/.test(args) && !/4\.045550187e9/.test(args) && egressViolations(deidBody, comp).length === 0, args);
+  }
   ok("egress: placeholder text is not a hit", leak("<SUBJECT1_NAME_ABC123_1> at <SUBJECT1_ADDRESS_ABC123_1>").length === 0);
   ok("egress: unrelated digits are not a hit", leak("order 4045 shipped 5550 units, 187 left").length === 0);
   const img = { model: "m", messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "TWFyaXNvbCBRdWludGVyby1WYW5jZQ4045550187" } }] }] };
@@ -124,6 +133,12 @@ ok("name: a hyphenated surname run together", clean("Marisol QuinteroVance", "Qu
   ok("name: a curly apostrophe", !/Brien/.test(red("Mr. García-O’Brien")), red("Mr. García-O’Brien"));
   ok("name: the apostrophe left out", !/Brien/.test(red("Jose Garcia-OBrien")), red("Jose Garcia-OBrien"));
   ok("egress: an unaccented leak is caught", egressViolations({ messages: [{ role: "user", content: "jose garcia obrien" }] }, c).includes("SUBJECT1_NAME"));
+}
+
+// ---- matchers are reused within a request: a passing egress test must not move detection ----
+{
+  egressViolations({ messages: [{ role: "user", content: "call 404-555-0187 at Marisol Quintero-Vance" }] }, comp);
+  ok("reuse: detection after an egress hit still finds a match at the start of the text", hit("4045550187 is the number").length > 0 && hit("Marisol Quintero-Vance").length > 0);
 }
 
 // ---- the ref digest ----

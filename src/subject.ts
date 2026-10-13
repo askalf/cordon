@@ -22,6 +22,7 @@
 
 import { createHash } from "node:crypto";
 import type { Detector, RedactSet, Span } from "./types";
+import { exactDecimal } from "./redact/apply";
 
 /** Most bytes the header may carry, before base64url decoding. */
 export const MAX_SUBJECT_HEADER = 12 * 1024;
@@ -231,7 +232,14 @@ function addressForms(addr: string): { patterns: string[]; folded: string[] } {
   });
   const patterns = [parts.join("[\\s,]+"), loose(addr)];
   // Unit numbers: "1428 Elm St Apt 4", "1428 Elm St #4" are covered by the street line.
-  return { patterns, folded: [alnum(street)] };
+  // The egress reading ignores separators, so each spelling the patterns accept ("Street",
+  // "St"; "North", "N") is its own needle: "1428 E l m S t" flattens to 1428elmst.
+  let spellings = [""];
+  for (const w of words) {
+    const forms = variantsOf(STREET_SUFFIX, w) ?? variantsOf(DIRECTION, w) ?? [w.replace(/\.$/, "")];
+    spellings = spellings.flatMap((s) => forms.map((f) => s + f)).slice(0, 64);
+  }
+  return { patterns, folded: [...new Set([alnum(street), ...spellings.map(alnum)])] };
 }
 
 function dateForms(date: string): { patterns: string[]; digits: string[] } {
@@ -358,12 +366,15 @@ const SUBJECT_SETS: RedactSet[] = ["pii"];
 export function subjectSpans(text: string, compiled: CompiledSubjects): Span[] {
   const out: Span[] = [];
   for (const m of compiled.matchers)
-    for (const re of m.res)
+    for (const re of m.res) {
+      // matchAll starts at the regex's lastIndex, which the egress check's test() moves: reset it.
+      re.lastIndex = 0;
       for (const hit of text.matchAll(re)) {
         const start = hit.index ?? 0;
         const end = start + hit[0].length;
         if (end > start) out.push({ start, end, type: m.type, value: text.slice(start, end), sets: SUBJECT_SETS });
       }
+    }
   return out;
 }
 
@@ -413,12 +424,20 @@ export function countMedia(body: any, depth = 0): number {
   return n;
 }
 
+const NUMBER_LITERAL = /-?\d+(?:\.\d+)?[eE][+-]?\d+|-?\d+\.\d+/g;
+
 /** Every string leaf and object key, with media payloads skipped (they are counted, not read).
  *  `inMedia` is true below a recognised media part, the only place a payload is skipped. */
 function leaves(node: any, out: string[], depth = 0, inMedia = false): void {
   if (depth > 64) throw new Error("body nested deeper than 64 levels; refusing to forward unread fields");
   if (typeof node === "string") {
     out.push(node);
+    // Tool arguments arrive as JSON text: a number written 4.045550187e9 or 4045550187.0 is
+    // read again at its exact decimal value, the spelling the identifiers are matched in.
+    for (const m of node.matchAll(NUMBER_LITERAL)) {
+      const exact = exactDecimal(m[0]);
+      if (exact !== m[0]) out.push(exact);
+    }
     return;
   }
   if (typeof node === "number" || typeof node === "bigint") {
@@ -455,7 +474,7 @@ export function egressViolations(deidBody: any, compiled: CompiledSubjects): str
     const flat = plain.replace(/[^\p{L}\p{N}]+/gu, "");
     for (const m of compiled.matchers) {
       if (found.has(m.type)) continue;
-      if (m.res.some((re) => [raw, folded, plain].some((t) => { re.lastIndex = 0; return re.test(t); }))) {
+      if (m.res.some((re) => [raw, folded, plain].some((t) => { re.lastIndex = 0; const hit = re.test(t); re.lastIndex = 0; return hit; }))) {
         found.add(m.type);
         continue;
       }

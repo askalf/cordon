@@ -463,7 +463,7 @@ export function applyRedaction(
       // financial identifier. The format-only patterns (PHONE, SSN, DATE) would
       // false-positive on benign numeric ids / quantities / timestamps, so they
       // are not applied to numeric leaves.
-      spans = spans.filter((s) => NUMERIC_PII.has(s.type) && s.start === 0 && s.end === text.length);
+      spans = spans.filter((s) => (NUMERIC_PII.has(s.type) || isSubjectType(s.type)) && s.start === 0 && s.end === text.length);
     if (!spans.length) continue;
     sl.set(replaceSpans(text, spans, vault));
     if (sl.doc !== undefined) vault.documents.set(sl.doc, { source: text, map: documentMap(text, spans, vault) });
@@ -477,6 +477,9 @@ export function applyRedaction(
 // Entity types safe to redact from a bare numeric leaf — each has a checksum
 // validator, so a whole-value match is high-confidence rather than format noise.
 const NUMERIC_PII = new Set(["CREDIT_CARD", "IBAN", "US_ROUTING"]);
+// A declared subject identifier (subject.ts) is exact, not a format guess, so a numeric leaf
+// that is wholly one (a phone sent as a JSON number) is redacted like a checksum match.
+const isSubjectType = (t: string) => /^SUBJECT\d+_/.test(t);
 
 /** Tally spans into { TYPE: count } for the audit record and X-Redacted-Types header. */
 export function tally(spans: Span[]): Record<string, number> {
