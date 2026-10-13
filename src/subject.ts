@@ -411,7 +411,8 @@ const isMediaPart = (node: any): boolean =>
   !!node && typeof node === "object" && typeof node.type === "string" &&
   (MEDIA_TYPES.has(node.type) || (node.type === "document" && BINARY_SOURCES.has(node.source?.type)));
 /** The media parts of a body, found only where the provider schemas carry them: a message's
- *  content parts, a tool result's content, a Responses input item or its output parts. An
+ *  content parts, a tool result's content, a document's content source, a Responses input
+ *  item or its output parts. An
  *  object of the same shape anywhere else (tool_use input, function arguments, metadata) is
  *  ordinary data and is read in full. */
 function mediaPartsOf(body: any): Set<object> {
@@ -423,7 +424,7 @@ function mediaPartsOf(body: any): Set<object> {
       else if (p?.type === "tool_result" || p?.type === "function_call_output") {
         parts(p.content);
         parts(p.output);
-      }
+      } else if (p?.type === "document" && p.source?.type === "content") parts(p.source.content);
     }
   };
   if (!body || typeof body !== "object") return found;
@@ -466,7 +467,11 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
     return;
   }
   if (typeof node === "number" || typeof node === "bigint") {
-    out.push(String(node));
+    // A JSON number such as 1e21 prints as "1e+21": it is read at its exact decimal value too.
+    const written = String(node);
+    out.push(written);
+    const exact = exactDecimal(written);
+    if (exact !== written) out.push(exact);
     return;
   }
   if (!node || typeof node !== "object") return;

@@ -116,6 +116,10 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: a phone in exponent notation inside tool arguments is caught", egressViolations({ messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9}' } }] }] }, comp).includes("SUBJECT1_PHONE"));
   ok("egress: a phone written with a decimal point is caught", leak('{"phone":4045550187.0}').includes("SUBJECT1_PHONE"));
   {
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["1000000000000000000000"] }] })), "k");
+    ok("egress: an ID sent as a numeric leaf in exponent form is caught", egressViolations({ input: "x", metadata: { account: 1e21 } }, c).includes("SUBJECT1_ID"));
+  }
+  {
     const body = { model: "m", messages: [{ role: "user", content: "x" }, { role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9,"n":3}' } }] }] };
     const { deidBody } = applyRedaction(body, "openai", new Vault("reversible"), ["pii"], det, true, "chat");
     const args = deidBody.messages[1].tool_calls[0].function.arguments;
@@ -134,6 +138,8 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   const doc = { model: "m", messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "Marisol Quintero-Vance" } }] }] };
   ok("media: a text document is not media", countMedia(doc) === 0);
   ok("egress: a text document is read", egressViolations(doc, comp).includes("SUBJECT1_NAME"));
+  const contentDoc = { model: "m", messages: [{ role: "user", content: [{ type: "document", source: { type: "content", content: [{ type: "text", text: "see image" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "TWFyaXNvbCBRdWludGVyby1WYW5jZQ" } }] } }] }] };
+  ok("media: an image inside a content-source document is counted and its data skipped", countMedia(contentDoc) === 1 && egressViolations(contentDoc, comp).length === 0);
   const oai = { model: "m", messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }] };
   ok("media: an OpenAI image part is counted", countMedia(oai) === 1 && egressViolations(oai, comp).length === 0);
   const resp = { model: "m", input: [{ role: "user", content: [{ type: "input_image", image_url: "https://img.example/marisol-quintero-vance.png" }] }] };

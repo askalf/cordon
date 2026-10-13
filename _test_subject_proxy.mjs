@@ -77,6 +77,12 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   ok("media: the stub was not called", (await calls()).total === 0);
   ok("media: the refusal names the stage", /at media/.test((await res.json().catch(() => ({}))).error ?? ""));
 
+  // An image inside a document's content source is media like any other image part.
+  await reset();
+  const docImg = [{ type: "document", source: { type: "content", content: [{ type: "text", text: "attached" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } }] } }];
+  res = await post("/v1/messages", aBody(docImg), { "x-cordon-subject": SUBJECT() });
+  ok("media: an image inside a content-source document is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+
   await reset();
   res = await post("/v1/messages", aBody(img), { "x-cordon-subject": SUBJECT({ media: "allow" }) });
   ok("media: the header alone cannot allow media (the policy must too)", res.status === 422, String(res.status));
@@ -124,6 +130,15 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
       const seenText = sentImg ? (await ocr.recognize(Buffer.from(sentImg.source.data, "base64"))).data.text : "";
       ok("mask: the image the model got shows no identifier", !/Marisol|Quintero|mqvance|555/i.test(seenText), seenText.replace(/\s+/g, " "));
       ok("mask: the rest of the image is still readable", /Atlanta/.test(seenText), seenText.replace(/\s+/g, " "));
+
+      // The same image inside a document's content source is masked before it goes.
+      await reset();
+      const docPart = [{ type: "document", source: { type: "content", content: [{ type: "text", text: "what does this show?" }, { type: "image", source: { type: "base64", media_type: "image/png", data: shot } }] } }];
+      res = await post("/v1/messages", aBody(docPart), { "x-cordon-subject": SUBJECT() }, "mask-key");
+      const docSent = (await calls()).bodies?.[0]?.body?.messages?.[0]?.content?.[0]?.source?.content?.find?.((b) => b.type === "image");
+      ok("mask: an image inside a content-source document is masked", res.status === 200 && typeof docSent?.source?.data === "string" && docSent.source.data !== shot, String(res.status));
+      const docText = docSent ? (await ocr.recognize(Buffer.from(docSent.source.data, "base64"))).data.text : "";
+      ok("mask: the document's image the model got shows no identifier", !/Marisol|Quintero|mqvance|555/i.test(docText), docText.replace(/\s+/g, " "));
       
       await reset();
       const pdf = [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQK" } }];
@@ -152,6 +167,10 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { result: "Marisol Quintero-Vance", data: "data:x" } }, { "x-cordon-subject": SUBJECT() });
   ok("egress: a declared name in metadata.result is refused, not skipped", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // A declared ID sent as a JSON number in exponent form, in a field redaction leaves alone.
+  await reset();
+  res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { account: 1e21 } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ids: ["1000000000000000000000"] }] }) });
+  ok("egress: an exponent-form numeric ID in metadata is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
   // Digits spread wider than detection reaches are still caught on the way out.
   await reset();
   res = await post("/v1/messages", aBody("call 4    0    4    5    5    5    0    1    8    7"), { "x-cordon-subject": SUBJECT() });
