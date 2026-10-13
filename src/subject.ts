@@ -12,8 +12,9 @@
 //      string leaf, object keys included, is searched for every identifier under a looser
 //      reading (NFKC, zero-width characters dropped, case folded, separators ignored). One
 //      hit refuses the request, upstream never called;
-//   3. refuses media parts unless the policy allows them, because pixels and file bytes
-//      are not text and cannot be checked here.
+//   3. handles media by the stricter of the policy and the header: refuse it (block, the
+//      default), mask the identifiers in each image and read it again before it goes
+//      (mask, media/mask.ts), or forward it unread (allow).
 //
 // The header is read once, held in this request's memory, never forwarded (providers
 // forward an allowlist of auth headers), never written to the audit log or metrics. Only
@@ -44,8 +45,8 @@ export interface SubjectSpec {
   /** Opaque caller reference (a case id). Never PII; stored only as a digest. */
   ref?: string;
   subjects: SubjectInput[];
-  /** What to do with image and file parts: refuse the request (default) or forward unread. */
-  media: "block" | "allow";
+  /** What the caller asks for media: block, mask or allow. Unset leaves it to the policy. */
+  media?: MediaMode;
 }
 
 /** One compiled identifier: a matcher for detection and needles for the egress check. */
@@ -64,7 +65,7 @@ interface Matcher {
 export interface CompiledSubjects {
   ref?: string;
   refDigest?: string;
-  media: "block" | "allow";
+  media?: MediaMode;
   matchers: Matcher[];
 }
 
@@ -80,6 +81,16 @@ const LISTS: Array<[keyof SubjectInput, string]> = [
 ];
 
 export class SubjectError extends Error {}
+
+/** How a known-subject request's media is handled, strictest first. */
+export type MediaMode = "block" | "mask" | "allow";
+export const MEDIA_MODES: MediaMode[] = ["block", "mask", "allow"];
+/** The stricter of the policy's mode and the caller's (a header may tighten, never loosen). */
+export const strictestMedia = (policy: MediaMode | undefined, asked: MediaMode | undefined): MediaMode => {
+  const p = MEDIA_MODES.indexOf(policy ?? "block");
+  const a = asked === undefined ? p : MEDIA_MODES.indexOf(asked);
+  return MEDIA_MODES[Math.min(p, a)];
+};
 
 /** Decode and validate X-Cordon-Subject (base64url JSON). Throws SubjectError on any defect. */
 export function parseSubjectHeader(raw: string | undefined): SubjectSpec | undefined {
@@ -109,8 +120,8 @@ export function parseSubjectHeader(raw: string | undefined): SubjectSpec | undef
     return clean;
   });
   if (obj.ref !== undefined && (typeof obj.ref !== "string" || obj.ref.length > 128)) throw new SubjectError("ref must be a string of up to 128 characters");
-  if (obj.media !== undefined && obj.media !== "block" && obj.media !== "allow") throw new SubjectError('media must be "block" or "allow"');
-  return { ref: obj.ref, subjects: out, media: obj.media ?? "block" };
+  if (obj.media !== undefined && !MEDIA_MODES.includes(obj.media)) throw new SubjectError('media must be "block", "mask" or "allow"');
+  return { ref: obj.ref, subjects: out, media: obj.media };
 }
 
 /** Opaque, stable digest of a caller ref for the audit log (the ref itself is never stored). */

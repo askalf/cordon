@@ -1,6 +1,6 @@
 // Unit checks for known subjects (src/subject.ts). Run with: node --import tsx _test_subject.mjs
 // Every person, address and number here is invented.
-import { parseSubjectHeader, compileSubjects, withSubjects, subjectSpans, egressViolations, countMedia, refDigest, SubjectError } from "./src/subject.ts";
+import { parseSubjectHeader, compileSubjects, withSubjects, subjectSpans, egressViolations, countMedia, refDigest, SubjectError, strictestMedia } from "./src/subject.ts";
 import { detector } from "./src/detect/index.ts";
 import { applyRedaction } from "./src/redact/apply.ts";
 import { Vault } from "./src/redact/vault.ts";
@@ -31,7 +31,7 @@ const redact = (text) => {
 const clean = (text, raw) => !redact(text).includes(raw);
 
 // ---- the header ----
-ok("header: a valid list parses, media defaults to block", spec.subjects.length === 2 && spec.media === "block" && spec.ref === "case-1");
+ok("header: a valid list parses; media is left to the policy when unset", spec.subjects.length === 2 && spec.media === undefined && spec.ref === "case-1");
 ok("header: absent is undefined", parseSubjectHeader(undefined) === undefined && parseSubjectHeader("") === undefined);
 ok("header: not base64url is refused", throwsSubject("not base64!"));
 ok("header: not JSON is refused", throwsSubject(Buffer.from("{nope").toString("base64url")));
@@ -41,6 +41,7 @@ ok("header: a non-string value is refused", throwsSubject(enc({ subjects: [{ nam
 ok("header: more than 8 subjects is refused", throwsSubject(enc({ subjects: Array(9).fill({ names: ["A Person"] }) })));
 ok("header: over the size cap is refused", throwsSubject("A".repeat(13 * 1024)));
 ok("header: a bad media value is refused", throwsSubject(enc({ subjects: [{ names: ["A B"] }], media: "maybe" })));
+ok("media: the stricter of policy and header wins", strictestMedia("allow", "mask") === "mask" && strictestMedia("mask", "allow") === "mask" && strictestMedia(undefined, "allow") === "block" && strictestMedia("mask", undefined) === "mask");
 
 // ---- names ----
 ok("name: as given", clean("Marisol Quintero-Vance called", "Marisol"));

@@ -85,6 +85,46 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   res = await post("/v1/messages", aBody(img), { "x-cordon-subject": SUBJECT({ media: "allow" }) }, "media-key");
   ok("media: policy and header together allow it", res.status === 200, String(res.status));
 
+  // ---- mask mode: identifiers painted over in the image, which is read again before it goes ----
+  {
+    const sharp = (await import("sharp")).default;
+    const { createWorker } = await import("tesseract.js");
+    const { createRequire } = await import("node:module");
+    const { dirname, join } = await import("node:path");
+    const require = createRequire(import.meta.url);
+    const langPath = join(dirname(require.resolve("@tesseract.js-data/eng/package.json")), "4.0.0_best_int");
+    const shotLines = ["Case notes", "Name: Marisol Quintero-Vance", "Email: mqvance77@example.com", "Phone: 404-555-0187", "Last login from Atlanta"];
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300"><rect width="100%" height="100%" fill="#fff"/>${shotLines.map((l, i) => `<text x="30" y="${50 + i * 48}" font-family="Arial, DejaVu Sans, sans-serif" font-size="28" fill="#111">${l}</text>`).join("")}</svg>`;
+    const shot = (await sharp(Buffer.from(svg)).png().toBuffer()).toString("base64");
+    const ocr = await createWorker("eng", 1, { langPath, gzip: true, cacheMethod: "none", logger: () => {} });
+    const readable = (await ocr.recognize(Buffer.from(shot, "base64"))).data.text;
+    if (!/Quintero/.test(readable)) {
+      console.log("SKIP  mask: this machine renders no readable text into the fixture (no fonts)");
+    } else {
+      await setTenant({ tenant: keyTenant("mask-key"), subjectMedia: "mask" });
+      await reset();
+      const part = [{ type: "text", text: "what does this show?" }, { type: "image", source: { type: "base64", media_type: "image/png", data: shot } }];
+      res = await post("/v1/messages", aBody(part), { "x-cordon-subject": SUBJECT() }, "mask-key");
+      const c = await calls();
+      const sentImg = c.bodies?.[0]?.body?.messages?.[0]?.content?.find?.((b) => b.type === "image");
+      ok("mask: 200", res.status === 200, String(res.status));
+      ok("mask: an image went upstream", typeof sentImg?.source?.data === "string" && sentImg.source.data !== shot);
+      const seenText = sentImg ? (await ocr.recognize(Buffer.from(sentImg.source.data, "base64"))).data.text : "";
+      ok("mask: the image the model got shows no identifier", !/Marisol|Quintero|mqvance|555/i.test(seenText), seenText.replace(/\s+/g, " "));
+      ok("mask: the rest of the image is still readable", /Atlanta/.test(seenText), seenText.replace(/\s+/g, " "));
+      
+      await reset();
+      const pdf = [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQK" } }];
+      res = await post("/v1/messages", aBody(pdf), { "x-cordon-subject": SUBJECT() }, "mask-key");
+      ok("mask: a PDF cannot be read here and is refused", res.status === 422 && (await calls()).total === 0, String(res.status));
+      res = await post("/v1/messages", aBody([{ type: "image", source: { type: "url", url: "https://img.example/x.png" } }]), { "x-cordon-subject": SUBJECT() }, "mask-key");
+      ok("mask: an image by URL is refused", res.status === 422, String(res.status));
+      res = await post("/v1/messages", aBody(part), { "x-cordon-subject": SUBJECT({ media: "block" }) }, "mask-key");
+      ok("mask: the header can tighten mask to block", res.status === 422, String(res.status));
+    }
+    await ocr.terminate();
+  }
+
   // The system prompt is not redacted for this tenant, so the name there survives redaction:
   // the egress check must catch it and refuse.
   await setTenant({ tenant: keyTenant("sys-key"), redactSystem: false });

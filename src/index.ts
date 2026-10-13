@@ -109,7 +109,7 @@ app.post("/admin/tenant", async (req, reply) => {
   if (typeof b.allowHeaderOverride === "boolean") patch.allowHeaderOverride = b.allowHeaderOverride;
   if (typeof b.reportOnly === "boolean") patch.reportOnly = b.reportOnly;
   if (typeof b.requireSubject === "boolean") patch.requireSubject = b.requireSubject;
-  if (b.subjectMedia === "block" || b.subjectMedia === "allow") patch.subjectMedia = b.subjectMedia;
+  if (b.subjectMedia === "block" || b.subjectMedia === "mask" || b.subjectMedia === "allow") patch.subjectMedia = b.subjectMedia;
   return setPolicy(b.tenant, patch);
 });
 

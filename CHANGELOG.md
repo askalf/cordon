@@ -17,6 +17,7 @@ image and creates the GitHub release from this file.
 
 - Known subjects (`X-Cordon-Subject`): a caller names the people a request is about, and their names, emails, phones, addresses, dates of birth, IDs and handles are matched in the forms people write them and replaced with `<SUBJECT<n>_<KIND>_…>` placeholders ahead of the pattern catalog. An egress check then reads the de-identified body again, separator-blind and Unicode-normalised, and refuses the request (422) if any identifier is still there. Media in a subject request is refused unless both the policy and the header allow it. The audit records a digest of the caller's ref and the egress verdict, `X-Cordon-Receipt` returns the record's hash, and `GET /admin/receipts?ref=` serves a ref's records after verifying the chain.
 - Tenant policy `requireSubject`, `subjectMedia` and `reportOnly` (forward unchanged and record what would have happened, for measuring a caller before enforcing).
+- Image masking for subject requests (`subjectMedia: "mask"`): each image is read on the server with an offline OCR engine, the words of any subject identifier or catalog entity are painted over, and the masked image is read again and sent only if nothing is found. Media that cannot be read (PDF, audio, files, images by URL or file id) is refused in mask mode. `sharp`, `tesseract.js` and `@tesseract.js-data/eng` are optional dependencies.
 
 ### Fixed
 

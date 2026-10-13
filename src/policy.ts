@@ -34,8 +34,9 @@ export interface TenantPolicy {
   reportOnly?: boolean;
   /** Require X-Cordon-Subject on every generation request from this tenant. */
   requireSubject?: boolean;
-  /** Whether a known-subject request may carry media parts unread ("block" by default). */
-  subjectMedia?: "block" | "allow";
+  /** Media in a known-subject request: refuse it ("block", the default), mask each image's
+   *  identifiers and re-read it before it goes ("mask"), or forward it unread ("allow"). */
+  subjectMedia?: "block" | "mask" | "allow";
 }
 
 const policies = new Map<string, TenantPolicy>();

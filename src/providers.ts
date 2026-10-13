@@ -1,7 +1,7 @@
 import { config } from "./config";
 import { sha256 } from "./util";
 import { getPolicy } from "./policy";
-import { parseSubjectHeader, SubjectError, type SubjectSpec } from "./subject";
+import { MEDIA_MODES, parseSubjectHeader, SubjectError, type SubjectSpec } from "./subject";
 import type { CanonicalRequest, Dialect, Provider, RedactMode, RedactSet } from "./types";
 
 /**
@@ -372,7 +372,7 @@ export function tenantSelectionViolation(headers: Record<string, string>): strin
   const hp = getPolicy(home);
   if (ap.reportOnly && !hp.reportOnly) looser.push("reportOnly");
   if (!ap.requireSubject && hp.requireSubject) looser.push("requireSubject");
-  if ((ap.subjectMedia ?? "block") === "allow" && (hp.subjectMedia ?? "block") !== "allow") looser.push("subjectMedia");
+  if (MEDIA_MODES.indexOf(ap.subjectMedia ?? "block") > MEDIA_MODES.indexOf(hp.subjectMedia ?? "block")) looser.push("subjectMedia");
   if (baseFor("openai", asked) !== baseFor("openai", home) || baseFor("anthropic", asked) !== baseFor("anthropic", home))
     looser.push("upstreamOverride");
   return looser.length ? `X-Tenant selects a policy that is not at least as strict as this caller's own (${looser.join(", ")})` : null;

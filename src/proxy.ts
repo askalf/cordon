@@ -10,7 +10,8 @@ import { Vault } from "./redact/vault";
 import { captureAndReidentify, pipeUpstream } from "./streaming";
 import { audit } from "./audit";
 import { nowMs } from "./util";
-import { compileSubjects, countMedia, egressViolations, withSubjects, type CompiledSubjects } from "./subject";
+import { compileSubjects, countMedia, egressViolations, strictestMedia, withSubjects, type CompiledSubjects } from "./subject";
+import { maskMedia } from "./media/mask";
 import type { CanonicalRequest, HttpRes } from "./types";
 
 /**
@@ -76,11 +77,19 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   let egressDetail = "";
   const media = subjects ? countMedia(r.raw) : undefined;
   if (subjects) {
-    const mediaAllowed = (pol.subjectMedia ?? "block") === "allow" && subjects.media === "allow";
-    if (media && !mediaAllowed) {
+    const mediaMode = strictestMedia(pol.subjectMedia, subjects.media);
+    if (media && mediaMode === "block") {
       egress = "media";
       egressDetail = `${media} media part(s) cannot be checked for the subjects' identifiers`;
-    } else {
+    } else if (media && mediaMode === "mask") {
+      try {
+        await maskMedia(deidBody, subjects, r.activeSets, counts);
+      } catch (e) {
+        egress = "media";
+        egressDetail = String((e as any)?.message ?? e);
+      }
+    }
+    if (!egress) {
       try {
         const hits = egressViolations(deidBody, subjects);
         egress = hits.length ? "egress" : "verified";
