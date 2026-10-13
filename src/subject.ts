@@ -341,6 +341,9 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             if (local.length >= 5) {
               patterns.push(`(?<![\\p{L}\\p{N}])${loose(local)}(?![\\p{L}\\p{N}])`);
               if (alnum(local).length >= 6) folded.push(alnum(local));
+              // At egress it is also read word-bounded with any separators, however short it is
+              // once punctuation is dropped: "a b c d e" (from abcde@...) is caught, "abcdef" is not.
+              egress = egressSpread(local, 1);
             }
             break;
           }
@@ -356,6 +359,9 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             const f = addressForms(value);
             patterns = f.patterns;
             folded = f.folded.filter((x) => x.length >= 8);
+            // A spelling too short to be a needle ("1 Oak St" as 1oakst) is still read at egress
+            // word-bounded with any separators, so "1 O a k S t" is caught.
+            egress = f.folded.filter((x) => x.length < 8).flatMap((x) => egressSpread(x));
             break;
           }
           case "DOB": {

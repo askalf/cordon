@@ -255,6 +255,15 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/messages", aBody("w i l l and g r a c e"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ names: ["Will Grace"] }] }) });
   ok("name: common-word tokens of a full-name declaration spread out alone are forwarded", res.status === 200 && (await calls()).total === 1, String(res.status));
+  await reset();
+  res = await post("/v1/messages", aBody("a b c d e"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ emails: ["abcde@example.com"] }] }) });
+  ok("email: a spaced-out five-character local part is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  await reset();
+  res = await post("/v1/messages", aBody("1 O a k S t"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ addresses: ["1 Oak St"] }] }) });
+  ok("address: a spaced-out short address is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  await reset();
+  res = await post("/v1/messages", aBody("1 O a k S t r e e t"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ addresses: ["1 Oak St"] }] }) });
+  ok("address: a spaced-out short address with its suffix expanded is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
 
   // A phone sent as a JSON number in exponent form, in replayed tool arguments: redacted
   // whole, never forwarded in any spelling.

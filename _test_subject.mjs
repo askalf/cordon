@@ -130,6 +130,14 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: a short other literal spread out is caught", leak("code Z Q 9 X 7").includes("SUBJECT1_OTHER"));
   ok("egress: other letters spread between a short handle's or literal's are not a hit", leak("a b x c d and z q 9 x 8 7 and abxcd").length === 0);
 }
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ emails: ["abcde@example.com"], addresses: ["1 Oak St"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a five-character email local part spread out is caught", leak("user a b c d e").includes("SUBJECT1_EMAIL"));
+  ok("egress: a five-character local part inside a longer word or with letters between is not a hit", leak("abcdef, xabcde and a b x c d e").length === 0);
+  ok("egress: a short address spread out is caught, abbreviated and expanded", leak("1 O a k S t").includes("SUBJECT1_ADDRESS") && leak("1 o a k s t r e e t").includes("SUBJECT1_ADDRESS"));
+  ok("egress: other letters spread between a short address's are not a hit", leak("1 o a k x s t").length === 0);
+}
 
 // ---- the catalog still runs beside the subjects ----
 {
