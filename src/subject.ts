@@ -1,0 +1,452 @@
+// Known subjects: the people a request is about, declared by the caller.
+//
+// Pattern detection finds what has a shape (an email, a card, an SSN). It cannot know that
+// "Marisol Quintero-Vance", "Quintero-Vance, M.", "mqvance77" and "1428 Elm St" all point at one person. A
+// caller that already holds a case file can say so: X-Cordon-Subject carries the subjects'
+// identifiers for this request only. cordon then
+//
+//   1. matches each identifier in the forms it is written in (name order and initials,
+//      street-suffix abbreviations, phone and ID separators, date formats, handles), ahead
+//      of the pattern catalog, so the model sees <SUBJECT1_NAME_…> and never the value;
+//   2. checks the de-identified body once more before it leaves (egressViolations): every
+//      string leaf, object keys included, is searched for every identifier under a looser
+//      reading (NFKC, zero-width characters dropped, case folded, separators ignored). One
+//      hit refuses the request, upstream never called;
+//   3. refuses media parts unless the policy allows them, because pixels and file bytes
+//      are not text and cannot be checked here.
+//
+// The header is read once, held in this request's memory, never forwarded (providers
+// forward an allowlist of auth headers), never written to the audit log or metrics. Only
+// an opaque digest of `ref` is recorded, so a caller can ask for the receipts of one case.
+
+import { createHash } from "node:crypto";
+import type { Detector, RedactSet, Span } from "./types";
+
+/** Most bytes the header may carry, before base64url decoding. */
+export const MAX_SUBJECT_HEADER = 12 * 1024;
+/** Most subjects in one request, and identifiers per list. */
+const MAX_SUBJECTS = 8;
+const MAX_PER_LIST = 32;
+const MAX_VALUE = 200;
+
+export interface SubjectInput {
+  names?: string[];
+  emails?: string[];
+  phones?: string[];
+  addresses?: string[];
+  dates?: string[];
+  ids?: string[];
+  handles?: string[];
+  other?: string[];
+}
+
+export interface SubjectSpec {
+  /** Opaque caller reference (a case id). Never PII; stored only as a digest. */
+  ref?: string;
+  subjects: SubjectInput[];
+  /** What to do with image and file parts: refuse the request (default) or forward unread. */
+  media: "block" | "allow";
+}
+
+/** One compiled identifier: a matcher for detection and needles for the egress check. */
+interface Matcher {
+  type: string; // SUBJECT<n>_<KIND>
+  /** Case-insensitive forms, and the capitalised single tokens (case-sensitive). */
+  res: RegExp[];
+  /** Lower-cased alphanumeric needles for the egress check (separator-blind). */
+  folded: string[];
+  /** Digit sequences for the egress check, matched with up to 3 separators between digits. */
+  digits: string[];
+  /** The digit sequences as regexes, compiled once per request. */
+  digitRes: RegExp[];
+}
+
+export interface CompiledSubjects {
+  ref?: string;
+  refDigest?: string;
+  media: "block" | "allow";
+  matchers: Matcher[];
+}
+
+const LISTS: Array<[keyof SubjectInput, string]> = [
+  ["names", "NAME"],
+  ["emails", "EMAIL"],
+  ["phones", "PHONE"],
+  ["addresses", "ADDRESS"],
+  ["dates", "DOB"],
+  ["ids", "ID"],
+  ["handles", "HANDLE"],
+  ["other", "OTHER"],
+];
+
+export class SubjectError extends Error {}
+
+/** Decode and validate X-Cordon-Subject (base64url JSON). Throws SubjectError on any defect. */
+export function parseSubjectHeader(raw: string | undefined): SubjectSpec | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  if (raw.length > MAX_SUBJECT_HEADER) throw new SubjectError(`X-Cordon-Subject is over ${MAX_SUBJECT_HEADER} bytes`);
+  if (!/^[A-Za-z0-9_-]+={0,2}$/.test(raw)) throw new SubjectError("X-Cordon-Subject is not base64url");
+  let obj: any;
+  try {
+    obj = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+  } catch {
+    throw new SubjectError("X-Cordon-Subject is not base64url JSON");
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) throw new SubjectError("X-Cordon-Subject must be a JSON object");
+  const subjects = obj.subjects;
+  if (!Array.isArray(subjects) || subjects.length === 0) throw new SubjectError("X-Cordon-Subject needs a non-empty subjects array");
+  if (subjects.length > MAX_SUBJECTS) throw new SubjectError(`X-Cordon-Subject has more than ${MAX_SUBJECTS} subjects`);
+  const out: SubjectInput[] = subjects.map((s: any, i: number) => {
+    if (!s || typeof s !== "object" || Array.isArray(s)) throw new SubjectError(`subject ${i + 1} must be an object`);
+    const clean: SubjectInput = {};
+    for (const key of Object.keys(s)) {
+      if (!LISTS.some(([k]) => k === key)) throw new SubjectError(`subject ${i + 1} has an unknown list "${key}"`);
+      const list = s[key];
+      if (!Array.isArray(list) || list.length > MAX_PER_LIST || list.some((v) => typeof v !== "string" || v.length > MAX_VALUE))
+        throw new SubjectError(`subject ${i + 1} ${key} must be up to ${MAX_PER_LIST} strings of up to ${MAX_VALUE} characters`);
+      clean[key as keyof SubjectInput] = list.map((v: string) => v.trim()).filter(Boolean);
+    }
+    return clean;
+  });
+  if (obj.ref !== undefined && (typeof obj.ref !== "string" || obj.ref.length > 128)) throw new SubjectError("ref must be a string of up to 128 characters");
+  if (obj.media !== undefined && obj.media !== "block" && obj.media !== "allow") throw new SubjectError('media must be "block" or "allow"');
+  return { ref: obj.ref, subjects: out, media: obj.media ?? "block" };
+}
+
+/** Opaque, stable digest of a caller ref for the audit log (the ref itself is never stored). */
+export const refDigest = (ref: string, key: string) =>
+  createHash("sha256").update(`cordon-subject-ref\0${key}\0${ref}`).digest("hex").slice(0, 24);
+
+// ---- text normalisation shared by detection and the egress check ----
+
+const ZERO_WIDTH = /[​-‍⁠﻿­]/g;
+/** What the egress check reads: NFKC, zero-width characters dropped, case folded. */
+export const foldText = (s: string) => s.normalize("NFKC").replace(ZERO_WIDTH, "").toLowerCase();
+/** The same letters without accents: "José" and "Jose" read alike. */
+export const unaccent = (s: string) => s.normalize("NFD").replace(/\p{M}+/gu, "").normalize("NFC");
+/** Letters and digits only, after foldText: separators, spacing and punctuation ignored. */
+export const alnum = (s: string) => unaccent(foldText(s)).replace(/[^\p{L}\p{N}]+/gu, "");
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** A name token, escaped, with apostrophes and hyphens loosened: O'Brien, O’Brien, OBrien;
+ *  Quintero-Vance, Quintero Vance, QuinteroVance. */
+const tok = (t: string) => esc(t).replace(/['’]/g, "['’]?").replace(/-/g, "[\\s\\-]?");
+/** A literal whose internal whitespace and punctuation may vary: "Elm  Street", "Elm-Street". */
+const loose = (s: string) =>
+  s
+    .trim()
+    .split(/[\s.,'’\-_]+/)
+    .filter(Boolean)
+    .map(esc)
+    .join("[\\s.,'’\\-_]*");
+/** Digits with up to 3 separator characters between each (phones, IDs, dates written as numbers). */
+const digitPattern = (d: string) => d.split("").join("[^\\p{L}\\p{N}]{0,3}");
+
+// Common words that are also given names or surnames. Alone and capitalised they still
+// read as words often enough ("Will you", "Hope Street") that redacting them would corrupt
+// instructions; they are matched only as part of a fuller form of the name.
+const COMMON = new Set(
+  ("will mark grace hope faith joy rose may june april august bill pat sue art rich young white black brown " +
+    "green king long rice bell hill wood cook page case hunt fox love price miles chase lane dawn summer " +
+    "autumn winter day guy max ray jack frank sterling major baker carter mason hunter parker cooper " +
+    "taylor walker turner ward wells park gray grey stone ford hall field holly ivy iris amber crystal " +
+    "eve sky star river sage reed rush north south west east")
+    .split(" "),
+);
+
+const STREET_SUFFIX: Record<string, string[]> = {
+  street: ["street", "st"], avenue: ["avenue", "ave", "av"], road: ["road", "rd"], drive: ["drive", "dr"],
+  lane: ["lane", "ln"], court: ["court", "ct"], boulevard: ["boulevard", "blvd"], circle: ["circle", "cir"],
+  place: ["place", "pl"], parkway: ["parkway", "pkwy"], highway: ["highway", "hwy"], terrace: ["terrace", "ter"],
+  trail: ["trail", "trl"], way: ["way", "wy"], square: ["square", "sq"], crossing: ["crossing", "xing"],
+  point: ["point", "pt"], ridge: ["ridge", "rdg"], run: ["run"], cove: ["cove", "cv"], loop: ["loop"],
+  pike: ["pike"], path: ["path"], walk: ["walk"], row: ["row"], alley: ["alley", "aly"],
+};
+const DIRECTION: Record<string, string[]> = {
+  north: ["north", "n"], south: ["south", "s"], east: ["east", "e"], west: ["west", "w"],
+  northeast: ["northeast", "ne"], northwest: ["northwest", "nw"], southeast: ["southeast", "se"], southwest: ["southwest", "sw"],
+};
+const variantsOf = (table: Record<string, string[]>, word: string): string[] | undefined => {
+  const w = word.toLowerCase().replace(/\.$/, "");
+  for (const forms of Object.values(table)) if (forms.includes(w)) return forms;
+  return undefined;
+};
+
+const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+
+// ---- per-kind matchers ----
+
+function nameForms(name: string): { patterns: string[]; exact: string[]; folded: string[] } {
+  const tokens = name.split(/[\s,]+/).map((t) => t.replace(/\.$/, "")).filter(Boolean);
+  const patterns = new Set<string>();
+  const exact = new Set<string>();
+  const folded = new Set<string>();
+  if (!tokens.length) return { patterns: [], exact: [], folded: [] };
+  const first = tokens[0];
+  const last = tokens[tokens.length - 1];
+  const middle = tokens.slice(1, -1);
+  const S = "[\\s.,'’\\-_]+";
+  patterns.add(tokens.map(tok).join(S)); // as given
+  if (tokens.length >= 2) {
+    patterns.add(`${tok(first)}${S}${tok(last)}`); // first last
+    patterns.add(`${tok(last)}\\s*,\\s*${tok(first)}(?:${S}${middle.map(tok).join(S)})?`); // last, first [middle]
+    patterns.add(`${esc(first[0])}\\.?${S}${middle.length ? `(?:${middle.map((m) => `${esc(m[0])}\\.?`).join(S)}${S})?` : ""}${tok(last)}`); // M. [L.] Vance
+    if (middle.length) patterns.add(`${tok(first)}${S}${middle.map((m) => `${esc(m[0])}\\.?`).join(S)}${S}${tok(last)}`); // Marisol L. Vance
+    // Handles and concatenations: marisolvance, marisol.vance, mvance, vancem
+    for (const h of [first + last, last + first, first[0] + last, last + first[0]])
+      if (h.length >= 6) {
+        patterns.add(esc(h.toLowerCase()));
+        folded.add(alnum(h));
+      }
+    folded.add(alnum(first + last));
+  }
+  // Single tokens alone (word-bounded, capitalised): skipped for short and common words.
+  for (const t of tokens)
+    if (t.length >= 3 && !COMMON.has(t.toLowerCase())) exact.add(`(?<![\\p{L}\\p{N}])${esc(t[0].toUpperCase())}${tok(t.slice(1))}(?![\\p{L}\\p{N}])`);
+  if (tokens.length === 1 && tokens[0].length >= 5) folded.add(alnum(tokens[0]));
+  return { patterns: [...patterns], exact: [...exact], folded: [...folded] };
+}
+
+function addressForms(addr: string): { patterns: string[]; folded: string[] } {
+  // The street line carries the identity; city, state and ZIP alone are shared by thousands.
+  const street = addr.split(/,|\n/)[0].trim();
+  const words = street.split(/\s+/).filter(Boolean);
+  if (words.length < 2) return { patterns: [loose(addr)], folded: [alnum(addr)] };
+  const parts = words.map((w) => {
+    const forms = variantsOf(STREET_SUFFIX, w) ?? variantsOf(DIRECTION, w);
+    return forms ? `(?:${forms.map(esc).join("|")})\\.?` : esc(w.replace(/\.$/, ""));
+  });
+  const patterns = [parts.join("[\\s,]+"), loose(addr)];
+  // Unit numbers: "1428 Elm St Apt 4", "1428 Elm St #4" are covered by the street line.
+  return { patterns, folded: [alnum(street)] };
+}
+
+function dateForms(date: string): { patterns: string[]; digits: string[] } {
+  let y: number, m: number, d: number;
+  const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(date);
+  const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(date);
+  if (iso) [y, m, d] = [Number(iso[1]), Number(iso[2]), Number(iso[3])];
+  else if (us) [y, m, d] = [Number(us[3]), Number(us[1]), Number(us[2])];
+  else return { patterns: [loose(date)], digits: [] };
+  if (m < 1 || m > 12 || d < 1 || d > 31) return { patterns: [loose(date)], digits: [] };
+  const mm = String(m).padStart(2, "0");
+  const dd = String(d).padStart(2, "0");
+  const yy = String(y).slice(2);
+  const month = MONTHS[m - 1];
+  const mon = `(?:${month}|${month.slice(0, 3)}\\.?${month === "september" ? "|sept\\.?" : ""})`;
+  const nb = (s: string) => `(?<!\\d)${s}(?!\\d)`;
+  const patterns = [
+    nb(`${y}[-/.]0?${m}[-/.]0?${d}`), // 1985-03-02
+    nb(`0?${m}[-/.]0?${d}[-/.](?:${y}|${yy})`), // 03/02/1985, 3/2/85
+    `${mon}\\s+0?${d}(?:st|nd|rd|th)?,?\\s+${y}`, // March 2, 1985
+    nb(`0?${d}(?:st|nd|rd|th)?\\s+(?:of\\s+)?${mon},?\\s+${y}`), // 2 March 1985
+    nb(`${y}${mm}${dd}`), // 19850302
+    nb(`${mm}${dd}${y}`), // 03021985
+  ];
+  return { patterns, digits: [`${y}${mm}${dd}`, `${mm}${dd}${y}`] };
+}
+
+/** Compile a spec into matchers. Identifiers too short to match safely are dropped. */
+export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubjects {
+  const matchers: Matcher[] = [];
+  spec.subjects.forEach((s, i) => {
+    const n = i + 1;
+    for (const [key, kind] of LISTS) {
+      for (const value of s[key] ?? []) {
+        let patterns: string[] = [];
+        let exact: string[] = [];
+        let folded: string[] = [];
+        let digits: string[] = [];
+        switch (kind) {
+          case "NAME": {
+            const f = nameForms(value);
+            patterns = f.patterns;
+            exact = f.exact;
+            folded = f.folded;
+            break;
+          }
+          case "EMAIL": {
+            const at = value.lastIndexOf("@");
+            patterns = [esc(value)];
+            folded = [alnum(value)];
+            const local = at > 0 ? value.slice(0, at) : "";
+            // The local part is often reused as a username elsewhere.
+            if (local.length >= 5) {
+              patterns.push(`(?<![\\p{L}\\p{N}])${loose(local)}(?![\\p{L}\\p{N}])`);
+              if (alnum(local).length >= 6) folded.push(alnum(local));
+            }
+            break;
+          }
+          case "PHONE": {
+            let d = value.replace(/\D/g, "");
+            if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
+            if (d.length < 7) continue;
+            patterns = [`(?<!\\d)(?:\\+?1[^\\p{L}\\p{N}]{0,3})?${digitPattern(d)}(?!\\d)`];
+            digits = [d];
+            break;
+          }
+          case "ADDRESS": {
+            const f = addressForms(value);
+            patterns = f.patterns;
+            folded = f.folded.filter((x) => x.length >= 8);
+            break;
+          }
+          case "DOB": {
+            const f = dateForms(value);
+            patterns = f.patterns;
+            digits = f.digits;
+            break;
+          }
+          case "ID": {
+            const d = value.replace(/[^A-Za-z0-9]/g, "");
+            if (d.length < 4) continue;
+            patterns = [`(?<![\\p{L}\\p{N}])${d.split("").map(esc).join("[^\\p{L}\\p{N}]{0,3}")}(?![\\p{L}\\p{N}])`];
+            if (/^\d+$/.test(d) && d.length >= 7) digits = [d];
+            else if (d.length >= 6) folded = [alnum(d)];
+            break;
+          }
+          case "HANDLE": {
+            const h = value.replace(/^@/, "");
+            if (h.length < 4) continue;
+            patterns = [`@?${loose(h)}`];
+            if (alnum(h).length >= 6) folded = [alnum(h)];
+            break;
+          }
+          default: {
+            if (value.length < 4) continue;
+            patterns = [loose(value)];
+            if (alnum(value).length >= 6) folded = [alnum(value)];
+          }
+        }
+        if (!patterns.length) continue;
+        if (kind === "NAME" || kind === "ADDRESS" || kind === "OTHER") {
+          const plain = unaccent(value);
+          if (plain !== value) {
+            const again: { patterns: string[]; exact?: string[] } = kind === "NAME" ? nameForms(plain) : kind === "ADDRESS" ? addressForms(plain) : { patterns: [loose(plain)] };
+            patterns = [...patterns, ...again.patterns];
+            exact = [...exact, ...(again.exact ?? [])];
+          }
+        }
+        // One regex per form, not one alternation: an alternation stops at the first form that
+        // matches at a position, so "mqvance77" would win over "mqvance77@example.com". Every
+        // form's spans are collected and withSubjects keeps the longest of any overlap.
+        const res = [...patterns.map((p) => new RegExp(p, "giud")), ...exact.map((p) => new RegExp(p, "gud"))];
+        const digitRes = digits.map((d) => new RegExp(`(?<!\\d)${digitPattern(d)}(?!\\d)`, "u"));
+        matchers.push({ type: `SUBJECT${n}_${kind}`, res, folded, digits, digitRes });
+      }
+    }
+  });
+  return { ref: spec.ref, refDigest: spec.ref ? refDigest(spec.ref, refKey) : undefined, media: spec.media, matchers };
+}
+
+const SUBJECT_SETS: RedactSet[] = ["pii"];
+
+/** Spans for every subject identifier in one text field (local offsets, original text). */
+export function subjectSpans(text: string, compiled: CompiledSubjects): Span[] {
+  const out: Span[] = [];
+  for (const m of compiled.matchers)
+    for (const re of m.res)
+      for (const hit of text.matchAll(re)) {
+        const start = hit.index ?? 0;
+        const end = start + hit[0].length;
+        if (end > start) out.push({ start, end, type: m.type, value: text.slice(start, end), sets: SUBJECT_SETS });
+      }
+  return out;
+}
+
+const overlaps = (a: Span, b: Span) => a.start < b.end && b.start < a.end;
+
+/**
+ * A detector that runs the subjects first and the catalog second. A subject span wins any
+ * overlap (longest first among subjects); a catalog span is kept only where no subject
+ * span claims its characters. Subject identifiers are redacted whatever sets are active.
+ */
+export function withSubjects(base: Detector, compiled: CompiledSubjects): Detector {
+  return {
+    name: `${base.name}+subjects`,
+    detect(text: string, activeSets: RedactSet[]): Span[] {
+      const known = subjectSpans(text, compiled).sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start);
+      const accepted: Span[] = [];
+      for (const s of known) if (!accepted.some((a) => overlaps(a, s))) accepted.push(s);
+      for (const s of base.detect(text, activeSets)) if (!accepted.some((a) => overlaps(a, s))) accepted.push(s);
+      return accepted.sort((a, b) => a.start - b.start);
+    },
+  };
+}
+
+// ---- the egress check ----
+
+// Parts whose payload is pixels or file bytes. A Messages document with a text or content
+// source is text, read like any other field; with a base64, URL or file source it is media.
+const MEDIA_TYPES = new Set(["image", "input_image", "input_file", "image_url", "file", "audio", "input_audio", "image_generation_call"]);
+const BINARY_SOURCES = new Set(["base64", "url", "file"]);
+const MEDIA_PAYLOAD_KEYS = new Set(["data", "file_data", "result", "image_url", "url"]);
+
+const isMediaPart = (node: any): boolean =>
+  !!node && typeof node === "object" && typeof node.type === "string" &&
+  (MEDIA_TYPES.has(node.type) || (node.type === "document" && BINARY_SOURCES.has(node.source?.type)));
+/** A payload string the egress check does not read: base64 data or a data: URL. */
+const isPayload = (key: string, v: string, node: any) =>
+  MEDIA_PAYLOAD_KEYS.has(key) && (v.startsWith("data:") || node?.type === "base64" || key === "file_data" || key === "result" || (key === "data" && isMediaPart(node)));
+
+/** Count media parts (image, file, audio) anywhere in a request body. */
+export function countMedia(body: any, depth = 0): number {
+  if (!body || typeof body !== "object" || depth > 64) return 0;
+  if (isMediaPart(body)) return 1;
+  let n = 0;
+  for (const v of Array.isArray(body) ? body : Object.values(body)) n += countMedia(v, depth + 1);
+  return n;
+}
+
+/** Every string leaf and object key, with media payloads skipped (they are counted, not read). */
+function leaves(node: any, out: string[], depth = 0): void {
+  if (depth > 64) throw new Error("body nested deeper than 64 levels; refusing to forward unread fields");
+  if (typeof node === "string") {
+    out.push(node);
+    return;
+  }
+  if (typeof node === "number" || typeof node === "bigint") {
+    out.push(String(node));
+    return;
+  }
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const v of node) leaves(v, out, depth + 1);
+    return;
+  }
+  for (const [k, v] of Object.entries(node)) {
+    out.push(k);
+    if (typeof v === "string" && isPayload(k, v, node)) continue; // base64 or a data: URL
+    leaves(v, out, depth + 1);
+  }
+}
+
+/**
+ * Search the de-identified body for any subject identifier, read more loosely than detection:
+ * the matchers again on folded text, every alphanumeric needle with separators ignored, and
+ * every digit needle with up to 3 separators between digits. Returns the kinds found (never
+ * the values); an empty array means the body may leave.
+ */
+export function egressViolations(deidBody: any, compiled: CompiledSubjects): string[] {
+  const found = new Set<string>();
+  const texts: string[] = [];
+  leaves(deidBody, texts);
+  for (const raw of texts) {
+    if (!raw) continue;
+    const folded = foldText(raw);
+    const plain = unaccent(folded);
+    const flat = plain.replace(/[^\p{L}\p{N}]+/gu, "");
+    for (const m of compiled.matchers) {
+      if (found.has(m.type)) continue;
+      if (m.res.some((re) => [raw, folded, plain].some((t) => { re.lastIndex = 0; return re.test(t); }))) {
+        found.add(m.type);
+        continue;
+      }
+      if (m.folded.some((needle) => needle && flat.includes(needle))) {
+        found.add(m.type);
+        continue;
+      }
+      if (m.digitRes.some((re) => re.test(folded))) found.add(m.type);
+    }
+  }
+  return [...found];
+}

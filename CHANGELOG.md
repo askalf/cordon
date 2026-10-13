@@ -13,6 +13,11 @@ image and creates the GitHub release from this file.
 
 ## [Unreleased]
 
+### Added
+
+- Known subjects (`X-Cordon-Subject`): a caller names the people a request is about, and their names, emails, phones, addresses, dates of birth, IDs and handles are matched in the forms people write them and replaced with `<SUBJECT<n>_<KIND>_…>` placeholders ahead of the pattern catalog. An egress check then reads the de-identified body again, separator-blind and Unicode-normalised, and refuses the request (422) if any identifier is still there. Media in a subject request is refused unless both the policy and the header allow it. The audit records a digest of the caller's ref and the egress verdict, `X-Cordon-Receipt` returns the record's hash, and `GET /admin/receipts?ref=` serves a ref's records after verifying the chain.
+- Tenant policy `requireSubject`, `subjectMedia` and `reportOnly` (forward unchanged and record what would have happened, for measuring a caller before enforcing).
+
 ### Fixed
 
 - A tool-call argument number made of a long run of zeros ending in another digit no longer stalls redaction: its trailing zeros are counted in linear time instead of by a backtracking regular expression.

@@ -28,6 +28,14 @@ export interface TenantPolicy {
   redactSystem?: boolean;
   /** Data-residency: route this tenant's traffic to a specific upstream base. */
   upstreamOverride?: Partial<Record<Provider, string>>;
+  /** Report only: run detection and the subject egress check, record the verdict, and
+   *  forward the request UNCHANGED. For measuring a new caller before enforcing; it
+   *  protects nothing, and every such request is audited with report: true. */
+  reportOnly?: boolean;
+  /** Require X-Cordon-Subject on every generation request from this tenant. */
+  requireSubject?: boolean;
+  /** Whether a known-subject request may carry media parts unread ("block" by default). */
+  subjectMedia?: "block" | "allow";
 }
 
 const policies = new Map<string, TenantPolicy>();

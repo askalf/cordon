@@ -79,9 +79,30 @@ An agent runner (a tool-using loop: Claude Code headless, a native Responses loo
 
 The runner's own prompt is `instructions` (Responses) or `system` (Messages) and is left as sent unless `redactSystem` is on. In `strip` mode the model's arguments keep their `[EMAIL]` placeholders and the runner's tool sees them, which is the right outcome for a runner that must never hold the value.
 
+## Known subjects
+
+Pattern detection finds what has a shape. It cannot know that "Marisol Quintero-Vance", "Quintero-Vance, M.", "mqvance77" and "1428 Elm St" are one person. A caller that already knows who a request is about can say so, and cordon then keeps that person's identifiers away from the model, checks that it did, and keeps a receipt.
+
+```
+X-Cordon-Subject: base64url({"ref":"case-1042","subjects":[{
+  "names":["Marisol Quintero-Vance","Mari Vance"], "emails":["mqvance77@example.com"],
+  "phones":["404-555-0187"], "addresses":["1428 Elm Street, Decatur, GA"],
+  "dates":["1986-07-14"], "ids":["123-45-6789"], "handles":["@mari.q.vance"]}]})
+```
+
+- **Matched in the forms people write them.** Names as given, last-first, with initials, alone (capitalised, and not when the name is also a common word such as Will or Grace), and joined into handles (`mqvance`, `marisol.quintero`). Addresses with or without the street-suffix and direction abbreviations. Phones and IDs with any separators, and a leading +1. Dates of birth in numeric, ISO and spelled-out forms. Each subject's identifiers become `<SUBJECT1_NAME_…>`, `<SUBJECT2_PHONE_…>` and so on, so the model can still tell people apart, and they win over the pattern catalog where both match. Up to 8 subjects, 32 identifiers per list.
+- **An egress check before anything leaves.** After redaction, every string in the outgoing body, object keys included, is searched again for every identifier under a looser reading: Unicode-normalised, zero-width characters removed, case folded, and with separators ignored (`m a r i s o l`, `4 0 4 / 5 5 5 / 0 1 8 7`, full-width digits). One hit refuses the request (422, stage `egress`, naming the kind and never the value); the upstream is not called. This is what catches an identifier redaction could not reach, such as one in a system prompt the tenant leaves unredacted.
+- **Media is refused unless allowed twice.** Image, audio and file parts cannot be read here, so a request that names subjects and carries one is refused (422, stage `media`) unless both the tenant policy (`subjectMedia: "allow"`) and the header (`"media":"allow"`) allow it. Text documents and image URLs are text and are checked.
+- **Never forwarded, never logged.** The header lives in the request's memory only. The audit record carries an opaque digest of `ref`, the counts and types, the media count and the egress verdict, and `X-Cordon-Receipt` returns that record's hash.
+- **Receipts per ref.** `GET /admin/receipts?ref=case-1042` verifies the audit chain, then returns every record made under that ref: what was replaced, by type, whether each request passed the egress check, and each record's hash. A refused request is recorded with the stage that refused it.
+- **Fail closed, always.** A header that cannot be read is a 400, never a fall back to pattern-only redaction. A detection error on a subject request is refused whatever `FAIL_MODE` says. A subject request to a tenant whose mode is `off` is refused rather than passed through. `requireSubject` on a tenant refuses any request without the header.
+- **Report only, for measuring.** A tenant with `reportOnly: true` runs detection and the egress check, records the verdict in the audit log (`report: true`) and in `X-Cordon-Report`, and forwards the request **unchanged**. It protects nothing; it is for watching a new caller's traffic before enforcing.
+
+The matching is deliberately literal: it finds the identifiers it is given, in the forms above. A relative's name the caller did not list, or a nickname, is a pattern-catalog question like any other text.
+
 ## What it does not do
 
-- **Names, free-text addresses, medical conditions.** There is no NER. A person's name in prose passes through. The detector is an interface (`src/detect`), so a Presidio-style sidecar can be added; it is not included.
+- **Names, free-text addresses, medical conditions, without a subject list.** There is no NER. A person's name in prose passes through unless the request names that person as a subject (above). The detector is an interface (`src/detect`), so a Presidio-style sidecar can be added; it is not included.
 - **Embeddings, `count_tokens`, images.** Only the three generation endpoints (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) are redacted; other `/v1/*` paths, including `/v1/responses/{id}`, pass through verbatim. A spelling of a generation endpoint the provider can still resolve (a trailing slash, `.`/`..` segments, a different case, percent-escapes) is redacted like the endpoint itself. Image and file parts are left untouched.
 - **Token counts.** Streaming usage figures are the provider's, computed on the de-identified text.
 

@@ -1,6 +1,7 @@
 import { config } from "./config";
 import { sha256 } from "./util";
 import { getPolicy } from "./policy";
+import { parseSubjectHeader, SubjectError, type SubjectSpec } from "./subject";
 import type { CanonicalRequest, Dialect, Provider, RedactMode, RedactSet } from "./types";
 
 /**
@@ -274,6 +275,13 @@ export function normalize(
   const [provider, dialect] = route;
 
   const tenant = resolveTenant(headers);
+  let subject: SubjectSpec | undefined;
+  let subjectError: string | undefined;
+  try {
+    subject = parseSubjectHeader(headers["x-cordon-subject"]);
+  } catch (e) {
+    subjectError = e instanceof SubjectError ? e.message : "X-Cordon-Subject could not be read";
+  }
 
   return {
     provider,
@@ -288,6 +296,8 @@ export function normalize(
     path,
     bare,
     testFail: config.testHooks && headers["x-cordon-fail"] === "1",
+    subject,
+    subjectError,
   };
 }
 
@@ -358,6 +368,11 @@ export function tenantSelectionViolation(headers: Record<string, string>): strin
   if (!a.redactSystem && h.redactSystem) looser.push("redactSystem");
   if (a.consistentPseudonyms && !h.consistentPseudonyms) looser.push("consistentPseudonyms");
   if (a.allowHeaderOverride && !h.allowHeaderOverride) looser.push("allowHeaderOverride");
+  const ap = getPolicy(asked);
+  const hp = getPolicy(home);
+  if (ap.reportOnly && !hp.reportOnly) looser.push("reportOnly");
+  if (!ap.requireSubject && hp.requireSubject) looser.push("requireSubject");
+  if ((ap.subjectMedia ?? "block") === "allow" && (hp.subjectMedia ?? "block") !== "allow") looser.push("subjectMedia");
   if (baseFor("openai", asked) !== baseFor("openai", home) || baseFor("anthropic", asked) !== baseFor("anthropic", home))
     looser.push("upstreamOverride");
   return looser.length ? `X-Tenant selects a policy that is not at least as strict as this caller's own (${looser.join(", ")})` : null;
