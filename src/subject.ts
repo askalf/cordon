@@ -272,6 +272,14 @@ function dateForms(date: string): { patterns: string[]; digits: string[]; egress
   // so a bare short number such as 3285 is never read as the date.
   const SEP = "[^\\p{L}\\p{N}]+";
   const egress = [nb(`${y}${SEP}0?${m}${SEP}0?${d}`), nb(`0?${m}${SEP}0?${d}${SEP}(?:${y}|${yy})`)];
+  // The spelled-out forms the patterns accept, read separator-blind: any run of separators
+  // between every letter and digit ("J u l y 14, 1986", "1 4 t h of j u l 1986").
+  const G = "[^\\p{L}\\p{N}]*";
+  const spread = (s: string) => [...s].map(esc).join(G);
+  const monG = `(?:${[month, month.slice(0, 3), ...(month === "september" ? ["sept"] : [])].map(spread).join("|")})`;
+  const dayG = `(?:0${G})?${spread(String(d))}(?:${G}(?:${["st", "nd", "rd", "th"].map(spread).join("|")}))?`;
+  const yearG = `${spread(String(y))}(?!\\d)`;
+  egress.push(`${monG}${G}${dayG}${G}${yearG}`, `(?<!\\d)${dayG}${G}(?:${spread("of")}${G})?${monG}${G}${yearG}`);
   return { patterns, digits: [`${y}${mm}${dd}`, `${mm}${dd}${y}`], egress };
 }
 

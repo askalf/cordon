@@ -128,6 +128,9 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   for (const d of ["DOB: 7 / 14 / 1986", "7 - 14 - 86", "07 / 14 / 1986", "1986 / 7 / 14", "7 . 14 . 86"])
     ok(`egress: a spaced numeric date of birth is caught: ${d}`, leak(d).includes("SUBJECT1_DOB"), d);
   ok("egress: a spaced date that is not the subject's is not a hit", leak("7 / 14 / 1987 and 7 / 15 / 86").length === 0);
+  for (const d of ["DOB: J u l y 14, 1986", "J-U-L 1 4 1 9 8 6", "j.u.l.y.14th.1986", "14 J u l y 1986", "1 4 t h of J u l 1986", "DOB: Jul.14,1986"])
+    ok(`egress: a spaced spelled-out date of birth is caught: ${d}`, leak(d).includes("SUBJECT1_DOB"), d);
+  ok("egress: a spelled-out date that is not the subject's is not a hit", leak("J u l y 15, 1986 and 14 J u n e 1986 and July 14, 1987").length === 0);
   ok("egress: a payload key outside media is read", egressViolations({ input: "x", metadata: { result: "Marisol Quintero-Vance" } }, comp).includes("SUBJECT1_NAME"));
   ok("egress: a data: string outside media is read", egressViolations({ input: "x", metadata: { url: "data:text/plain,Marisol Quintero-Vance" } }, comp).includes("SUBJECT1_NAME"));
   ok("egress: a spaced-out address in its abbreviated spelling is caught", leak("1428 E l m S t").includes("SUBJECT1_ADDRESS") && leak("1 4 2 8 . E L M . S T R E E T").includes("SUBJECT1_ADDRESS"));

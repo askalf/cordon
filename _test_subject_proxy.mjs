@@ -252,6 +252,13 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   res = await post("/v1/messages", aBody("hello", { system: "DOB: 7 / 14 / 1986" }), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ...PERSON, dates: ["1986-07-14"] }] }) }, "sys-key");
   const dobRefusal = await res.json().catch(() => ({}));
   ok("egress: a spaced numeric date of birth is refused, upstream never called", res.status === 422 && (await calls()).total === 0 && /SUBJECT1_DOB/.test(dobRefusal.detail ?? ""), `${res.status} ${JSON.stringify(dobRefusal)}`);
+  // A spelled-out date of birth with its month spaced out, in the same unredacted system prompt.
+  for (const dob of ["DOB: J u l y 14, 1986", "DOB: 1 4 J u l 1986"]) {
+    await reset();
+    res = await post("/v1/messages", aBody("hello", { system: dob }), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ...PERSON, dates: ["1986-07-14"] }] }) }, "sys-key");
+    const spelledRefusal = await res.json().catch(() => ({}));
+    ok(`egress: a spaced spelled-out date of birth is refused, upstream never called: ${dob}`, res.status === 422 && (await calls()).total === 0 && /SUBJECT1_DOB/.test(spelledRefusal.detail ?? ""), `${res.status} ${JSON.stringify(spelledRefusal)}`);
+  }
 
   // :8811 has no TENANT_SECRET, so a consistent-pseudonym tenant fails at the secret guard; with
   // failMode open that would forward the raw body, but never for a request that names subjects.
