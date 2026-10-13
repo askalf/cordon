@@ -479,6 +479,14 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
       const exact = exactDecimal(m[0]);
       if (exact !== m[0]) out.push(exact);
     }
+    // A JSON-string field (tool-call arguments) is decoded by the provider: its keys and
+    // values are read again as decoded, so \u0057-style escapes cannot hide the letters.
+    const lead = node.trimStart()[0];
+    if (lead === "{" || lead === "[") {
+      let decoded: unknown;
+      try { decoded = JSON.parse(node); } catch { decoded = undefined; }
+      if (decoded && typeof decoded === "object") leaves(decoded, out, parts, depth + 1);
+    }
     return;
   }
   if (typeof node === "number" || typeof node === "bigint") {

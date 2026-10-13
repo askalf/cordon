@@ -230,6 +230,19 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   }, { "x-cordon-subject": SUBJECT() });
   up = await seen();
   ok("numeric: an exponent-form subject phone never reaches upstream", res.status === 200 && !/4\.045550187e9|4045550187/.test(up), `${res.status} ${up.match(/arguments[^}]*\}/)?.[0]}`);
+  // A spaced-out name spelled in JSON unicode escapes inside replayed tool arguments: the
+  // provider decodes it into the name, so it is refused.
+  await reset();
+  const uEsc = (s) => [...s].map((ch) => (ch === " " ? " " : "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"))).join("");
+  res = await post("/v1/chat/completions", {
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "user", content: "look this up" },
+      { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "lookup", arguments: `{"q":"${uEsc("W i l l G r a c e")}"}` } }] },
+      { role: "tool", tool_call_id: "c1", content: "no match" },
+    ],
+  }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ names: ["Will Grace"] }] }) });
+  ok("egress: an escaped, spaced-out name in tool arguments is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
   // An abbreviated, spaced-out address in a system prompt this tenant leaves unredacted.
   await reset();
   res = await post("/v1/messages", aBody("hello", { system: "Client lives at 1428 E l m S t." }), { "x-cordon-subject": SUBJECT() }, "sys-key");

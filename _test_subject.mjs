@@ -134,6 +134,12 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: a phone in exponent notation inside tool arguments is caught", egressViolations({ messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9}' } }] }] }, comp).includes("SUBJECT1_PHONE"));
   ok("egress: a phone written with a decimal point is caught", leak('{"phone":4045550187.0}').includes("SUBJECT1_PHONE"));
   {
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Grace"] }] })), "k");
+    const u = (s) => [...s].map((ch) => (ch === " " ? " " : "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"))).join("");
+    const body = { messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: `{"q":"${u("W i l l G r a c e")}"}` } }] }] };
+    ok("egress: a spaced name written in JSON unicode escapes inside tool arguments is caught", egressViolations(body, c).includes("SUBJECT1_NAME"));
+  }
+  {
     const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["1000000000000000000000"] }] })), "k");
     ok("egress: an ID sent as a numeric leaf in exponent form is caught", egressViolations({ input: "x", metadata: { account: 1e21 } }, c).includes("SUBJECT1_ID"));
   }
