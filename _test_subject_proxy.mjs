@@ -334,6 +334,10 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/messages", aBody("1 O a k S t r e e t"), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ addresses: ["1 Oak St"] }] }) });
   ok("address: a spaced-out short address with its suffix expanded is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // A unit declared without a comma; the street alone in Responses metadata, which redaction leaves.
+  await reset();
+  res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { note: "1428 Elm St" } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ addresses: ["1428 Elm Street Apt 4"] }] }) });
+  ok("address: the street alone of a unit declared without a comma is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
 
   // A phone sent as a JSON number in exponent form, in replayed tool arguments: redacted
   // whole, never forwarded in any spelling.

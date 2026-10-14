@@ -222,6 +222,10 @@ const variantsOf = (table: Record<string, string[]>, word: string): string[] | u
   return undefined;
 };
 
+// Words that start the unit part of a street line ("Apt 4", "Suite 200", "#4"). What follows
+// one names a unit inside the street address, so the street before it is identifying alone.
+const UNIT = /^(?:#.*|apt|apartment|unit|suite|ste|room|rm|floor|fl|bldg|building|lot|trlr|spc)\.?$/i;
+
 const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 
 // ---- per-kind matchers ----
@@ -282,14 +286,20 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
 
 function addressForms(addr: string): { patterns: string[]; folded: string[] } {
   // The street line carries the identity; city, state and ZIP alone are shared by thousands.
-  const street = addr.split(/,|\n/)[0].trim();
-  const words = street.split(/\s+/).filter(Boolean);
+  // A unit written without a comma ("1428 Elm Street Apt 4") is cut off the street line too,
+  // so the street alone in any spelling is matched and read at egress.
+  const line = addr.split(/,|\n/)[0].trim().split(/\s+/).filter(Boolean);
+  const unitAt = line.findIndex((w, i) => i >= 2 && UNIT.test(w));
+  const words = unitAt > 0 ? line.slice(0, unitAt) : line;
+  const street = words.join(" ");
   if (words.length < 2) return { patterns: [loose(addr)], folded: [alnum(addr)] };
-  const parts = words.map((w) => {
+  const partOf = (w: string) => {
     const forms = variantsOf(STREET_SUFFIX, w) ?? variantsOf(DIRECTION, w);
     return forms ? `(?:${forms.map(esc).join("|")})\\.?` : esc(w.replace(/\.$/, ""));
-  });
-  const patterns = [parts.join("[\\s,]+"), loose(addr)];
+  };
+  const patterns = [words.map(partOf).join("[\\s,]+"), loose(addr)];
+  // The street with its unit, in any spelling, so "1428 Elm St Apt 4" is replaced whole.
+  if (unitAt > 0) patterns.push(line.map(partOf).join("[\\s,]+"));
   // Unit numbers: "1428 Elm St Apt 4", "1428 Elm St #4" are covered by the street line.
   // The egress reading ignores separators, so each spelling the patterns accept ("Street",
   // "St"; "North", "N") is its own needle: "1428 E l m S t" flattens to 1428elmst.

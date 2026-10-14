@@ -165,6 +165,15 @@ ok("phone: not inside a longer number", !hit("ref 94045550187 and 40455501879").
 ok("address: Street written as St", clean("lives at 1428 Elm St, Decatur", "1428 Elm"));
 ok("address: as given, with the unit", clean("1428 Elm Street, Apt 4", "1428 Elm"));
 ok("address: the street name alone is not the address", !hit("Elm Street is lovely").length);
+{
+  // A unit written without a comma: the street alone is still the address.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ addresses: ["1428 Elm Street Apt 4"] }] })), "k");
+  const red = (t) => applyRedaction({ model: "m", messages: [{ role: "user", content: t }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody.messages[0].content;
+  ok("address: a unit declared without a comma, the street written alone", !/1428/.test(red("lives at 1428 Elm St now")) && !/1428/.test(red("lives at 1428 Elm Street")), red("lives at 1428 Elm St now"));
+  ok("address: a unit declared without a comma, written with the unit abbreviated", !/1428|Apt/.test(red("lives at 1428 Elm St Apt 4")), red("lives at 1428 Elm St Apt 4"));
+  ok("egress: the street alone of a unit declared without a comma is caught", egressViolations({ input: "hello", metadata: { note: "1428 Elm St" } }, c).includes("SUBJECT1_ADDRESS"));
+  ok("egress: another street beside a unit declared without a comma is not a hit", egressViolations({ input: "hello", metadata: { note: "1429 Elm St Apt 4" } }, c).length === 0);
+}
 for (const d of ["1986-07-14", "07/14/1986", "7/14/86", "July 14, 1986", "Jul 14 1986", "14 July 1986", "19860714"])
   ok(`date of birth: ${d}`, hit(`born ${d}`).length > 0, d);
 ok("date of birth: another date is not it", !hit("born 1986-07-15 or 7/14/1987").length);
