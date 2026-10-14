@@ -235,6 +235,14 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
     ok("egress: a short initial form inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "wrays, swray and rayws" }] }, c).length === 0);
   }
   {
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Li"] }] })), "k");
+    const text = "W . L i";
+    const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+    ok("egress: a three-letter initial and surname spread out that detection leaves is caught", out.messages[0].content === text && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+    ok("egress: a three-letter surname-first initial spread out is caught", egressViolations({ messages: [{ role: "user", content: "L-i W" }] }, c).includes("SUBJECT1_NAME"));
+    ok("egress: a three-letter initial form inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "wlis, awli and liwx" }] }, c).length === 0);
+  }
+  {
     // A token of a full-name declaration, written alone and spread out: detection leaves it,
     // egress refuses it, the same as the capitalised token detection would have redacted.
     const out = applyRedaction({ model: "m", messages: [{ role: "user", content: "M a r i s o l" }] }, "anthropic", new Vault("reversible"), ["pii"], det, true, "messages").deidBody;

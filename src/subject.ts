@@ -245,13 +245,14 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
     patterns.add(`(?<![\\p{L}\\p{N}])${tok(last)}\\s*,\\s*${esc(first[0])}\\.?${middle.length ? `(?:${S}${middle.map((m) => `${esc(m[0])}\\.?`).join(S)})?` : ""}(?![\\p{L}\\p{N}])`); // Vance, M. [L.]
     if (middle.length) patterns.add(`${tok(first)}${S}${middle.map((m) => `${esc(m[0])}\\.?`).join(S)}${S}${tok(last)}`); // Marisol L. Vance
     // Handles and concatenations: marisolvance, marisol.vance, mvance, vancem
-    // A form too short to be a needle or a handle ("Will Ray" as wray, rayw) is still read at
-    // egress word-bounded with any separators, so "w . r a y" is caught and "wrays" is not.
+    // A form too short to be a needle or a handle ("Will Ray" as wray, rayw; "Will Li" as wli)
+    // is still read at egress word-bounded with any separators, however short, so "w . r a y"
+    // and "W . L i" are caught and "wrays" is not.
     for (const h of [first + last, last + first, first[0] + last, last + first[0]])
       if (h.length >= 6) {
         patterns.add(esc(h.toLowerCase()));
         folded.add(alnum(h));
-      } else for (const p of egressSpread(h)) egress.add(p);
+      } else for (const p of egressSpread(h, 1)) egress.add(p);
     folded.add(alnum(first + last));
     // The whole name in order, middle names included: "w i l l h e n r y g r a c e".
     folded.add(alnum(tokens.join("")));
@@ -261,7 +262,7 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
       const initials = middle.map((m) => m[0]).join("");
       for (const h of [first[0] + initials + last, first + initials + last, last + first[0] + initials])
         if (alnum(h).length >= 6) folded.add(alnum(h));
-        else for (const p of egressSpread(h)) egress.add(p);
+        else for (const p of egressSpread(h, 1)) egress.add(p);
     }
   }
   // Single tokens alone (word-bounded, capitalised): skipped for short and common words.
