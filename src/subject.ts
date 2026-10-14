@@ -593,9 +593,16 @@ function numberLiterals(text: string): string[] {
   return out;
 }
 
+// Protocol fields whose contents the caller defines: metadata, a stored prompt's variables,
+// tool schemas and a tool call's input. Below them every key and value is read.
+const CALLER_CONTAINERS = new Set(["metadata", "variables", "parameters", "properties", "schema", "input_schema", "json_schema", "additionalProperties", "arguments"]);
+const isToolCall = (node: any) => typeof node?.type === "string" && /tool_use$|_call$/.test(node.type);
+
 /** Every string leaf and object key, with media payloads skipped (they are counted, not read).
- *  `inMedia` is true below a recognised media part, the only place a payload is skipped. */
-function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia = false): void {
+ *  `inMedia` is true below a recognised media part, the only place a payload is skipped.
+ *  `caller` is true below caller-defined data (a caller container, a key the protocol does not
+ *  define, decoded JSON text), where protocol keys and enum values are read like any other. */
+function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia = false, caller = false): void {
   if (depth > 64) throw new Error("body nested deeper than 64 levels; refusing to forward unread fields");
   if (typeof node === "string") {
     out.push(node);
@@ -611,7 +618,7 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
     if (lead === "{" || lead === "[") {
       let decoded: unknown;
       try { decoded = JSON.parse(node); } catch { decoded = undefined; }
-      if (decoded && typeof decoded === "object") leaves(decoded, out, parts, depth + 1);
+      if (decoded && typeof decoded === "object") leaves(decoded, out, parts, depth + 1, false, true);
     }
     return;
   }
@@ -626,14 +633,16 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
   if (!node || typeof node !== "object") return;
   const media = inMedia || parts.has(node);
   if (Array.isArray(node)) {
-    for (const v of node) leaves(v, out, parts, depth + 1, media);
+    for (const v of node) leaves(v, out, parts, depth + 1, media, caller);
     return;
   }
   for (const [k, v] of Object.entries(node)) {
-    if (!PROTOCOL_KEYS.has(k)) out.push(k);
-    if (ENUM_FIELDS.has(k) && typeof v === "string" && ENUM_VALUES.has(v)) continue; // "type": "text"
+    const protocol = !caller && PROTOCOL_KEYS.has(k);
+    if (!protocol) out.push(k);
+    if (protocol && ENUM_FIELDS.has(k) && typeof v === "string" && ENUM_VALUES.has(v)) continue; // "type": "text"
     if (media && typeof v === "string" && isPayload(k, v)) continue; // base64 or a data: URL
-    leaves(v, out, parts, depth + 1, media);
+    const below = !protocol || CALLER_CONTAINERS.has(k) || (k === "input" && isToolCall(node));
+    leaves(v, out, parts, depth + 1, media, below);
   }
 }
 

@@ -104,7 +104,14 @@ ok("name: a lower-case single token is not a name", !hit("he will mark it").leng
   const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
   ok("egress: a spaced-out surname that is also a field word is caught", leak("C a r d").includes("SUBJECT1_NAME") && leak("c-a-r-d").includes("SUBJECT1_NAME"));
   ok("egress: a protocol key spelled like a name token is not a hit", egressViolations({ messages: [{ role: "user", content: [{ type: "text", text: "x", name: "y" }] }] }, compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k")).length === 0);
-  ok("egress: a key that is not a protocol key is read", egressViolations({ messages: [{ role: "user", content: "x", card: 1 }], metadata: { "c a r d": 1 } }, c).includes("SUBJECT1_NAME"));
+  {
+    const n = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k");
+    const call = (input) => ({ messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input }] }] });
+    ok("egress: a tool call's own input key named like a protocol key is read", egressViolations(call({ name: "x" }), n).includes("SUBJECT1_NAME"));
+    ok("egress: decoded tool arguments are caller data", egressViolations({ messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: '{"name":"x"}' } }] }] }, n).includes("SUBJECT1_NAME"));
+    ok("egress: the tool call's protocol keys are not a hit", egressViolations(call({ q: "x" }), n).length === 0);
+  }
+  ok("egress: a key that is not a protocol key is read",egressViolations({ messages: [{ role: "user", content: "x", card: 1 }], metadata: { "c a r d": 1 } }, c).includes("SUBJECT1_NAME"));
   ok("egress: an enum value is skipped only when it is the whole value", egressViolations({ messages: [{ role: "user", content: "card" }] }, c).includes("SUBJECT1_NAME"));
 }
 {
