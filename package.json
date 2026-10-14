@@ -46,7 +46,7 @@
   },
   "optionalDependencies": {
     "@tesseract.js-data/eng": "1.0.0",
-    "sharp": "0.35.4",
+    "sharp": "0.35.5",
     "tesseract.js": "7.0.0"
   }
 }
