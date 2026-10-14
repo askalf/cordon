@@ -201,6 +201,22 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { account: 1e21 } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ids: ["1000000000000000000000"] }] }) });
   ok("egress: an exponent-form numeric ID in metadata is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // A declared literal that is also an API enum word is read outside the enum fields.
+  await reset();
+  res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", instructions: "high" }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ other: ["high"] }] }) }, "sys-key");
+  ok("egress: an enum-word literal in unredacted instructions is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  await reset();
+  res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { note: "high" } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ other: ["high"] }] }) });
+  ok("egress: an enum-word literal in metadata is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // A stored prompt's variables carry input parts: an image there is media like any other.
+  const promptImage = { model: "gpt-4o-mini", input: "describe it", prompt: { id: "pmpt_1", variables: { photo: { type: "input_image", image_url: "https://example.com/p.jpg" } } } };
+  await reset();
+  res = await post("/v1/responses", promptImage, { "x-cordon-subject": SUBJECT() });
+  ok("media: an image in a prompt variable is refused under block, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  await setTenant({ tenant: keyTenant("mask-key"), subjectMedia: "mask" });
+  await reset();
+  res = await post("/v1/responses", promptImage, { "x-cordon-subject": SUBJECT({ media: "mask" }) }, "mask-key");
+  ok("media: a URL image in a prompt variable is refused under mask, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
   // Digits spread wider than detection reaches are still caught on the way out.
   await reset();
   res = await post("/v1/messages", aBody("call 4    0    4    5    5    5    0    1    8    7"), { "x-cordon-subject": SUBJECT() });

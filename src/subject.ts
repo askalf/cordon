@@ -188,8 +188,10 @@ const PROTOCOL_KEYS = new Set(
     .split(" "),
 );
 
-// The APIs' own enum values ("type": "text", "role": "user"), skipped at egress only when a
-// string value is exactly one of them; any other value, under any key, is read.
+// The APIs' own enum fields and values ("type": "text", "role": "user"). A value is skipped at
+// egress only under one of these fields and only when it is exactly one of these words; the
+// same word in instructions, metadata or any other field is read.
+const ENUM_FIELDS = new Set(["type", "role", "media_type", "detail", "status", "effort", "tool_choice", "stop_reason", "finish_reason", "object"]);
 const ENUM_VALUES = new Set(
   ("text image document tool_use tool_result thinking redacted_thinking input_text input_image input_file " +
     "output_text refusal function function_call function_call_output message reasoning summary_text user " +
@@ -528,13 +530,22 @@ export function mediaPartsOf(body: any): Set<object> {
   };
   if (!body || typeof body !== "object") return found;
   for (const m of Array.isArray(body.messages) ? body.messages : []) parts(m?.content);
-  if (Array.isArray(body.input))
-    for (const item of body.input) {
-      if (isMediaPart(item)) found.add(item);
-      else {
-        parts(item?.content);
-        parts(item?.output);
+  for (const list of [body.input, body.instructions])
+    if (Array.isArray(list))
+      for (const item of list) {
+        if (isMediaPart(item)) found.add(item);
+        else {
+          parts(item?.content);
+          parts(item?.output);
+        }
       }
+  // A Responses stored prompt's variables: each value is a string or one input part, an
+  // input_image or input_file among them.
+  const vars = body.prompt?.variables;
+  if (vars && typeof vars === "object" && !Array.isArray(vars))
+    for (const v of Object.values(vars)) {
+      if (isMediaPart(v)) found.add(v as object);
+      else if (Array.isArray(v)) parts(v);
     }
   return found;
 }
@@ -587,7 +598,6 @@ function numberLiterals(text: string): string[] {
 function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia = false): void {
   if (depth > 64) throw new Error("body nested deeper than 64 levels; refusing to forward unread fields");
   if (typeof node === "string") {
-    if (ENUM_VALUES.has(node)) return;
     out.push(node);
     // Tool arguments arrive as JSON text: a number written 4.045550187e9 or 4045550187.0 is
     // read again at its exact decimal value, the spelling the identifiers are matched in.
@@ -621,6 +631,7 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
   }
   for (const [k, v] of Object.entries(node)) {
     if (!PROTOCOL_KEYS.has(k)) out.push(k);
+    if (ENUM_FIELDS.has(k) && typeof v === "string" && ENUM_VALUES.has(v)) continue; // "type": "text"
     if (media && typeof v === "string" && isPayload(k, v)) continue; // base64 or a data: URL
     leaves(v, out, parts, depth + 1, media);
   }
