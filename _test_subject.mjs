@@ -195,6 +195,17 @@ for (const id of ["123-45-6789", "123 45 6789", "123456789"]) ok(`id: ${id}`, cl
   ok("egress: a short alphanumeric ID spread out is caught", leak("A B 1 2 C").includes("SUBJECT1_ID"));
   ok("egress: a short ID inside a longer number is not a hit", leak("order 912345 and 12340").length === 0);
 }
+{
+  // An ID with a letter outside ASCII keeps it, and is the same ID written without the accent.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["ABé1234"] }] })), "k");
+  const leak = (s) => egressViolations({ input: "hello", metadata: { note: s } }, c);
+  ok("id: a non-ASCII letter is kept, so the ID as declared is redacted", subjectSpans("acct ABé1234 and AB-É-1234", c).length === 2);
+  ok("id: a non-ASCII letter is kept, so the ID without its accent is redacted", subjectSpans("acct ABe1234", c).length === 1);
+  ok("egress: an ID with a non-ASCII letter in an unredacted field is caught, accented or not", leak("ABé1234").includes("SUBJECT1_ID") && leak("abe1234").includes("SUBJECT1_ID") && leak("A B É 1 2 3 4").includes("SUBJECT1_ID"));
+  ok("egress: the ID with its non-ASCII letter dropped is not the ID", leak("AB1234 and ABx1234").length === 0);
+  const short = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["Øé12"] }] })), "k");
+  ok("egress: a short ID of non-ASCII letters is caught spread out", egressViolations({ input: "hello", metadata: { note: "ø e 1 2" } }, short).includes("SUBJECT1_ID"));
+}
 ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mari.q"));
 {
   const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ handles: ["@abcd"], other: ["zq9x7"] }] })), "k");

@@ -437,14 +437,19 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             break;
           }
           case "ID": {
-            const d = value.replace(/[^A-Za-z0-9]/g, "");
-            if (d.length < 4) continue;
-            patterns = [`(?<![\\p{L}\\p{N}])${d.split("").map(esc).join("[^\\p{L}\\p{N}]{0,8}")}(?![\\p{L}\\p{N}])`];
-            // The egress reading: any run of separators between the characters, word-bounded,
-            // so a short ID spread wider than detection reaches is still caught.
-            egress = [`(?<![\\p{L}\\p{N}])${d.toLowerCase().split("").map(esc).join("[^\\p{L}\\p{N}]*")}(?![\\p{L}\\p{N}])`];
+            // Letters and numbers in any script are kept: dropping "é" from "ABé1234" would
+            // compile an ID that is never written.
+            const d = value.replace(/[^\p{L}\p{N}]/gu, "");
+            if ([...d].length < 4) continue;
+            const idPattern = (s: string) => `(?<![\\p{L}\\p{N}])${[...s].map(esc).join("[^\\p{L}\\p{N}]{0,8}")}(?![\\p{L}\\p{N}])`;
+            patterns = [idPattern(d)];
+            // The same ID written without its accents is the same ID.
+            if (unaccent(d) !== d) patterns.push(idPattern(unaccent(d)));
+            // The egress reading: any run of separators between the characters, word-bounded and
+            // without accents, so a short ID spread wider than detection reaches is still caught.
+            egress = egressSpread(d, 1);
             if (/^\d+$/.test(d) && d.length >= 7) digits = [d];
-            else if (d.length >= 6) folded = [alnum(d)];
+            else if (alnum(d).length >= 6) folded = [alnum(d)];
             break;
           }
           case "HANDLE": {

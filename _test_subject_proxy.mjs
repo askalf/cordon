@@ -201,6 +201,12 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { account: 1e21 } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ids: ["1000000000000000000000"] }] }) });
   ok("egress: an exponent-form numeric ID in metadata is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // A declared ID with a letter outside ASCII, in Responses metadata, which redaction leaves.
+  for (const note of ["ABé1234", "abe1234"]) {
+    await reset();
+    res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { note } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ids: ["ABé1234"] }] }) });
+    ok(`egress: a non-ASCII ID in metadata is refused, upstream never called: ${note}`, res.status === 422 && (await calls()).total === 0, String(res.status));
+  }
   // The same for an ID longer than the default number expansion, as a number and in a string.
   const longId = enc({ ref: "case-int-1", subjects: [{ ids: ["1" + "0".repeat(40)] }] });
   await reset();
