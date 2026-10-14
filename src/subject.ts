@@ -399,6 +399,9 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             if (d.length < 7) continue;
             patterns = [`(?<!\\d)(?:\\+?1[^\\p{L}\\p{N}]{0,3})?${digitPattern(d)}(?!\\d)`];
             digits = [d];
+            // At egress the same optional leading country code, with any separators: "1" then the
+            // digits spread wider than detection reaches is the declared number.
+            egress = [`(?<!\\d)(?:1[^\\p{L}\\p{N}]*)?${egressDigitPattern(d)}(?!\\d)`];
             break;
           }
           case "ADDRESS": {

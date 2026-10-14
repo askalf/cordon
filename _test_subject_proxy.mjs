@@ -257,6 +257,13 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/messages", aBody("call " + "4045550187".split("").join(" ".repeat(12))), { "x-cordon-subject": SUBJECT() });
   ok("phone: twelve spaces between digits is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // A leading country code attached and the rest spread wider than detection reaches, in
+  // Responses metadata, which redaction leaves; for a phone declared plain and with +1.
+  for (const phones of [["404-555-0187"], ["+1 404 555 0187"]]) {
+    await reset();
+    res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { note: "1404" + "5550187".split("").map((d) => " ".repeat(12) + d).join("") } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ phones }] }) });
+    ok(`phone: an attached leading 1 with wide separators in metadata is refused, upstream never called: ${phones[0]}`, res.status === 422 && (await calls()).total === 0, String(res.status));
+  }
   await reset();
   res = await post("/v1/messages", aBody("acct " + "1234".split("").join(" ".repeat(12))), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ids: ["1234"] }] }) });
   ok("id: a short ID with twelve spaces between digits is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));

@@ -250,6 +250,14 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: an object key is read too", egressViolations({ messages: [{ role: "user", content: [{ type: "text", text: "x", "Marisol Quintero-Vance": 1 }] }] }, comp).includes("SUBJECT1_NAME"));
   ok("egress: any run of separators between digits is caught", leak("4    0    4    5    5    5    0    1    8    7").includes("SUBJECT1_PHONE") && leak("4\n\n\n\n\n0 4 - - - - 555 . . . 0187").includes("SUBJECT1_PHONE"));
   ok("egress: digits split by a word are not joined", leak("room 404 and then 5550187 later").length === 0);
+  {
+    // A leading country code attached, the rest spread wider than detection reaches.
+    const wide = "1404" + "5550187".split("").map((d) => " ".repeat(12) + d).join("");
+    ok("egress: a phone with an attached leading 1 and wide separators is caught", egressViolations({ input: "hello", metadata: { note: wide } }, comp).includes("SUBJECT1_PHONE"));
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ phones: ["+1 404 555 0187"] }] })), "k");
+    ok("egress: the same, for a phone declared with +1", egressViolations({ input: "hello", metadata: { note: wide } }, c).includes("SUBJECT1_PHONE") && egressViolations({ input: "hello", metadata: { note: "+" + wide } }, c).includes("SUBJECT1_PHONE"));
+    ok("egress: a longer number holding the phone after a country code is not a hit", leak("ref 2" + wide).length === 0 && leak("ref 2140455501870").length === 0);
+  }
   for (const d of ["DOB: 7 / 14 / 1986", "7 - 14 - 86", "07 / 14 / 1986", "1986 / 7 / 14", "7 . 14 . 86", "DOB: 7 / 1 4 / 1 9 8 6", "0 7 - 1 4 - 8 6", "1 9 8 6 / 7 / 1 4"])
     ok(`egress: a spaced numeric date of birth is caught: ${d}`, leak(d).includes("SUBJECT1_DOB"), d);
   ok("egress: a spaced date that is not the subject's is not a hit", leak("7 / 14 / 1987 and 7 / 15 / 86").length === 0);
