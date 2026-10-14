@@ -174,6 +174,16 @@ const COMMON = new Set(
     .split(" "),
 );
 
+// Request field names and placeholder kinds: words every request body carries as keys
+// ("name", "content") or inside the placeholders cordon writes ("SUBJECT1_NAME").
+const FIELD_WORDS = new Set(
+  ("name type role content text model input output tool tools user assistant system data image source " +
+    "media file url detail format items enum default string object number boolean array function arguments " +
+    "parameters properties required description messages metadata thinking signature subject email phone " +
+    "address dob handle other key secret card")
+    .split(" "),
+);
+
 const STREET_SUFFIX: Record<string, string[]> = {
   street: ["street", "st"], avenue: ["avenue", "ave", "av"], road: ["road", "rd"], drive: ["drive", "dr"],
   lane: ["lane", "ln"], court: ["court", "ct"], boulevard: ["boulevard", "blvd"], circle: ["circle", "cir"],
@@ -243,9 +253,13 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
   // or several: "Z o e" and "M a r i s o l" (from "Marisol Quintero-Vance") are caught, "zoes"
   // and "marisols" are not. A one-token name long enough to be a needle is read separator-blind
   // as well.
+  // A token that is also a request field name or a placeholder kind ("Name", "Content") is
+  // not read alone at egress: every body carries those words as keys and in placeholders, so
+  // it would refuse clean requests. The capitalised match above still redacts it in text.
+  const alone = (t: string) => !COMMON.has(t.toLowerCase()) && !FIELD_WORDS.has(t.toLowerCase());
   for (const t of tokens)
-    if (t.length >= 3 && !COMMON.has(t.toLowerCase())) for (const p of egressSpread(t, 3)) egress.add(p);
-  if (tokens.length === 1 && tokens[0].length >= 5 && !COMMON.has(tokens[0].toLowerCase())) folded.add(alnum(tokens[0]));
+    if (t.length >= 3 && alone(t)) for (const p of egressSpread(t, 3)) egress.add(p);
+  if (tokens.length === 1 && tokens[0].length >= 5 && alone(tokens[0])) folded.add(alnum(tokens[0]));
   return { patterns: [...patterns], exact: [...exact], folded: [...folded], egress: [...egress] };
 }
 
@@ -386,14 +400,14 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             const h = value.replace(/^@/, "");
             if (h.length < 4) continue;
             patterns = [`@?${loose(h)}`];
-            egress = egressSpread(h);
+            egress = egressSpread(h, 1);
             if (alnum(h).length >= 6) folded = [alnum(h)];
             break;
           }
           default: {
             if (value.length < 4) continue;
             patterns = [loose(value)];
-            egress = egressSpread(value);
+            egress = egressSpread(value, 1);
             if (alnum(value).length >= 6) folded = [alnum(value)];
           }
         }
@@ -510,7 +524,38 @@ export function countMedia(body: any): number {
   return mediaPartsOf(body).size;
 }
 
-const NUMBER_LITERAL = /-?\d+(?:\.\d+)?[eE][+-]?\d+|-?\d+\.\d+/g;
+const isDigit = (c: number) => c >= 48 && c <= 57;
+
+/** The number literals in a string that have a fraction or an exponent, in one left-to-right
+ *  pass. A regex tried from every offset rescans a long digit run each time (quadratic in
+ *  the run, which the caller chooses); this reads each run once, from its first digit. */
+function numberLiterals(text: string): string[] {
+  const out: string[] = [];
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    if (!isDigit(text.charCodeAt(i)) || (i > 0 && isDigit(text.charCodeAt(i - 1)))) { i++; continue; }
+    const start = i > 0 && text[i - 1] === "-" ? i - 1 : i;
+    while (i < n && isDigit(text.charCodeAt(i))) i++;
+    let marked = false;
+    if (text[i] === "." && isDigit(text.charCodeAt(i + 1))) {
+      i++;
+      while (i < n && isDigit(text.charCodeAt(i))) i++;
+      marked = true;
+    }
+    if (text[i] === "e" || text[i] === "E") {
+      let j = i + 1;
+      if (text[j] === "+" || text[j] === "-") j++;
+      if (isDigit(text.charCodeAt(j))) {
+        while (j < n && isDigit(text.charCodeAt(j))) j++;
+        i = j;
+        marked = true;
+      }
+    }
+    if (marked) out.push(text.slice(start, i));
+  }
+  return out;
+}
 
 /** Every string leaf and object key, with media payloads skipped (they are counted, not read).
  *  `inMedia` is true below a recognised media part, the only place a payload is skipped. */
@@ -520,9 +565,9 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
     out.push(node);
     // Tool arguments arrive as JSON text: a number written 4.045550187e9 or 4045550187.0 is
     // read again at its exact decimal value, the spelling the identifiers are matched in.
-    for (const m of node.matchAll(NUMBER_LITERAL)) {
-      const exact = exactDecimal(m[0]);
-      if (exact !== m[0]) out.push(exact);
+    for (const lit of numberLiterals(node)) {
+      const exact = exactDecimal(lit);
+      if (exact !== lit) out.push(exact);
     }
     // A JSON-string field (tool-call arguments) is decoded by the provider: its keys and
     // values are read again as decoded, so \u0057-style escapes cannot hide the letters.

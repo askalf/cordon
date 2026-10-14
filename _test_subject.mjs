@@ -91,6 +91,14 @@ ok("name: a lower-case single token is not a name", !hit("he will mark it").leng
   ok("egress: a short single-token name inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "zoras, azora and zorathustra" }] }, c).length === 0);
 }
 {
+  // A name token that is also a field name: redacted in text, never matched against the
+  // body's own keys or the placeholder that replaced it.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k");
+  const body = { model: "m", messages: [{ role: "user", content: "Name Bdeqnsk called" }, { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input: { q: "x" } }] }] };
+  const out = applyRedaction(body, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+  ok("egress: a name token that is also a field name does not refuse a redacted body", !JSON.stringify(out).includes("Bdeqnsk") && egressViolations(out, c).length === 0, JSON.stringify(out.messages[0].content));
+}
+{
   const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Zoe"] }] })), "k");
   const out = applyRedaction({ model: "m", messages: [{ role: "user", content: "Z o e" }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
   ok("egress: a three-letter single-token name spread out that detection leaves is caught", out.messages[0].content === "Z o e" && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
@@ -129,6 +137,14 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: a short handle spread wide is caught", leak("@ A - B - C       D").includes("SUBJECT1_HANDLE"));
   ok("egress: a short other literal spread out is caught", leak("code Z Q 9 X 7").includes("SUBJECT1_OTHER"));
   ok("egress: other letters spread between a short handle's or literal's are not a hit", leak("a b x c d and z q 9 x 8 7 and abxcd").length === 0);
+}
+{
+  // Accepted at four characters, read at egress however few letters and digits remain.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ handles: ["@ab-c"], other: ["xy-z"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a punctuated short handle spread out is caught", leak("handle a b c").includes("SUBJECT1_HANDLE"));
+  ok("egress: a punctuated short other literal spread out is caught", leak("ref x . y . z").includes("SUBJECT1_OTHER"));
+  ok("egress: other letters between a punctuated short literal's are not a hit", leak("a b x c and x y q z").length === 0);
 }
 {
   const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ emails: ["abcde@example.com"], addresses: ["1 Oak St"] }] })), "k");
@@ -176,7 +192,7 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
     const out = applyRedaction({ model: "m", messages: [{ role: "user", content: "M a r i s o l" }] }, "anthropic", new Vault("reversible"), ["pii"], det, true, "messages").deidBody;
     ok("egress: a spaced-out first name from a full-name declaration that detection leaves is caught", out.messages[0].content === "M a r i s o l" && egressViolations(out, comp).includes("SUBJECT1_NAME"), out.messages[0].content);
     ok("egress: a spaced-out surname from a full-name declaration is caught", leak("q u i n t e r o - v a n c e").includes("SUBJECT1_NAME") && leak("O.K.O.N.K.W.O").includes("SUBJECT2_NAME"));
-    ok("egress: a token of a full-name declaration inside a longer word is not a hit", leak("marisols, amarisol and okonkwoish").length === 0);
+    ok("egress: a token of a full-name declaration inside a longer word is not a hit", leak("marisols, amarisol, okonkwoish").length === 0);
     const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Grace"] }] })), "k");
     ok("egress: common-word tokens of a full-name declaration spread out alone are not a hit", egressViolations({ messages: [{ role: "user", content: "w i l l and g r a c e" }] }, c).length === 0);
   }
@@ -198,6 +214,13 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: a spaced-out address in its abbreviated spelling is caught", leak("1428 E l m S t").includes("SUBJECT1_ADDRESS") && leak("1 4 2 8 . E L M . S T R E E T").includes("SUBJECT1_ADDRESS"));
   ok("egress: a phone in exponent notation inside tool arguments is caught", egressViolations({ messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9}' } }] }] }, comp).includes("SUBJECT1_PHONE"));
   ok("egress: a phone written with a decimal point is caught", leak('{"phone":4045550187.0}').includes("SUBJECT1_PHONE"));
+  {
+    // Number literals are read in one pass: a long digit run costs its length, not its square.
+    const t = Date.now();
+    const hits = leak("0".repeat(200_000) + " 4.045550187e9");
+    const ms = Date.now() - t;
+    ok("egress: a 200,000-digit run is read in linear time and the literal after it is still caught", ms < 2000 && hits.includes("SUBJECT1_PHONE"), `${ms} ms`);
+  }
   {
     const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Grace"] }] })), "k");
     const u = (s) => [...s].map((ch) => (ch === " " ? " " : "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"))).join("");
