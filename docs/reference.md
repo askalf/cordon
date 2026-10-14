@@ -70,6 +70,32 @@ curl localhost:8080/admin/tenant -H 'x-admin-token: …' -H 'content-type: appli
 - **Tenant identity**: derived from the API key (`TENANT_FROM_AUTH`, default on), else `public`. `X-Tenant` is ignored unless `TRUST_TENANT_HEADER=true`. When it is honoured it may only select a tenant whose policy is at least as strict as the caller's own on every knob: `mode` (`off` < `reversible` < `strip`), `activeSets` (a superset), `failMode` (`open` < `closed`), `redactSystem` (`false` < `true`), `consistentPseudonyms` (`true` < `false`, since a stable token lets the provider link a value across requests), `allowHeaderOverride` (`true` < `false`), and the same upstream bases (a residency route has no stricter direction). Anything else is refused with 403 before the upstream is called. A tenant that differs in a looser or residency setting is reached by giving its callers their own API key and setting the policy on the key-derived tenant (`auth:` plus the first 16 hex characters of the key's SHA-256). The header also sets the tenant name in the audit log and metrics, which is the trust the setting grants.
 - **Per-request headers can only tighten**: `X-Redact-Mode` must be at least as strong as the policy mode (`off` < `reversible` < `strip`) and `X-Redact-Sets` must include every policy set. Anything weaker is refused with 403 before the upstream is called. `"allowHeaderOverride": true` on a tenant (or `ALLOW_HEADER_OVERRIDE=true` globally) restores per-request loosening.
 
+## Known subjects
+
+`X-Cordon-Subject` is base64url JSON: `{"ref"?: string (up to 128), "media"?: "block" | "allow", "subjects": [{ "names"?, "emails"?, "phones"?, "addresses"?, "dates"?, "ids"?, "handles"?, "other"?: string[] }]}`, at most 12 KB encoded, 8 subjects, 32 strings of up to 200 characters per list. Anything else is a 400 before the upstream is called. Identifiers too short to match safely are dropped (a phone under 7 digits, an ID under 4 characters).
+
+Tenant policy fields:
+
+```bash
+curl localhost:8080/admin/tenant -H 'x-admin-token: …' -H 'content-type: application/json' \
+  -d '{"tenant":"auth:…","requireSubject":true,"subjectMedia":"block","reportOnly":false}'
+```
+
+- `requireSubject`: refuse any generation request without the header (400).
+- `subjectMedia`: `"block"` (default), `"mask"` or `"allow"`; the stricter of this and the header's `media` applies. In `mask` mode each image (PNG, JPEG, WebP, GIF; up to 10 per request and 30 megapixels each, 30 seconds per read) is read, masked, re-read and sent as PNG; mask counts are added to the record as `IMAGE_<TYPE>`.
+- `reportOnly`: forward unchanged and record the verdict (`X-Cordon-Report: redact=<n>; egress=<verdict>`, audit `report: true`).
+
+All three take part in the X-Tenant strictness rule: a looser setting cannot be selected by header.
+
+Audit records of subject requests add `subject` (a digest of the ref, keyed by `TENANT_SECRET`), `egress` (`verified`, `egress` or `media`) and `media` (a count). Records without them hash exactly as before, so older logs still verify.
+
+```bash
+curl 'localhost:8080/admin/receipts?ref=case-1042' -H 'x-admin-token: …'
+# {"subject":"…","chain":{"ok":true,"records":…},"receipts":[{ts, entityCounts, total, egress, media, hash, …}]}
+```
+
+The chain is verified before receipts are served; a broken chain is a 409 with no receipts. Metrics add `subjectBlocked` (refusals by stage).
+
 ## Ops endpoints
 
 `GET /healthz`, `GET /metrics` (and `/metrics.prom`), `GET /dashboard` (single-file view of redactions by type, mode and set mix, fail-closed count, tenant policies, audit-chain status), `GET /admin/stats`. Admin routes require `x-admin-token`; with `ADMIN_TOKEN` unset they are disabled (403). `ALLOW_OPEN_ADMIN=1` serves them with no auth, for local dev only.

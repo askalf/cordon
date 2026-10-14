@@ -10,6 +10,8 @@ import { Vault } from "./redact/vault";
 import { captureAndReidentify, pipeUpstream } from "./streaming";
 import { audit } from "./audit";
 import { nowMs } from "./util";
+import { compileSubjects, countMedia, egressViolations, strictestMedia, withSubjects, type CompiledSubjects } from "./subject";
+import { maskMedia } from "./media/mask";
 import type { CanonicalRequest, HttpRes } from "./types";
 
 /**
@@ -23,10 +25,16 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   metrics.request(r.mode);
   res.setHeader("X-Redact-Mode", r.mode);
 
+  // A request that names its subjects asked for them to be protected; a policy that turns
+  // redaction off cannot honour that, so it is refused rather than passed through.
+  if (r.mode === "off" && r.subject)
+    return onRedactionError(r, res, new Error("X-Cordon-Subject sent to a tenant whose mode is off"), "closed", t0, "subject");
+
   // off → transparent passthrough, audited as a bypass.
   if (r.mode === "off") return passthrough(r, res, "mode-off");
 
   const pol = getPolicy(r.tenant);
+  const reportOnly = pol.reportOnly === true;
   const failMode = pol.failMode ?? config.failMode;
   const consistentPseudonyms = pol.consistentPseudonyms ?? config.consistentPseudonyms;
   const redactSystem = pol.redactSystem ?? config.redactSystem;
@@ -49,10 +57,13 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   let vault: Vault;
   let deidBody: any;
   let spans;
+  let subjects: CompiledSubjects | undefined;
   try {
     if (r.testFail) throw new Error("forced detection failure (test hook)");
     vault = new Vault(r.mode, { consistentPseudonyms, secret: config.tenantSecret });
-    ({ deidBody, spans } = applyRedaction(r.raw, r.provider, vault, r.activeSets, detector, redactSystem, r.dialect));
+    subjects = r.subject ? compileSubjects(r.subject, config.tenantSecret) : undefined;
+    const det = subjects ? withSubjects(detector, subjects) : detector;
+    ({ deidBody, spans } = applyRedaction(r.raw, r.provider, vault, r.activeSets, det, redactSystem, r.dialect));
   } catch (e) {
     return onRedactionError(r, res, e, failMode, t0);
   }
@@ -60,9 +71,39 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   const counts = tally(spans);
   metrics.redactions(counts, r.activeSets);
 
+  // ---- known subjects: media, then the egress check on what would actually leave ----
+  let egress: string | undefined;
+  let egressDetail = "";
+  const media = subjects ? countMedia(r.raw) : undefined;
+  if (subjects) {
+    const mediaMode = strictestMedia(pol.subjectMedia, subjects.media);
+    if (media && mediaMode === "block") {
+      egress = "media";
+      egressDetail = `${media} media part(s) cannot be checked for the subjects' identifiers`;
+    } else if (media && mediaMode === "mask") {
+      try {
+        await maskMedia(deidBody, subjects, r.activeSets, counts);
+      } catch (e) {
+        egress = "media";
+        egressDetail = String((e as any)?.message ?? e);
+      }
+    }
+    if (!egress) {
+      try {
+        const hits = egressViolations(deidBody, subjects, { minted: vault.minted, raw: r.raw });
+        egress = hits.length ? "egress" : "verified";
+        if (hits.length) egressDetail = `identifiers still present after redaction: ${hits.join(", ")}`;
+      } catch (e) {
+        egress = "egress";
+        egressDetail = String((e as any)?.message ?? e);
+      }
+    }
+  }
+
   // ---- audit BEFORE forwarding — counts/types only, never values ----
+  let receipt: string | undefined;
   try {
-    await audit.append({
+    const rec = await audit.append({
       tenant: r.tenant,
       provider: r.provider,
       model: r.model,
@@ -70,10 +111,34 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
       entityCounts: counts,
       sets: r.activeSets,
       total: spans.length,
+      ...(subjects ? { subject: subjects.refDigest ?? "", egress, media } : {}),
+      ...(reportOnly ? { report: true } : {}),
     });
+    receipt = rec.hash;
   } catch (e) {
-    // A compliance log that can't be written must block in closed mode.
-    if (failMode === "closed") return onRedactionError(r, res, e, failMode, t0, "audit");
+    // A compliance log that can't be written must block in closed mode, and always for a
+    // request that named its subjects (its receipt is part of what it asked for).
+    if (failMode === "closed" || subjects) return onRedactionError(r, res, e, "closed", t0, "audit");
+  }
+  if (receipt) res.setHeader("X-Cordon-Receipt", receipt);
+
+  // Report only: the verdict is recorded and returned as headers; the request goes out as
+  // the caller sent it (this tenant is being measured, not protected).
+  if (reportOnly) {
+    res.setHeader("X-Cordon-Report", `redact=${spans.length}${egress ? `; egress=${egress}` : ""}`);
+    metrics.bypass("report-only");
+    try {
+      const up = await forwardUpstream(r);
+      await pipeUpstream(up, res);
+    } catch (e) {
+      safeUpstreamError(res, e);
+    }
+    metrics.timing("report", t0);
+    return;
+  }
+  if (egress && egress !== "verified") {
+    metrics.egressBlocked(egress);
+    return onRedactionError(r, res, new Error(egressDetail), "closed", t0, egress);
   }
 
   res.setHeader("X-Redacted", String(spans.length));
@@ -158,6 +223,7 @@ async function passthrough(r: CanonicalRequest, res: HttpRes, reason: string) {
 /**
  * Detection / audit failure. Default (closed): block with 4xx, upstream NOT called.
  * Open (explicit dev escape hatch): forward the original body, audited as a bypass.
+ * A request that named its subjects is never forwarded raw, whatever the fail mode.
  */
 async function onRedactionError(
   r: CanonicalRequest,
@@ -167,7 +233,7 @@ async function onRedactionError(
   t0: number,
   stage = "detect",
 ) {
-  if (failMode === "open") {
+  if (failMode === "open" && !r.subject) {
     metrics.bypass(`fail-open:${stage}`);
     try {
       const up = await forwardUpstream(r); // ⚠ forwards raw — dev only

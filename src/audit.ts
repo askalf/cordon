@@ -17,6 +17,10 @@ export interface AuditInput {
   entityCounts: Record<string, number>;
   sets: RedactSet[];
   total: number;
+  subject?: string;
+  egress?: string;
+  media?: number;
+  report?: boolean;
 }
 
 /** The exact payload that gets hashed (record minus its own hash). */
@@ -30,6 +34,12 @@ const hashable = (r: Omit<AuditRecord, "hash">) =>
     entityCounts: r.entityCounts,
     sets: r.sets,
     total: r.total,
+    // Present only on records that carry them, so records written before these fields
+    // existed hash (and verify) exactly as they did.
+    ...(r.subject !== undefined ? { subject: r.subject } : {}),
+    ...(r.egress !== undefined ? { egress: r.egress } : {}),
+    ...(r.media !== undefined ? { media: r.media } : {}),
+    ...(r.report !== undefined ? { report: r.report } : {}),
     prevHash: r.prevHash,
   });
 
@@ -67,6 +77,10 @@ class AuditLog {
         entityCounts: input.entityCounts,
         sets: input.sets,
         total: input.total,
+        ...(input.subject !== undefined ? { subject: input.subject } : {}),
+        ...(input.egress !== undefined ? { egress: input.egress } : {}),
+        ...(input.media !== undefined ? { media: input.media } : {}),
+        ...(input.report !== undefined ? { report: input.report } : {}),
         prevHash: this.prevHash as string,
       };
       const record: AuditRecord = { ...base, hash: linkHash(base) };
@@ -75,6 +89,26 @@ class AuditLog {
       return record;
     });
     return this.tail;
+  }
+
+  /** Every record made under one subject digest, oldest first. */
+  async forSubject(subject: string): Promise<AuditRecord[]> {
+    let lines: string[];
+    try {
+      lines = (await readFile(this.path, "utf8")).split("\n").filter(Boolean);
+    } catch {
+      return [];
+    }
+    const out: AuditRecord[] = [];
+    for (const line of lines) {
+      try {
+        const rec = JSON.parse(line) as AuditRecord;
+        if (rec.subject === subject) out.push(rec);
+      } catch {
+        /* verify() reports unparseable lines */
+      }
+    }
+    return out;
   }
 
   /** Walk the on-disk chain and report the first break (if any). */

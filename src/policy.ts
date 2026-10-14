@@ -28,6 +28,15 @@ export interface TenantPolicy {
   redactSystem?: boolean;
   /** Data-residency: route this tenant's traffic to a specific upstream base. */
   upstreamOverride?: Partial<Record<Provider, string>>;
+  /** Report only: run detection and the subject egress check, record the verdict, and
+   *  forward the request UNCHANGED. For measuring a new caller before enforcing; it
+   *  protects nothing, and every such request is audited with report: true. */
+  reportOnly?: boolean;
+  /** Require X-Cordon-Subject on every generation request from this tenant. */
+  requireSubject?: boolean;
+  /** Media in a known-subject request: refuse it ("block", the default), mask each image's
+   *  identifiers and re-read it before it goes ("mask"), or forward it unread ("allow"). */
+  subjectMedia?: "block" | "mask" | "allow";
 }
 
 const policies = new Map<string, TenantPolicy>();

@@ -7,6 +7,7 @@ const s = {
   bypass: 0,
   bypassBy: {} as Record<string, number>,
   failClosed: 0,
+  subjectBlocked: {} as Record<string, number>, // known-subject refusals by stage (egress, media)
   upstreamErrors: 0,
   byMode: {} as Record<string, number>, // reversible / strip / off
   byType: {} as Record<string, number>, // entity type → total redacted
@@ -32,6 +33,9 @@ export const metrics = {
     s.bypass++;
     s.bypassBy[reason] = (s.bypassBy[reason] ?? 0) + 1;
   },
+  egressBlocked(stage: string) {
+    s.subjectBlocked[stage] = (s.subjectBlocked[stage] ?? 0) + 1;
+  },
   failedClosed() {
     s.failClosed++;
   },
@@ -51,6 +55,7 @@ export const metrics = {
       bypass: s.bypass,
       bypassByReason: { ...s.bypassBy },
       failClosed: s.failClosed,
+      subjectBlocked: { ...s.subjectBlocked },
       upstreamErrors: s.upstreamErrors,
       byMode: { ...s.byMode },
       byType: { ...s.byType },

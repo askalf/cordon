@@ -86,6 +86,10 @@ export interface CanonicalRequest {
   bare: string;
   /** Test-only: forces a detection failure to exercise the fail-closed path. */
   testFail?: boolean;
+  /** Known subjects (X-Cordon-Subject), parsed; see subject.ts. */
+  subject?: import("./subject").SubjectSpec;
+  /** Why X-Cordon-Subject was refused (index.ts answers 400 before anything is sent). */
+  subjectError?: string;
 }
 
 /** Minimal surface cordon needs from a Node ServerResponse. */
@@ -109,6 +113,15 @@ export interface AuditRecord {
   sets: RedactSet[];
   /** total entities redacted. */
   total: number;
+  /** Known-subject requests only: an opaque digest of the caller's ref (never the ref). */
+  subject?: string;
+  /** Known-subject requests only: "verified" (left after the egress check), or the stage
+   *  that refused it ("egress", "media"). */
+  egress?: string;
+  /** Media parts in the request (counted, never read). */
+  media?: number;
+  /** Report-only tenants: the request was forwarded unchanged and this records the verdict. */
+  report?: boolean;
   prevHash: string;
   hash: string;
 }

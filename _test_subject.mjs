@@ -1,0 +1,425 @@
+// Unit checks for known subjects (src/subject.ts). Run with: node --import tsx _test_subject.mjs
+// Every person, address and number here is invented.
+import { parseSubjectHeader, compileSubjects, withSubjects, subjectSpans, egressViolations, countMedia, refDigest, SubjectError, strictestMedia } from "./src/subject.ts";
+import { detector } from "./src/detect/index.ts";
+import { applyRedaction } from "./src/redact/apply.ts";
+import { Vault } from "./src/redact/vault.ts";
+import { mediaParts, MediaRefusal } from "./src/media/mask.ts";
+
+let pass = 0, fail = 0;
+const ok = (n, c, e = "") => { c ? pass++ : fail++; console.log(`${c ? "PASS" : "FAIL"}  ${n}${e ? "   (" + e + ")" : ""}`); };
+const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+const throwsSubject = (raw) => { try { parseSubjectHeader(raw); return false; } catch (e) { return e instanceof SubjectError; } };
+
+const PERSON = {
+  names: ["Marisol Quintero-Vance", "Mari Vance"],
+  emails: ["mqvance77@example.com"],
+  phones: ["(404) 555-0187"],
+  addresses: ["1428 Elm Street, Apt 4, Decatur, GA 30030"],
+  dates: ["1986-07-14"],
+  ids: ["123-45-6789"],
+  handles: ["@mari.q.vance"],
+};
+const spec = parseSubjectHeader(enc({ ref: "case-1", subjects: [PERSON, { names: ["Dmitri Okonkwo"] }] }));
+const comp = compileSubjects(spec, "unit-key");
+const det = withSubjects(detector, comp);
+const hit = (text) => subjectSpans(text, comp).map((s) => text.slice(s.start, s.end));
+const redact = (text) => {
+  const body = { model: "m", messages: [{ role: "user", content: text }] };
+  const { deidBody } = applyRedaction(body, "anthropic", new Vault("reversible"), ["pii", "pci", "secrets"], det, true, "messages");
+  return deidBody.messages[0].content;
+};
+const clean = (text, raw) => !redact(text).includes(raw);
+
+// ---- the header ----
+ok("header: a valid list parses; media is left to the policy when unset", spec.subjects.length === 2 && spec.media === undefined && spec.ref === "case-1");
+ok("header: absent is undefined", parseSubjectHeader(undefined) === undefined && parseSubjectHeader("") === undefined);
+ok("header: not base64url is refused", throwsSubject("not base64!"));
+ok("header: not JSON is refused", throwsSubject(Buffer.from("{nope").toString("base64url")));
+ok("header: no subjects is refused", throwsSubject(enc({ subjects: [] })));
+ok("header: an unknown list is refused", throwsSubject(enc({ subjects: [{ nicknames: ["x"] }] })));
+ok("header: a non-string value is refused", throwsSubject(enc({ subjects: [{ names: [42] }] })));
+ok("header: more than 8 subjects is refused", throwsSubject(enc({ subjects: Array(9).fill({ names: ["A Person"] }) })));
+ok("header: over the size cap is refused", throwsSubject("A".repeat(13 * 1024)));
+ok("header: a bad media value is refused", throwsSubject(enc({ subjects: [{ names: ["A B"] }], media: "maybe" })));
+ok("media: the stricter of policy and header wins", strictestMedia("allow", "mask") === "mask" && strictestMedia("mask", "allow") === "mask" && strictestMedia(undefined, "allow") === "block" && strictestMedia("mask", undefined) === "mask");
+
+// ---- names ----
+ok("name: as given", clean("Marisol Quintero-Vance called", "Marisol"));
+ok("name: last, first", clean("Quintero-Vance, Marisol", "Quintero"));
+ok("name: initial and surname", clean("M. Quintero-Vance and M Quintero-Vance", "Quintero"));
+ok("name: an alias", clean("goes by Mari Vance", "Mari Vance"));
+ok("name: a handle made of the name", clean("profile marisolquintero-vance", "marisol"));
+ok("name: the surname alone, capitalised", clean("the Quintero-Vance household", "Quintero-Vance"));
+ok("name: case-insensitive full form", clean("MARISOL QUINTERO-VANCE", "MARISOL"));
+ok("name: a second subject gets its own prefix", /SUBJECT2_NAME/.test(redact("met Dmitri Okonkwo")));
+ok("name: the first subject's tokens say SUBJECT1", /SUBJECT1_NAME/.test(redact("Marisol Quintero-Vance")));
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Grace"] }] })), "k");
+  const d = withSubjects(detector, c);
+  const body = { model: "m", messages: [{ role: "user", content: "Will you check? Grace period ends. Will Grace signed." }] };
+  const out = applyRedaction(body, "anthropic", new Vault("reversible"), ["pii"], d, true, "messages").deidBody.messages[0].content;
+  ok("name: common words alone are left as words", out.startsWith("Will you check? Grace period ends.") && !out.includes("Will Grace"), out);
+}
+ok("name: a lower-case single token is not a name", !hit("he will mark it").length);
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Grace"] }] })), "k");
+  const red = (t) => applyRedaction({ model: "m", messages: [{ role: "user", content: t }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody.messages[0].content;
+  ok("name: surname-first with an initial, for common-word names", !/Grace, W/.test(red("signed by Grace, W. today")), red("signed by Grace, W. today"));
+  ok("egress: surname-first with an initial is caught", egressViolations({ system: "signed by Grace, W. today", messages: [{ role: "user", content: "hi" }] }, c).includes("SUBJECT1_NAME"));
+  ok("name: surname-first initial needs the initial alone", !subjectSpans("Grace, we went", c).length);
+}
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will"] }] })), "k");
+  const d = withSubjects(detector, c);
+  const text = "We will help. Will you check? He is willing.";
+  const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], d, true, "messages").deidBody.messages[0].content;
+  ok("name: a common word declared alone is never redacted", out === text, out);
+  ok("name: a common word declared alone is not an egress hit", egressViolations({ system: text, messages: [{ role: "user", content: "hi" }] }, c).length === 0);
+}
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Okonkwo"] }] })), "k");
+  const red = (t) => applyRedaction({ model: "m", messages: [{ role: "user", content: t }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody.messages[0].content;
+  ok("name: a single token declared alone is redacted when capitalised and whole", /SUBJECT1_NAME/.test(red("met Okonkwo today")));
+  ok("name: a single token declared alone is not matched inside a word", red("the okonkwoish style") === "the okonkwoish style");
+}
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Zora"] }] })), "k");
+  const text = "Z o r a";
+  const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+  ok("egress: a short single-token name spread out that detection leaves is caught", out.messages[0].content === text && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+  ok("egress: a short single-token name inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "zoras, azora and zorathustra" }] }, c).length === 0);
+}
+{
+  // A name token that is also a field name: redacted in text, never matched against the
+  // body's own keys or the placeholder that replaced it.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k");
+  const body = { model: "m", messages: [{ role: "user", content: "Name Bdeqnsk called" }, { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input: { q: "x" } }] }] };
+  const v = new Vault("reversible");
+  const out = applyRedaction(body, "anthropic", v, ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+  ok("egress: a name token that is also a field name does not refuse a redacted body", !JSON.stringify(out).includes("Bdeqnsk") && egressViolations(out, c, { minted: v.minted, raw: body }).length === 0, JSON.stringify(out.messages[0].content));
+  ok("egress: a field-word name token spaced out in text is still caught", egressViolations({ messages: [{ role: "user", content: "N a m e" }] }, c).includes("SUBJECT1_NAME"));
+}
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Lena Card"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a spaced-out surname that is also a field word is caught", leak("C a r d").includes("SUBJECT1_NAME") && leak("c-a-r-d").includes("SUBJECT1_NAME"));
+  ok("egress: a protocol key spelled like a name token is not a hit", egressViolations({ messages: [{ role: "user", content: [{ type: "text", text: "x", name: "y" }] }] }, compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k")).length === 0);
+  {
+    const n = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k");
+    const call = (input) => ({ messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input }] }] });
+    ok("egress: a tool call's own input key named like a protocol key is read", egressViolations(call({ name: "x" }), n).includes("SUBJECT1_NAME"));
+    ok("egress: decoded tool arguments are caller data", egressViolations({ messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: '{"name":"x"}' } }] }] }, n).includes("SUBJECT1_NAME"));
+    ok("egress: the tool call's protocol keys are not a hit", egressViolations(call({ q: "x" }), n).length === 0);
+  }
+  ok("egress: a key that is not a protocol key is read",egressViolations({ messages: [{ role: "user", content: "x", card: 1 }], metadata: { "c a r d": 1 } }, c).includes("SUBJECT1_NAME"));
+  ok("egress: an enum value is skipped only when it is the whole value", egressViolations({ messages: [{ role: "user", content: "card" }] }, c).includes("SUBJECT1_NAME"));
+}
+{
+  // Only the type word of a placeholder this request's redaction minted is dropped; a look-alike is read as written.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Marisol Okafor"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a name written as a placeholder type is caught", leak("<MARISOL_1A2B3C_1>").includes("SUBJECT1_NAME") && leak("[MARISOL]").includes("SUBJECT1_NAME"));
+  ok("egress: a name inside a minted placeholder's suffix position is caught", leak("<EMAIL_1A2B3C_1>MARISOL").includes("SUBJECT1_NAME"));
+  ok("egress: placeholder-shaped text alone is not a hit", leak("<SUBJECT1_NAME_1A2B3C_1> and <EMAIL_0F0F0F0F> and [SSN]").length === 0);
+}
+{
+  // A declared literal spelled like a placeholder type: the caller's own placeholder-shaped
+  // text is read, only the tokens this request's redaction minted are exempt.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ other: ["EMAIL"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a declared literal in caller-written placeholder text is caught", leak("Client code: [EMAIL]").includes("SUBJECT1_OTHER") && leak("Client code: <EMAIL_1A2B3C_1>").includes("SUBJECT1_OTHER") && leak("<EMAIL_0F0F0F0F>").includes("SUBJECT1_OTHER"));
+  for (const [mode, system] of [["reversible", "Client code: [EMAIL]"], ["strip", "Client code: <EMAIL_1A2B3C_1>"]]) {
+    const body = { model: "m", system, messages: [{ role: "user", content: "write to someone@else.com" }] };
+    const v = new Vault(mode);
+    const out = applyRedaction(body, "anthropic", v, ["pii"], withSubjects(detector, c), false, "messages").deidBody;
+    const own = { minted: v.minted, raw: body };
+    ok(`egress (${mode}): a minted catalog placeholder is not a hit`, /EMAIL/.test(out.messages[0].content) && egressViolations({ messages: out.messages }, c, own).length === 0, out.messages[0].content);
+    ok(`egress (${mode}): caller placeholder text beside a minted one is caught`, egressViolations(out, c, own).includes("SUBJECT1_OTHER"));
+  }
+  {
+    // The caller wrote the exact token redaction then minted (strip mode's [EMAIL]): read as written.
+    const body = { model: "m", messages: [{ role: "user", content: "[EMAIL] or someone@else.com" }] };
+    const v = new Vault("strip");
+    const out = applyRedaction(body, "anthropic", v, ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+    ok("egress: a minted token the caller also wrote is not exempt", egressViolations(out, c, { minted: v.minted, raw: body }).includes("SUBJECT1_OTHER"), out.messages[0].content);
+  }
+}
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Zoe"] }] })), "k");
+  const out = applyRedaction({ model: "m", messages: [{ role: "user", content: "Z o e" }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+  ok("egress: a three-letter single-token name spread out that detection leaves is caught", out.messages[0].content === "Z o e" && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+  ok("egress: a three-letter single-token name inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "zoes, ozone and azoed" }] }, c).length === 0);
+}
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Rose"] }] })), "k");
+  ok("egress: a short common word declared alone and spread out is not a hit", egressViolations({ messages: [{ role: "user", content: "a r o s e garden" }] }, c).length === 0);
+}
+
+// ---- contact details ----
+ok("email: the whole address wins over its local part", /^<SUBJECT1_EMAIL_[0-9A-F]+_\d+>$/.test(redact("MQVance77@Example.com")));
+ok("email: the local part reused as a username", clean("user mqvance77 on forums", "mqvance77"));
+for (const p of ["404-555-0187", "(404) 555-0187", "404.555.0187", "+1 404 555 0187", "14045550187", "4045550187"])
+  ok(`phone: ${p}`, clean(`call ${p} now`, "0187"));
+{
+  // A phone declared in full-width digits is compiled from its NFKC form.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ phones: ["\uff14\uff10\uff14\uff15\uff15\uff15\uff10\uff11\uff18\uff17"] }] })), "k");
+  const leak = (s) => egressViolations({ input: "hello", metadata: { note: s } }, c);
+  ok("phone: declared in full-width digits, the ASCII spelling is caught at egress", leak("4045550187").includes("SUBJECT1_PHONE") && leak("404-555-0187").includes("SUBJECT1_PHONE"));
+  ok("phone: declared in full-width digits, the full-width spelling is caught at egress", leak("\uff14\uff10\uff14\uff15\uff15\uff15\uff10\uff11\uff18\uff17").includes("SUBJECT1_PHONE"));
+  ok("phone: declared in full-width digits, both spellings are redacted", subjectSpans("call 404-555-0187 or \uff14\uff10\uff14\uff15\uff15\uff15\uff10\uff11\uff18\uff17", c).length === 2);
+  const id = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["\uff11\uff12\uff13-\uff14\uff15-\uff16\uff17\uff18\uff19"] }] })), "k");
+  ok("id: declared in full-width digits, the ASCII spelling is caught at egress", egressViolations({ input: "hello", metadata: { note: "123-45-6789" } }, id).includes("SUBJECT1_ID"));
+}
+ok("phone: not inside a longer number", !hit("ref 94045550187 and 40455501879").length);
+ok("address: Street written as St", clean("lives at 1428 Elm St, Decatur", "1428 Elm"));
+ok("address: as given, with the unit", clean("1428 Elm Street, Apt 4", "1428 Elm"));
+ok("address: the street name alone is not the address", !hit("Elm Street is lovely").length);
+{
+  // A unit written without a comma: the street alone is still the address.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ addresses: ["1428 Elm Street Apt 4"] }] })), "k");
+  const red = (t) => applyRedaction({ model: "m", messages: [{ role: "user", content: t }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody.messages[0].content;
+  ok("address: a unit declared without a comma, the street written alone", !/1428/.test(red("lives at 1428 Elm St now")) && !/1428/.test(red("lives at 1428 Elm Street")), red("lives at 1428 Elm St now"));
+  ok("address: a unit declared without a comma, written with the unit abbreviated", !/1428|Apt/.test(red("lives at 1428 Elm St Apt 4")), red("lives at 1428 Elm St Apt 4"));
+  ok("egress: the street alone of a unit declared without a comma is caught", egressViolations({ input: "hello", metadata: { note: "1428 Elm St" } }, c).includes("SUBJECT1_ADDRESS"));
+  ok("egress: another street beside a unit declared without a comma is not a hit", egressViolations({ input: "hello", metadata: { note: "1429 Elm St Apt 4" } }, c).length === 0);
+}
+for (const d of ["1986-07-14", "07/14/1986", "7/14/86", "July 14, 1986", "Jul 14 1986", "14 July 1986", "19860714"])
+  ok(`date of birth: ${d}`, hit(`born ${d}`).length > 0, d);
+ok("date of birth: another date is not it", !hit("born 1986-07-15 or 7/14/1987").length);
+for (const id of ["123-45-6789", "123 45 6789", "123456789"]) ok(`id: ${id}`, clean(`ssn ${id}`, "6789"));
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["1234", "ab12c"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a short ID spread wider than detection reaches is caught", leak("acct " + "1234".split("").join(" ".repeat(12))).includes("SUBJECT1_ID"));
+  ok("egress: a short alphanumeric ID spread out is caught", leak("A B 1 2 C").includes("SUBJECT1_ID"));
+  ok("egress: a short ID inside a longer number is not a hit", leak("order 912345 and 12340").length === 0);
+}
+{
+  // An ID with a letter outside ASCII keeps it, and is the same ID written without the accent.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["ABé1234"] }] })), "k");
+  const leak = (s) => egressViolations({ input: "hello", metadata: { note: s } }, c);
+  ok("id: a non-ASCII letter is kept, so the ID as declared is redacted", subjectSpans("acct ABé1234 and AB-É-1234", c).length === 2);
+  ok("id: a non-ASCII letter is kept, so the ID without its accent is redacted", subjectSpans("acct ABe1234", c).length === 1);
+  ok("egress: an ID with a non-ASCII letter in an unredacted field is caught, accented or not", leak("ABé1234").includes("SUBJECT1_ID") && leak("abe1234").includes("SUBJECT1_ID") && leak("A B É 1 2 3 4").includes("SUBJECT1_ID"));
+  ok("egress: the ID with its non-ASCII letter dropped is not the ID", leak("AB1234 and ABx1234").length === 0);
+  const short = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["Øé12"] }] })), "k");
+  ok("egress: a short ID of non-ASCII letters is caught spread out", egressViolations({ input: "hello", metadata: { note: "ø e 1 2" } }, short).includes("SUBJECT1_ID"));
+}
+ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mari.q"));
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ handles: ["@abcd"], other: ["zq9x7"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a short handle spread out is caught", leak("profile: a b c d").includes("SUBJECT1_HANDLE"));
+  ok("egress: a short handle spread wide is caught", leak("@ A - B - C       D").includes("SUBJECT1_HANDLE"));
+  ok("egress: a short other literal spread out is caught", leak("code Z Q 9 X 7").includes("SUBJECT1_OTHER"));
+  ok("egress: other letters spread between a short handle's or literal's are not a hit", leak("a b x c d and z q 9 x 8 7 and abxcd").length === 0);
+}
+{
+  // Accepted at four characters, read at egress however few letters and digits remain.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ handles: ["@ab-c"], other: ["xy-z"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a punctuated short handle spread out is caught", leak("handle a b c").includes("SUBJECT1_HANDLE"));
+  ok("egress: a punctuated short other literal spread out is caught", leak("ref x . y . z").includes("SUBJECT1_OTHER"));
+  ok("egress: other letters between a punctuated short literal's are not a hit", leak("a b x c and x y q z").length === 0);
+}
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ emails: ["abcde@example.com"], addresses: ["1 Oak St"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a five-character email local part spread out is caught", leak("user a b c d e").includes("SUBJECT1_EMAIL"));
+  ok("egress: a five-character local part inside a longer word or with letters between is not a hit", leak("abcdef, xabcde and a b x c d e").length === 0);
+  ok("egress: a short address spread out is caught, abbreviated and expanded", leak("1 O a k S t").includes("SUBJECT1_ADDRESS") && leak("1 o a k s t r e e t").includes("SUBJECT1_ADDRESS"));
+  ok("egress: other letters spread between a short address's are not a hit", leak("1 o a k x s t").length === 0);
+}
+{
+  // An address shorter than four letters and digits once folded is still read at egress.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ addresses: ["1 A"] }] })), "k");
+  const leak = (s) => egressViolations({ input: "hello", metadata: { note: s } }, c);
+  ok("egress: a two-character address with its separators changed is caught", leak("1 / A").includes("SUBJECT1_ADDRESS") && leak("1a").includes("SUBJECT1_ADDRESS") && leak("1-a").includes("SUBJECT1_ADDRESS"));
+  ok("egress: a two-character address with another character joined on, or another letter, is not a hit", leak("1 / A2, 2 / 1 / B and 1 / Ab").length === 0);
+}
+
+// ---- the catalog still runs beside the subjects ----
+{
+  const out = redact("Marisol at mqvance77@example.com, and other@else.com, card 4012888888881881");
+  ok("catalog: other entities are still redacted", /<EMAIL_/.test(out) && /<CREDIT_CARD_/.test(out) && /<SUBJECT1_EMAIL_/.test(out), out);
+}
+
+// ---- the egress check ----
+{
+  const body = { model: "m", messages: [{ role: "user", content: "Marisol Quintero-Vance, 1428 Elm St, 404-555-0187" }] };
+  const v = new Vault("reversible");
+  const { deidBody } = applyRedaction(body, "anthropic", v, ["pii"], det, true, "messages");
+  ok("egress: a redacted body passes", egressViolations(deidBody, comp, { minted: v.minted, raw: body }).length === 0);
+  const leak = (s) => egressViolations({ model: "m", messages: [{ role: "user", content: s }] }, comp);
+  ok("egress: a spaced-out name is caught", leak("m a r i s o l q u i n t e r o v a n c e").includes("SUBJECT1_NAME"));
+  {
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Henry Grace"] }] })), "k");
+    const text = "w i l l h e n r y g r a c e";
+    const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+    ok("egress: a spaced-out three-part name that detection leaves is caught", out.messages[0].content === text && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+    const initialled = "w . h . g r a c e";
+    const out2 = applyRedaction({ model: "m", messages: [{ role: "user", content: initialled }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+    ok("egress: an initialled name with its surname spread out that detection leaves is caught", out2.messages[0].content === initialled && egressViolations(out2, c).includes("SUBJECT1_NAME"), out2.messages[0].content);
+    ok("egress: a spread first name with a middle initial is caught", egressViolations({ messages: [{ role: "user", content: "w i l l h g r a c e" }] }, c).includes("SUBJECT1_NAME"));
+  }
+  {
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Ray"] }] })), "k");
+    const text = "w . r a y";
+    const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+    ok("egress: a short initial and surname spread out that detection leaves is caught", out.messages[0].content === text && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+    ok("egress: a short surname-first initial spread out is caught", egressViolations({ messages: [{ role: "user", content: "R-A-Y W" }] }, c).includes("SUBJECT1_NAME"));
+    ok("egress: a short initial form inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "wrays, swray and rayws" }] }, c).length === 0);
+  }
+  {
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Li"] }] })), "k");
+    const text = "W . L i";
+    const out = applyRedaction({ model: "m", messages: [{ role: "user", content: text }] }, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+    ok("egress: a three-letter initial and surname spread out that detection leaves is caught", out.messages[0].content === text && egressViolations(out, c).includes("SUBJECT1_NAME"), out.messages[0].content);
+    ok("egress: a three-letter surname-first initial spread out is caught", egressViolations({ messages: [{ role: "user", content: "L-i W" }] }, c).includes("SUBJECT1_NAME"));
+    ok("egress: a three-letter initial form inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "wlis, awli and liwx" }] }, c).length === 0);
+  }
+  {
+    // A token of a full-name declaration, written alone and spread out: detection leaves it,
+    // egress refuses it, the same as the capitalised token detection would have redacted.
+    const out = applyRedaction({ model: "m", messages: [{ role: "user", content: "M a r i s o l" }] }, "anthropic", new Vault("reversible"), ["pii"], det, true, "messages").deidBody;
+    ok("egress: a spaced-out first name from a full-name declaration that detection leaves is caught", out.messages[0].content === "M a r i s o l" && egressViolations(out, comp).includes("SUBJECT1_NAME"), out.messages[0].content);
+    ok("egress: a spaced-out surname from a full-name declaration is caught", leak("q u i n t e r o - v a n c e").includes("SUBJECT1_NAME") && leak("O.K.O.N.K.W.O").includes("SUBJECT2_NAME"));
+    ok("egress: a token of a full-name declaration inside a longer word is not a hit", leak("marisols, amarisol, okonkwoish").length === 0);
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Grace"] }] })), "k");
+    ok("egress: common-word tokens of a full-name declaration spread out alone are not a hit", egressViolations({ messages: [{ role: "user", content: "w i l l and g r a c e" }] }, c).length === 0);
+  }
+  ok("egress: a phone with odd separators is caught", leak("4 0 4 / 5 5 5 / 0 1 8 7").includes("SUBJECT1_PHONE"));
+  ok("egress: full-width digits are caught", leak("４０４５５５０１８７").includes("SUBJECT1_PHONE"));
+  ok("egress: zero-width characters do not hide a name", leak("Mari​sol Quin‌tero-Vance").includes("SUBJECT1_NAME"));
+  ok("egress: an object key is read too", egressViolations({ messages: [{ role: "user", content: [{ type: "text", text: "x", "Marisol Quintero-Vance": 1 }] }] }, comp).includes("SUBJECT1_NAME"));
+  ok("egress: any run of separators between digits is caught", leak("4    0    4    5    5    5    0    1    8    7").includes("SUBJECT1_PHONE") && leak("4\n\n\n\n\n0 4 - - - - 555 . . . 0187").includes("SUBJECT1_PHONE"));
+  ok("egress: digits split by a word are not joined", leak("room 404 and then 5550187 later").length === 0);
+  {
+    // A leading country code attached, the rest spread wider than detection reaches.
+    const wide = "1404" + "5550187".split("").map((d) => " ".repeat(12) + d).join("");
+    ok("egress: a phone with an attached leading 1 and wide separators is caught", egressViolations({ input: "hello", metadata: { note: wide } }, comp).includes("SUBJECT1_PHONE"));
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ phones: ["+1 404 555 0187"] }] })), "k");
+    ok("egress: the same, for a phone declared with +1", egressViolations({ input: "hello", metadata: { note: wide } }, c).includes("SUBJECT1_PHONE") && egressViolations({ input: "hello", metadata: { note: "+" + wide } }, c).includes("SUBJECT1_PHONE"));
+    ok("egress: a longer number holding the phone after a country code is not a hit", leak("ref 2" + wide).length === 0 && leak("ref 2140455501870").length === 0);
+  }
+  for (const d of ["DOB: 7 / 14 / 1986", "7 - 14 - 86", "07 / 14 / 1986", "1986 / 7 / 14", "7 . 14 . 86", "DOB: 7 / 1 4 / 1 9 8 6", "0 7 - 1 4 - 8 6", "1 9 8 6 / 7 / 1 4"])
+    ok(`egress: a spaced numeric date of birth is caught: ${d}`, leak(d).includes("SUBJECT1_DOB"), d);
+  ok("egress: a spaced date that is not the subject's is not a hit", leak("7 / 14 / 1987 and 7 / 15 / 86").length === 0);
+  ok("egress: a date with digits spread that is not the subject's is not a hit", leak("7 / 1 4 / 1 9 8 7 and 7 / 1 5 / 8 6").length === 0);
+  for (const d of ["DOB: J u l y 14, 1986", "J-U-L 1 4 1 9 8 6", "j.u.l.y.14th.1986", "14 J u l y 1986", "1 4 t h of J u l 1986", "DOB: Jul.14,1986"])
+    ok(`egress: a spaced spelled-out date of birth is caught: ${d}`, leak(d).includes("SUBJECT1_DOB"), d);
+  ok("egress: a spelled-out date that is not the subject's is not a hit", leak("J u l y 15, 1986 and 14 J u n e 1986 and July 14, 1987").length === 0);
+  {
+    // A date declared spelled out reads the same as one declared in ISO form.
+    for (const declared of ["July 14, 1986", "14 July 1986", "Jul. 14th 1986"]) {
+      const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ dates: [declared] }] })), "k");
+      const dob = (s) => egressViolations({ input: "hello", metadata: { note: s } }, c);
+      ok(`egress: a date declared as "${declared}" is caught spaced out`, dob("J u l y 1 4 1 9 8 6").includes("SUBJECT1_DOB") && dob("7 / 1 4 / 1 9 8 6").includes("SUBJECT1_DOB") && dob("1 4 J u l 1986").includes("SUBJECT1_DOB"));
+      ok(`date of birth: a date declared as "${declared}" is matched in its numeric forms`, subjectSpans("born 1986-07-14 or 7/14/86", c).length === 2);
+      ok(`egress: another date beside one declared as "${declared}" is not a hit`, dob("J u l y 1 5 1 9 8 6 and 7 / 1 4 / 1 9 8 7").length === 0);
+    }
+    // A date in a form not parsed as a date is still read spaced out at egress.
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ dates: ["Midsummer 1986"] }] })), "k");
+    const dob = (s) => egressViolations({ input: "hello", metadata: { note: s } }, c);
+    ok("egress: a date literal in an unparsed form is caught spaced out", dob("m i d s u m m e r 1 9 8 6").includes("SUBJECT1_DOB") && dob("m i d s u m m e r 1 9 8 7").length === 0);
+  }
+  ok("egress: a payload key outside media is read", egressViolations({ input: "x", metadata: { result: "Marisol Quintero-Vance" } }, comp).includes("SUBJECT1_NAME"));
+  ok("egress: a data: string outside media is read", egressViolations({ input: "x", metadata: { url: "data:text/plain,Marisol Quintero-Vance" } }, comp).includes("SUBJECT1_NAME"));
+  ok("egress: a spaced-out address in its abbreviated spelling is caught", leak("1428 E l m S t").includes("SUBJECT1_ADDRESS") && leak("1 4 2 8 . E L M . S T R E E T").includes("SUBJECT1_ADDRESS"));
+  ok("egress: a phone in exponent notation inside tool arguments is caught", egressViolations({ messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9}' } }] }] }, comp).includes("SUBJECT1_PHONE"));
+  ok("egress: a phone written with a decimal point is caught", leak('{"phone":4045550187.0}').includes("SUBJECT1_PHONE"));
+  {
+    // Number literals are read in one pass: a long digit run costs its length, not its square.
+    const t = Date.now();
+    const hits = leak("0".repeat(200_000) + " 4.045550187e9");
+    const ms = Date.now() - t;
+    ok("egress: a 200,000-digit run is read in linear time and the literal after it is still caught", ms < 2000 && hits.includes("SUBJECT1_PHONE"), `${ms} ms`);
+  }
+  {
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Will Grace"] }] })), "k");
+    const u = (s) => [...s].map((ch) => (ch === " " ? " " : "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"))).join("");
+    const body = { messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: `{"q":"${u("W i l l G r a c e")}"}` } }] }] };
+    ok("egress: a spaced name written in JSON unicode escapes inside tool arguments is caught", egressViolations(body, c).includes("SUBJECT1_NAME"));
+  }
+  {
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["1000000000000000000000"] }] })), "k");
+    ok("egress: an ID sent as a numeric leaf in exponent form is caught", egressViolations({ input: "x", metadata: { account: 1e21 } }, c).includes("SUBJECT1_ID"));
+  }
+  {
+    // Longer than the default expansion limit: read at the declared ID's full length.
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["1" + "0".repeat(40)] }] })), "k");
+    ok("egress: a 41-digit ID sent as a numeric leaf in exponent form is caught", egressViolations({ input: "x", metadata: { account: 1e40 } }, c).includes("SUBJECT1_ID"));
+    ok("egress: a 41-digit ID written in exponent form inside a string is caught", egressViolations({ input: "x", metadata: { note: "acct 1e40" } }, c).includes("SUBJECT1_ID") && egressViolations({ input: "x", metadata: { note: "acct 1e+40" } }, c).includes("SUBJECT1_ID"));
+    ok("egress: another exponent beside a 41-digit ID is not a hit", egressViolations({ input: "x", metadata: { account: 1e39, note: "acct 1e41" } }, c).length === 0);
+    ok("egress: a 41-digit ID in full-width exponent form inside a string is caught", egressViolations({ input: "x", metadata: { note: "acct \uff11\uff45\uff14\uff10" } }, c).includes("SUBJECT1_ID") && egressViolations({ input: "x", metadata: { note: "acct \uff11\uff25\uff0b\uff14\uff10" } }, c).includes("SUBJECT1_ID"));
+    ok("egress: a 41-digit ID in exponent form split by zero-width characters is caught", egressViolations({ input: "x", metadata: { note: "acct 1\u200be\u200d40" } }, c).includes("SUBJECT1_ID") && egressViolations({ input: "x", metadata: { note: "acct \uff11\u2060\uff45\ufeff\uff14\uff10" } }, c).includes("SUBJECT1_ID"));
+    ok("egress: another full-width exponent beside a 41-digit ID is not a hit", egressViolations({ input: "x", metadata: { note: "acct \uff11\uff45\uff14\uff11" } }, c).length === 0);
+    const asKey = (k) => egressViolations({ input: "x", metadata: { [k]: "x" } }, c);
+    ok("egress: a 41-digit ID in exponent form as a metadata key is caught", asKey("1e40").includes("SUBJECT1_ID") && asKey("1e+40").includes("SUBJECT1_ID"));
+    ok("egress: a 41-digit ID in full-width exponent form as a metadata key is caught", asKey("\uff11\uff45\uff14\uff10").includes("SUBJECT1_ID") && asKey("\uff11\uff25\uff0b\uff14\uff10").includes("SUBJECT1_ID"));
+    ok("egress: a 41-digit ID in exponent form split by zero-width characters as a metadata key is caught", asKey("1\u200be\u200d40").includes("SUBJECT1_ID") && asKey("\uff11\u2060\uff45\ufeff\uff14\uff10").includes("SUBJECT1_ID"));
+    ok("egress: another exponent as a metadata key beside a 41-digit ID is not a hit", egressViolations({ input: "x", metadata: { "1e39": "x", "\uff11\uff45\uff14\uff11": "y" } }, c).length === 0);
+  }
+  {
+    const body = { model: "m", messages: [{ role: "user", content: "x" }, { role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9,"n":3}' } }] }] };
+    const v = new Vault("reversible");
+    const { deidBody } = applyRedaction(body, "openai", v, ["pii"], det, true, "chat");
+    const args = deidBody.messages[1].tool_calls[0].function.arguments;
+    ok("numeric: a subject phone sent as a JSON number is redacted whole", /SUBJECT1_PHONE/.test(args) && !/4\.045550187e9/.test(args) && egressViolations(deidBody, comp, { minted: v.minted, raw: body }).length === 0, args);
+  }
+  ok("egress: placeholder text is not a hit", leak("<SUBJECT1_NAME_ABC123_1> at <SUBJECT1_ADDRESS_ABC123_1>").length === 0);
+  ok("egress: unrelated digits are not a hit", leak("order 4045 shipped 5550 units, 187 left").length === 0);
+  const img = { model: "m", messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "TWFyaXNvbCBRdWludGVyby1WYW5jZQ4045550187" } }] }] };
+  ok("egress: base64 image data is skipped, not read", egressViolations(img, comp).length === 0);
+  const toolImg = { model: "m", messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "f", input: { type: "image", data: "m a r i s o l q u i n t e r o v a n c e" } }] }] };
+  ok("egress: a media-shaped tool input is read, not skipped", egressViolations(toolImg, comp).includes("SUBJECT1_NAME"));
+  ok("media: a media-shaped tool input is not counted", countMedia(toolImg) === 0);
+  const resultImg = { model: "m", messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "TWFyaXNvbCBRdWludGVyby1WYW5jZQ" } }] }] }] };
+  ok("media: an image inside a tool result is counted and its data skipped", countMedia(resultImg) === 1 && egressViolations(resultImg, comp).length === 0);
+  const mcpImg = { model: "m", messages: [{ role: "user", content: [{ type: "mcp_tool_result", tool_use_id: "m1", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "TWFyaXNvbCBRdWludGVyby1WYW5jZQ" } }] }] }] };
+  ok("media: an image inside an MCP tool result is counted and its data skipped", countMedia(mcpImg) === 1 && egressViolations(mcpImg, comp).length === 0);
+  ok("mask: an image inside an MCP tool result is found for masking", mediaParts(mcpImg).length === 1 && !(mediaParts(mcpImg)[0] instanceof MediaRefusal));
+  const toolFile = { model: "m", messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "save", input: { type: "file", name: "notes", nested: { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } } } }] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }, ...img.messages[0].content] }] };
+  ok("mask: media-shaped tool input is neither refused nor taken as an image", mediaParts(toolFile).length === 1 && mediaParts(toolFile)[0].mime === "image/png" && countMedia(toolFile) === 1);
+  ok("media: an image part is counted", countMedia(img) === 1);
+  const replayedAudio = { model: "m", messages: [{ role: "user", content: "hi" }, { role: "assistant", content: null, audio: { id: "audio_123" } }, { role: "user", content: "and again?" }] };
+  ok("media: a replayed assistant audio reference is counted", countMedia(replayedAudio) === 1);
+  ok("mask: a replayed assistant audio reference is refused", mediaParts(replayedAudio).length === 1 && mediaParts(replayedAudio)[0] instanceof MediaRefusal);
+  const doc = { model: "m", messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "Marisol Quintero-Vance" } }] }] };
+  ok("media: a text document is not media", countMedia(doc) === 0);
+  ok("egress: a text document is read", egressViolations(doc, comp).includes("SUBJECT1_NAME"));
+  const contentDoc = { model: "m", messages: [{ role: "user", content: [{ type: "document", source: { type: "content", content: [{ type: "text", text: "see image" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "TWFyaXNvbCBRdWludGVyby1WYW5jZQ" } }] } }] }] };
+  ok("media: an image inside a content-source document is counted and its data skipped", countMedia(contentDoc) === 1 && egressViolations(contentDoc, comp).length === 0);
+  const oai = { model: "m", messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }] };
+  ok("media: an OpenAI image part is counted", countMedia(oai) === 1 && egressViolations(oai, comp).length === 0);
+  const resp = { model: "m", input: [{ role: "user", content: [{ type: "input_image", image_url: "https://img.example/marisol-quintero-vance.png" }] }] };
+  ok("egress: an image URL is text and is read", egressViolations(resp, comp).includes("SUBJECT1_NAME"));
+}
+
+// ---- spelling variants ----
+ok("name: a hyphenated surname written with a space", clean("Marisol Quintero Vance", "Quintero Vance"));
+ok("name: a hyphenated surname run together", clean("Marisol QuinteroVance", "QuinteroVance"));
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["José García-O'Brien"] }] })), "k");
+  const d = withSubjects(detector, c);
+  const red = (t) => applyRedaction({ model: "m", messages: [{ role: "user", content: t }] }, "anthropic", new Vault("reversible"), ["pii"], d, true, "messages").deidBody.messages[0].content;
+  ok("name: accents as given", !/Jos|Garc/.test(red("José García-O'Brien called")));
+  ok("name: the same name without accents", !/Jos|Garc/.test(red("Jose Garcia-O'Brien called")), red("Jose Garcia-O'Brien called"));
+  ok("name: a curly apostrophe", !/Brien/.test(red("Mr. García-O’Brien")), red("Mr. García-O’Brien"));
+  ok("name: the apostrophe left out", !/Brien/.test(red("Jose Garcia-OBrien")), red("Jose Garcia-OBrien"));
+  ok("egress: an unaccented leak is caught", egressViolations({ messages: [{ role: "user", content: "jose garcia obrien" }] }, c).includes("SUBJECT1_NAME"));
+}
+
+// ---- matchers are reused within a request: a passing egress test must not move detection ----
+{
+  egressViolations({ messages: [{ role: "user", content: "call 404-555-0187 at Marisol Quintero-Vance" }] }, comp);
+  ok("reuse: detection after an egress hit still finds a match at the start of the text", hit("4045550187 is the number").length > 0 && hit("Marisol Quintero-Vance").length > 0);
+}
+
+// ---- the ref digest ----
+ok("ref: the digest is stable and does not contain the ref", refDigest("case-1", "k") === refDigest("case-1", "k") && !refDigest("case-1", "k").includes("case"));
+ok("ref: a different key gives a different digest", refDigest("case-1", "k") !== refDigest("case-1", "k2"));
+
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

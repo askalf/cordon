@@ -11,7 +11,8 @@ import {
 import { handle, safeUpstreamError } from "./proxy";
 import { config, pseudonymSecretGuard, adequatePseudonymSecret, allowWeakPseudonymSecret } from "./config";
 import { metrics } from "./metrics";
-import { setPolicy, allPolicies, load as loadPolicies } from "./policy";
+import { setPolicy, getPolicy, allPolicies, load as loadPolicies } from "./policy";
+import { refDigest } from "./subject";
 import { audit } from "./audit";
 import { dashboardHtml } from "./dashboard";
 import type { RedactMode, RedactSet } from "./types";
@@ -106,7 +107,29 @@ app.post("/admin/tenant", async (req, reply) => {
   if (typeof b.redactSystem === "boolean") patch.redactSystem = b.redactSystem;
   if (b.upstreamOverride && typeof b.upstreamOverride === "object") patch.upstreamOverride = b.upstreamOverride;
   if (typeof b.allowHeaderOverride === "boolean") patch.allowHeaderOverride = b.allowHeaderOverride;
+  if (typeof b.reportOnly === "boolean") patch.reportOnly = b.reportOnly;
+  if (typeof b.requireSubject === "boolean") patch.requireSubject = b.requireSubject;
+  if (b.subjectMedia === "block" || b.subjectMedia === "mask" || b.subjectMedia === "allow") patch.subjectMedia = b.subjectMedia;
   return setPolicy(b.tenant, patch);
+});
+
+// Receipts for one subject ref: every audit record made under it (counts, types and the
+// egress verdict, never values), with the chain checked first so a receipt from an edited
+// log is never served. Query: ?ref=<the caller's ref>.
+app.get("/admin/receipts", async (req, reply) => {
+  if (!adminOk(req, reply)) return reply;
+  const ref = (req.query as any)?.ref;
+  if (typeof ref !== "string" || !ref || ref.length > 128) {
+    reply.code(400);
+    return { error: `${config.brand}: ref required (up to 128 characters)` };
+  }
+  const chain = await audit.verify();
+  if (!chain.ok) {
+    reply.code(409);
+    return { error: `${config.brand}: the audit chain does not verify; no receipts are served`, chain };
+  }
+  const subject = refDigest(ref, config.tenantSecret);
+  return { subject, chain, receipts: await audit.forSubject(subject) };
 });
 
 // ---- the proxy: OpenAI + Anthropic ----
@@ -204,6 +227,15 @@ app.post("/v1/*", async (req, reply) => {
   if (!creq || !creq.model) {
     reply.code(400);
     return { error: `${config.brand}: unsupported route or missing \`model\`` };
+  }
+  // A subject list that cannot be read must never fall back to pattern-only redaction.
+  if (creq.subjectError) {
+    reply.code(400);
+    return { error: `${config.brand}: ${creq.subjectError}` };
+  }
+  if (getPolicy(creq.tenant).requireSubject && !creq.subject) {
+    reply.code(400);
+    return { error: `${config.brand}: this tenant requires X-Cordon-Subject on every request` };
   }
   reply.hijack();
   try {
