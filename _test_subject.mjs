@@ -256,6 +256,13 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
     ok("egress: an ID sent as a numeric leaf in exponent form is caught", egressViolations({ input: "x", metadata: { account: 1e21 } }, c).includes("SUBJECT1_ID"));
   }
   {
+    // Longer than the default expansion limit: read at the declared ID's full length.
+    const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["1" + "0".repeat(40)] }] })), "k");
+    ok("egress: a 41-digit ID sent as a numeric leaf in exponent form is caught", egressViolations({ input: "x", metadata: { account: 1e40 } }, c).includes("SUBJECT1_ID"));
+    ok("egress: a 41-digit ID written in exponent form inside a string is caught", egressViolations({ input: "x", metadata: { note: "acct 1e40" } }, c).includes("SUBJECT1_ID") && egressViolations({ input: "x", metadata: { note: "acct 1e+40" } }, c).includes("SUBJECT1_ID"));
+    ok("egress: another exponent beside a 41-digit ID is not a hit", egressViolations({ input: "x", metadata: { account: 1e39, note: "acct 1e41" } }, c).length === 0);
+  }
+  {
     const body = { model: "m", messages: [{ role: "user", content: "x" }, { role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9,"n":3}' } }] }] };
     const { deidBody } = applyRedaction(body, "openai", new Vault("reversible"), ["pii"], det, true, "chat");
     const args = deidBody.messages[1].tool_calls[0].function.arguments;

@@ -22,7 +22,7 @@
 
 import { createHash } from "node:crypto";
 import type { Detector, RedactSet, Span } from "./types";
-import { exactDecimal } from "./redact/apply";
+import { exactDecimal, MAX_INTEGRAL_DIGITS } from "./redact/apply";
 
 /** Most bytes the header may carry, before base64url decoding. */
 export const MAX_SUBJECT_HEADER = 12 * 1024;
@@ -69,6 +69,9 @@ export interface CompiledSubjects {
   refDigest?: string;
   media?: MediaMode;
   matchers: Matcher[];
+  /** The most digits any declared identifier holds: a number literal is read at egress at its
+   *  exact decimal value up to this length, so no declared number hides in exponent form. */
+  numberDigits: number;
 }
 
 const LISTS: Array<[keyof SubjectInput, string]> = [
@@ -355,10 +358,12 @@ function dateForms(date: string): { patterns: string[]; digits: string[]; egress
 /** Compile a spec into matchers. Identifiers too short to match safely are dropped. */
 export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubjects {
   const matchers: Matcher[] = [];
+  let numberDigits = MAX_INTEGRAL_DIGITS;
   spec.subjects.forEach((s, i) => {
     const n = i + 1;
     for (const [key, kind] of LISTS) {
       for (const value of s[key] ?? []) {
+        numberDigits = Math.max(numberDigits, value.replace(/\D/g, "").length);
         let patterns: string[] = [];
         let exact: string[] = [];
         let folded: string[] = [];
@@ -459,7 +464,7 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
       }
     }
   });
-  return { ref: spec.ref, refDigest: spec.ref ? refDigest(spec.ref, refKey) : undefined, media: spec.media, matchers };
+  return { ref: spec.ref, refDigest: spec.ref ? refDigest(spec.ref, refKey) : undefined, media: spec.media, matchers, numberDigits };
 }
 
 const SUBJECT_SETS: RedactSet[] = ["pii"];
@@ -602,14 +607,14 @@ const isToolCall = (node: any) => typeof node?.type === "string" && /tool_use$|_
  *  `inMedia` is true below a recognised media part, the only place a payload is skipped.
  *  `caller` is true below caller-defined data (a caller container, a key the protocol does not
  *  define, decoded JSON text), where protocol keys and enum values are read like any other. */
-function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia = false, caller = false): void {
+function leaves(node: any, out: string[], parts: Set<object>, maxDigits: number, depth = 0, inMedia = false, caller = false): void {
   if (depth > 64) throw new Error("body nested deeper than 64 levels; refusing to forward unread fields");
   if (typeof node === "string") {
     out.push(node);
     // Tool arguments arrive as JSON text: a number written 4.045550187e9 or 4045550187.0 is
     // read again at its exact decimal value, the spelling the identifiers are matched in.
     for (const lit of numberLiterals(node)) {
-      const exact = exactDecimal(lit);
+      const exact = exactDecimal(lit, maxDigits);
       if (exact !== lit) out.push(exact);
     }
     // A JSON-string field (tool-call arguments) is decoded by the provider: its keys and
@@ -618,7 +623,7 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
     if (lead === "{" || lead === "[") {
       let decoded: unknown;
       try { decoded = JSON.parse(node); } catch { decoded = undefined; }
-      if (decoded && typeof decoded === "object") leaves(decoded, out, parts, depth + 1, false, true);
+      if (decoded && typeof decoded === "object") leaves(decoded, out, parts, maxDigits, depth + 1, false, true);
     }
     return;
   }
@@ -626,14 +631,14 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
     // A JSON number such as 1e21 prints as "1e+21": it is read at its exact decimal value too.
     const written = String(node);
     out.push(written);
-    const exact = exactDecimal(written);
+    const exact = exactDecimal(written, maxDigits);
     if (exact !== written) out.push(exact);
     return;
   }
   if (!node || typeof node !== "object") return;
   const media = inMedia || parts.has(node);
   if (Array.isArray(node)) {
-    for (const v of node) leaves(v, out, parts, depth + 1, media, caller);
+    for (const v of node) leaves(v, out, parts, maxDigits, depth + 1, media, caller);
     return;
   }
   for (const [k, v] of Object.entries(node)) {
@@ -642,7 +647,7 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
     if (protocol && ENUM_FIELDS.has(k) && typeof v === "string" && ENUM_VALUES.has(v)) continue; // "type": "text"
     if (media && typeof v === "string" && isPayload(k, v)) continue; // base64 or a data: URL
     const below = !protocol || CALLER_CONTAINERS.has(k) || (k === "input" && isToolCall(node));
-    leaves(v, out, parts, depth + 1, media, below);
+    leaves(v, out, parts, maxDigits, depth + 1, media, below);
   }
 }
 
@@ -655,7 +660,7 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
 export function egressViolations(deidBody: any, compiled: CompiledSubjects): string[] {
   const found = new Set<string>();
   const texts: string[] = [];
-  leaves(deidBody, texts, mediaPartsOf(deidBody));
+  leaves(deidBody, texts, mediaPartsOf(deidBody), compiled.numberDigits);
   for (const leaf of texts) {
     if (!leaf) continue;
     const raw = leaf.replace(MINTED_TYPE_WORD, "");

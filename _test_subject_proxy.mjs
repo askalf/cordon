@@ -201,6 +201,14 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { account: 1e21 } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ids: ["1000000000000000000000"] }] }) });
   ok("egress: an exponent-form numeric ID in metadata is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // The same for an ID longer than the default number expansion, as a number and in a string.
+  const longId = enc({ ref: "case-int-1", subjects: [{ ids: ["1" + "0".repeat(40)] }] });
+  await reset();
+  res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { account: 1e40 } }, { "x-cordon-subject": longId });
+  ok("egress: a 41-digit ID as 1e40 in metadata is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  await reset();
+  res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { note: "acct 1e40" } }, { "x-cordon-subject": longId });
+  ok("egress: a 41-digit ID as 1e40 in an unredacted string is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
   // A declared literal that is also an API enum word is read outside the enum fields.
   await reset();
   res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", instructions: "high" }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ other: ["high"] }] }) }, "sys-key");

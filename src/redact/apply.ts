@@ -75,8 +75,8 @@ function pushKeySlots(obj: any, keys: string[], slots: Slot[], finalizers: (() =
   });
 }
 
-/** The most digits an integral number literal is expanded to for detection. */
-const MAX_INTEGRAL_DIGITS = 40;
+/** The most digits an integral number literal is expanded to for detection, by default. */
+export const MAX_INTEGRAL_DIGITS = 40;
 
 /**
  * The exact decimal value of a JSON number literal, from its digits (never through a JS
@@ -84,10 +84,10 @@ const MAX_INTEGRAL_DIGITS = 40;
  * ("4111111111111111" for 4.111111111111111e15, 4111111111111111.0, or the card's digits
  * followed by zeros with a compensating negative exponent), anything else as written.
  * Normalised by significant digits, counted rather than built, so an exponent of any size
- * costs nothing; a value with a fractional part, or an integer longer than
- * MAX_INTEGRAL_DIGITS, is left as written.
+ * costs nothing; a value with a fractional part, or an integer longer than `maxDigits`,
+ * is left as written.
  */
-export function exactDecimal(lexeme: string): string {
+export function exactDecimal(lexeme: string, maxDigits = MAX_INTEGRAL_DIGITS): string {
   const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(lexeme);
   if (!m) return lexeme;
   const exp = Number(m[4] ?? 0);
@@ -103,7 +103,7 @@ export function exactDecimal(lexeme: string): string {
   while (end > 0 && digits.charCodeAt(end - 1) === 48) end--;
   digits = digits.slice(0, end);
   if (!digits) return "0";
-  if (point < digits.length || point > MAX_INTEGRAL_DIGITS) return lexeme;
+  if (point < digits.length || point > maxDigits) return lexeme;
   return m[1] + digits + "0".repeat(point - digits.length);
 }
 
