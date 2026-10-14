@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 <!--
 Release convention: land changes under `## [Unreleased]`. At release
+
+### Added
+- Egress findings say where they are: when the egress check finds a declared identifier, the audit record carries `egressAt` (per kind, the first place it was found, as protocol keys and array indexes with caller-defined keys written `*`, and which reading caught it), and a report-only `X-Cordon-Report` lists the kinds. Never text: a would-refuse in report-only traffic can be traced to its place in the body without the value.
 time, rename that heading to `## [X.Y.Z] - YYYY-MM-DD`, bump package.json
 to match, push a tag `vX.Y.Z`, and release.yml builds + pushes the GHCR
 image and creates the GitHub release from this file.

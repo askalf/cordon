@@ -122,6 +122,8 @@ export interface AuditRecord {
   media?: number;
   /** Report-only tenants: the request was forwarded unchanged and this records the verdict. */
   report?: boolean;
+  /** Per subject kind the egress read still found: where, and which reading caught it. */
+  egressAt?: Record<string, string>;
   prevHash: string;
   hash: string;
 }
