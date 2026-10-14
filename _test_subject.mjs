@@ -355,6 +355,9 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   const toolFile = { model: "m", messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "save", input: { type: "file", name: "notes", nested: { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } } } }] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }, ...img.messages[0].content] }] };
   ok("mask: media-shaped tool input is neither refused nor taken as an image", mediaParts(toolFile).length === 1 && mediaParts(toolFile)[0].mime === "image/png" && countMedia(toolFile) === 1);
   ok("media: an image part is counted", countMedia(img) === 1);
+  const replayedAudio = { model: "m", messages: [{ role: "user", content: "hi" }, { role: "assistant", content: null, audio: { id: "audio_123" } }, { role: "user", content: "and again?" }] };
+  ok("media: a replayed assistant audio reference is counted", countMedia(replayedAudio) === 1);
+  ok("mask: a replayed assistant audio reference is refused", mediaParts(replayedAudio).length === 1 && mediaParts(replayedAudio)[0] instanceof MediaRefusal);
   const doc = { model: "m", messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "Marisol Quintero-Vance" } }] }] };
   ok("media: a text document is not media", countMedia(doc) === 0);
   ok("egress: a text document is read", egressViolations(doc, comp).includes("SUBJECT1_NAME"));

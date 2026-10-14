@@ -173,6 +173,7 @@ function fromDataUrl(url: string, set: (v: string) => void): ImageRef | MediaRef
 /** One media part (as found by mediaPartsOf), as an image to mask or the reason it cannot be. */
 function mediaPart(node: any): ImageRef | MediaRefusal {
   const t = node.type;
+  if (typeof t !== "string") return new MediaRefusal("an assistant audio reference cannot be read here");
   if (t === "image") {
     const s = node.source;
     if (s?.type === "base64" && typeof s.data === "string" && IMAGE_MIME.has(String(s.media_type).toLowerCase()))

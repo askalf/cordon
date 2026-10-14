@@ -531,8 +531,8 @@ const isMediaPart = (node: any): boolean =>
   !!node && typeof node === "object" && typeof node.type === "string" &&
   (MEDIA_TYPES.has(node.type) || (node.type === "document" && BINARY_SOURCES.has(node.source?.type)));
 /** The media parts of a body, found only where the provider schemas carry them: a message's
- *  content parts, a tool or MCP tool result's content, a document's content source, a
- *  Responses input item or its output parts. An
+ *  content parts, a Chat Completions assistant message's audio reference, a tool or MCP tool
+ *  result's content, a document's content source, a Responses input item or its output parts. An
  *  object of the same shape anywhere else (tool_use input, function arguments, metadata) is
  *  ordinary data and is read in full. Counting, the egress check and masking all use this. */
 export function mediaPartsOf(body: any): Set<object> {
@@ -548,7 +548,11 @@ export function mediaPartsOf(body: any): Set<object> {
     }
   };
   if (!body || typeof body !== "object") return found;
-  for (const m of Array.isArray(body.messages) ? body.messages : []) parts(m?.content);
+  for (const m of Array.isArray(body.messages) ? body.messages : []) {
+    parts(m?.content);
+    // An earlier audio reply replayed by id: the provider resolves it to the audio itself.
+    if (m?.audio && typeof m.audio === "object" && !Array.isArray(m.audio)) found.add(m.audio);
+  }
   for (const list of [body.input, body.instructions])
     if (Array.isArray(list))
       for (const item of list) {

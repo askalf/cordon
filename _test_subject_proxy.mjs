@@ -249,6 +249,21 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/responses", promptImage, { "x-cordon-subject": SUBJECT({ media: "mask" }) }, "mask-key");
   ok("media: a URL image in a prompt variable is refused under mask, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // A Chat Completions assistant audio reply replayed by id is media the provider resolves.
+  const audioReplay = {
+    model: "gpt-4o-audio-preview",
+    messages: [
+      { role: "user", content: "read me the case notes" },
+      { role: "assistant", content: null, audio: { id: "audio_123" } },
+      { role: "user", content: "and once more" },
+    ],
+  };
+  await reset();
+  res = await post("/v1/chat/completions", audioReplay, { "x-cordon-subject": SUBJECT() });
+  ok("media: a replayed assistant audio reference is refused under block, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  await reset();
+  res = await post("/v1/chat/completions", audioReplay, { "x-cordon-subject": SUBJECT({ media: "mask" }) }, "mask-key");
+  ok("media: a replayed assistant audio reference is refused under mask, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
   // Digits spread wider than detection reaches are still caught on the way out.
   await reset();
   res = await post("/v1/messages", aBody("call 4    0    4    5    5    5    0    1    8    7"), { "x-cordon-subject": SUBJECT() });
