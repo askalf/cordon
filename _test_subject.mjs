@@ -100,6 +100,13 @@ ok("name: a lower-case single token is not a name", !hit("he will mark it").leng
   const gl = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, g);
   ok("egress: a one-token name is not found in ordinary lowercase words", gl("please grant access; the fragrant grants were vagrant").length === 0);
   ok("egress: a one-token name capitalised or spread out is a hit", gl("Grant called").includes("SUBJECT1_NAME") && gl("g r a n t").includes("SUBJECT1_NAME"));
+  ok("name: a one-token name in capitals is redacted", subjectSpans("THIS IS GRANT SPEAKING", g).some((s) => s.type === "SUBJECT1_NAME"));
+  ok("name: a name right after a JSON escape is redacted", subjectSpans('{"text":"Message:\\nGrant here, \\"Grant\\" too"}', g).filter((s) => s.type === "SUBJECT1_NAME").length === 2);
+  const ms = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Mia Stone"] }] })), "k");
+  ok("egress: an initial-and-surname join is not read across words", egressViolations({ messages: [{ role: "user", content: "the stone might fall" }] }, ms).length === 0);
+  ok("egress: an initial-and-surname join is still read as a handle", egressViolations({ messages: [{ role: "user", content: "ig: stonem77 or m.stone" }] }, ms).includes("SUBJECT1_NAME"));
+  const mv = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Marisol Vance"] }] })), "k");
+  ok("name: a handle join inside another word is not redacted", !subjectSpans("their advancement plan", mv).length);
   // The Unscathed Desk's context turn for a visitor who called themself "Test User".
   const body = { model: "m", messages: [{ role: "user", content: "woken for T1" }, { role: "assistant", content: [{ type: "tool_use", id: "a", name: "unscathed_reply", input: { action: "context" } }] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "a", content: JSON.stringify({ message: "Name they gave: Test User\n\nName:           Test User\nEmail:          test@example.com\n\nMessage:\nHi, this is a test of the contact form." }, null, 2) }] }] };
   const vault = new Vault("reversible");
