@@ -279,6 +279,12 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
     res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { note: "1404" + "5550187".split("").map((d) => " ".repeat(12) + d).join("") } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ phones }] }) });
     ok(`phone: an attached leading 1 with wide separators in metadata is refused, upstream never called: ${phones[0]}`, res.status === 422 && (await calls()).total === 0, String(res.status));
   }
+  // A phone declared in full-width digits, in Responses metadata in either spelling.
+  for (const note of ["4045550187", "\uff14\uff10\uff14\uff15\uff15\uff15\uff10\uff11\uff18\uff17"]) {
+    await reset();
+    res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { note } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ phones: ["\uff14\uff10\uff14\uff15\uff15\uff15\uff10\uff11\uff18\uff17"] }] }) });
+    ok(`phone: declared in full-width digits, ${JSON.stringify(note)} in metadata is refused, upstream never called`, res.status === 422 && (await calls()).total === 0, String(res.status));
+  }
   await reset();
   res = await post("/v1/messages", aBody("acct " + "1234".split("").join(" ".repeat(12))), { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ ids: ["1234"] }] }) });
   ok("id: a short ID with twelve spaces between digits is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));

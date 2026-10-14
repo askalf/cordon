@@ -138,6 +138,9 @@ export const refDigest = (ref: string, key: string) =>
 const ZERO_WIDTH = /[​-‍⁠﻿­]/g;
 /** What the egress check reads: NFKC, zero-width characters dropped, case folded. */
 export const foldText = (s: string) => s.normalize("NFKC").replace(ZERO_WIDTH, "").toLowerCase();
+/** A declared identifier as compiled: NFKC with zero-width characters dropped, case kept, so a
+ *  full-width digit or letter is read as its ASCII form before digits or letters are extracted. */
+const declared = (s: string) => s.normalize("NFKC").replace(ZERO_WIDTH, "").trim();
 /** The same letters without accents: "José" and "Jose" read alike. */
 export const unaccent = (s: string) => s.normalize("NFD").replace(/\p{M}+/gu, "").normalize("NFC");
 /** Letters and digits only, after foldText: separators, spacing and punctuation ignored. */
@@ -373,7 +376,9 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
   spec.subjects.forEach((s, i) => {
     const n = i + 1;
     for (const [key, kind] of LISTS) {
-      for (const value of s[key] ?? []) {
+      for (const raw of s[key] ?? []) {
+        const value = declared(raw);
+        if (!value) continue;
         numberDigits = Math.max(numberDigits, value.replace(/\D/g, "").length);
         let patterns: string[] = [];
         let exact: string[] = [];
@@ -466,6 +471,8 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             exact = [...exact, ...(again.exact ?? [])];
           }
         }
+        // The identifier as the caller wrote it (full-width, say) is redacted where it appears so.
+        if (raw.trim() !== value && loose(raw)) patterns = [...patterns, `(?<![\\p{L}\\p{N}])${loose(raw)}(?![\\p{L}\\p{N}])`];
         // One regex per form, not one alternation: an alternation stops at the first form that
         // matches at a position, so "mqvance77" would win over "mqvance77@example.com". Every
         // form's spans are collected and withSubjects keeps the longest of any overlap.

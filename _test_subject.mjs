@@ -161,6 +161,16 @@ ok("email: the whole address wins over its local part", /^<SUBJECT1_EMAIL_[0-9A-
 ok("email: the local part reused as a username", clean("user mqvance77 on forums", "mqvance77"));
 for (const p of ["404-555-0187", "(404) 555-0187", "404.555.0187", "+1 404 555 0187", "14045550187", "4045550187"])
   ok(`phone: ${p}`, clean(`call ${p} now`, "0187"));
+{
+  // A phone declared in full-width digits is compiled from its NFKC form.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ phones: ["\uff14\uff10\uff14\uff15\uff15\uff15\uff10\uff11\uff18\uff17"] }] })), "k");
+  const leak = (s) => egressViolations({ input: "hello", metadata: { note: s } }, c);
+  ok("phone: declared in full-width digits, the ASCII spelling is caught at egress", leak("4045550187").includes("SUBJECT1_PHONE") && leak("404-555-0187").includes("SUBJECT1_PHONE"));
+  ok("phone: declared in full-width digits, the full-width spelling is caught at egress", leak("\uff14\uff10\uff14\uff15\uff15\uff15\uff10\uff11\uff18\uff17").includes("SUBJECT1_PHONE"));
+  ok("phone: declared in full-width digits, both spellings are redacted", subjectSpans("call 404-555-0187 or \uff14\uff10\uff14\uff15\uff15\uff15\uff10\uff11\uff18\uff17", c).length === 2);
+  const id = compileSubjects(parseSubjectHeader(enc({ subjects: [{ ids: ["\uff11\uff12\uff13-\uff14\uff15-\uff16\uff17\uff18\uff19"] }] })), "k");
+  ok("id: declared in full-width digits, the ASCII spelling is caught at egress", egressViolations({ input: "hello", metadata: { note: "123-45-6789" } }, id).includes("SUBJECT1_ID"));
+}
 ok("phone: not inside a longer number", !hit("ref 94045550187 and 40455501879").length);
 ok("address: Street written as St", clean("lives at 1428 Elm St, Decatur", "1428 Elm"));
 ok("address: as given, with the unit", clean("1428 Elm Street, Apt 4", "1428 Elm"));
