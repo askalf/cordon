@@ -424,9 +424,10 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             const f = addressForms(value);
             patterns = f.patterns;
             folded = f.folded.filter((x) => x.length >= 8);
-            // A spelling too short to be a needle ("1 Oak St" as 1oakst) is still read at egress
-            // word-bounded with any separators, so "1 O a k S t" is caught.
-            egress = f.folded.filter((x) => x.length < 8).flatMap((x) => egressSpread(x));
+            // A spelling too short to be a needle ("1 Oak St" as 1oakst, "1 A" as 1a) is still read
+            // at egress word-bounded with any separators, however short, so "1 O a k S t" and
+            // "1 / A" are caught.
+            egress = f.folded.filter((x) => x.length < 8).flatMap((x) => egressSpread(x, 1));
             break;
           }
           case "DOB": {

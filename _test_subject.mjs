@@ -231,6 +231,13 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: a short address spread out is caught, abbreviated and expanded", leak("1 O a k S t").includes("SUBJECT1_ADDRESS") && leak("1 o a k s t r e e t").includes("SUBJECT1_ADDRESS"));
   ok("egress: other letters spread between a short address's are not a hit", leak("1 o a k x s t").length === 0);
 }
+{
+  // An address shorter than four letters and digits once folded is still read at egress.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ addresses: ["1 A"] }] })), "k");
+  const leak = (s) => egressViolations({ input: "hello", metadata: { note: s } }, c);
+  ok("egress: a two-character address with its separators changed is caught", leak("1 / A").includes("SUBJECT1_ADDRESS") && leak("1a").includes("SUBJECT1_ADDRESS") && leak("1-a").includes("SUBJECT1_ADDRESS"));
+  ok("egress: a two-character address with another character joined on, or another letter, is not a hit", leak("1 / A2, 2 / 1 / B and 1 / Ab").length === 0);
+}
 
 // ---- the catalog still runs beside the subjects ----
 {
