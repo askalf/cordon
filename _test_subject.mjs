@@ -288,6 +288,11 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
     ok("egress: a 41-digit ID in full-width exponent form inside a string is caught", egressViolations({ input: "x", metadata: { note: "acct \uff11\uff45\uff14\uff10" } }, c).includes("SUBJECT1_ID") && egressViolations({ input: "x", metadata: { note: "acct \uff11\uff25\uff0b\uff14\uff10" } }, c).includes("SUBJECT1_ID"));
     ok("egress: a 41-digit ID in exponent form split by zero-width characters is caught", egressViolations({ input: "x", metadata: { note: "acct 1\u200be\u200d40" } }, c).includes("SUBJECT1_ID") && egressViolations({ input: "x", metadata: { note: "acct \uff11\u2060\uff45\ufeff\uff14\uff10" } }, c).includes("SUBJECT1_ID"));
     ok("egress: another full-width exponent beside a 41-digit ID is not a hit", egressViolations({ input: "x", metadata: { note: "acct \uff11\uff45\uff14\uff11" } }, c).length === 0);
+    const asKey = (k) => egressViolations({ input: "x", metadata: { [k]: "x" } }, c);
+    ok("egress: a 41-digit ID in exponent form as a metadata key is caught", asKey("1e40").includes("SUBJECT1_ID") && asKey("1e+40").includes("SUBJECT1_ID"));
+    ok("egress: a 41-digit ID in full-width exponent form as a metadata key is caught", asKey("\uff11\uff45\uff14\uff10").includes("SUBJECT1_ID") && asKey("\uff11\uff25\uff0b\uff14\uff10").includes("SUBJECT1_ID"));
+    ok("egress: a 41-digit ID in exponent form split by zero-width characters as a metadata key is caught", asKey("1\u200be\u200d40").includes("SUBJECT1_ID") && asKey("\uff11\u2060\uff45\ufeff\uff14\uff10").includes("SUBJECT1_ID"));
+    ok("egress: another exponent as a metadata key beside a 41-digit ID is not a hit", egressViolations({ input: "x", metadata: { "1e39": "x", "\uff11\uff45\uff14\uff11": "y" } }, c).length === 0);
   }
   {
     const body = { model: "m", messages: [{ role: "user", content: "x" }, { role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9,"n":3}' } }] }] };

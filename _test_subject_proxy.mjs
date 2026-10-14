@@ -214,6 +214,12 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
     res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { note } }, { "x-cordon-subject": longId });
     ok(`egress: a 41-digit ID as 1e40 in full-width or zero-width-split form is refused, upstream never called: ${JSON.stringify(note)}`, res.status === 422 && (await calls()).total === 0, String(res.status));
   }
+  // The same exponent spellings as a metadata key rather than a value.
+  for (const key of ["1e40", "\uff11\uff45\uff14\uff10", "1\u200be\u200d40", "\uff11\u2060\uff45\ufeff\uff14\uff10"]) {
+    await reset();
+    res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { [key]: "x" } }, { "x-cordon-subject": longId });
+    ok(`egress: a 41-digit ID as 1e40 in a metadata key is refused, upstream never called: ${JSON.stringify(key)}`, res.status === 422 && (await calls()).total === 0, String(res.status));
+  }
   // A declared literal that is also an API enum word is read outside the enum fields.
   await reset();
   res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", instructions: "high" }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ other: ["high"] }] }) }, "sys-key");

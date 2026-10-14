@@ -589,6 +589,20 @@ function numberLiterals(text: string): string[] {
 const CALLER_CONTAINERS = new Set(["metadata", "variables", "parameters", "properties", "schema", "input_schema", "json_schema", "additionalProperties", "arguments"]);
 const isToolCall = (node: any) => typeof node?.type === "string" && /tool_use$|_call$/.test(node.type);
 
+/** A text as written, then each number literal in it (a fraction or an exponent, in the
+ *  text or its folded spelling, so "１ｅ４０" counts as "1e40") at its exact decimal value,
+ *  the spelling the identifiers are matched in. String leaves and object keys both go here. */
+function pushText(text: string, out: string[], maxDigits: number): void {
+  out.push(text);
+  const folded = foldText(text);
+  const lits = new Set(numberLiterals(text));
+  if (folded !== text) for (const lit of numberLiterals(folded)) lits.add(lit);
+  for (const lit of lits) {
+    const exact = exactDecimal(lit, maxDigits);
+    if (exact !== lit) out.push(exact);
+  }
+}
+
 /** Every string leaf and object key, with media payloads skipped (they are counted, not read).
  *  `inMedia` is true below a recognised media part, the only place a payload is skipped.
  *  `caller` is true below caller-defined data (a caller container, a key the protocol does not
@@ -596,18 +610,9 @@ const isToolCall = (node: any) => typeof node?.type === "string" && /tool_use$|_
 function leaves(node: any, out: string[], parts: Set<object>, maxDigits: number, depth = 0, inMedia = false, caller = false): void {
   if (depth > 64) throw new Error("body nested deeper than 64 levels; refusing to forward unread fields");
   if (typeof node === "string") {
-    out.push(node);
     // Tool arguments arrive as JSON text: a number written 4.045550187e9 or 4045550187.0 is
-    // read again at its exact decimal value, the spelling the identifiers are matched in. The
-    // literals are also taken from the folded text, so full-width or zero-width-split digits
-    // ("１ｅ４０") are expanded the same as their ASCII spelling.
-    const folded = foldText(node);
-    const lits = new Set(numberLiterals(node));
-    if (folded !== node) for (const lit of numberLiterals(folded)) lits.add(lit);
-    for (const lit of lits) {
-      const exact = exactDecimal(lit, maxDigits);
-      if (exact !== lit) out.push(exact);
-    }
+    // read again at its exact decimal value.
+    pushText(node, out, maxDigits);
     // A JSON-string field (tool-call arguments) is decoded by the provider: its keys and
     // values are read again as decoded, so \u0057-style escapes cannot hide the letters.
     const lead = node.trimStart()[0];
@@ -634,7 +639,7 @@ function leaves(node: any, out: string[], parts: Set<object>, maxDigits: number,
   }
   for (const [k, v] of Object.entries(node)) {
     const protocol = !caller && PROTOCOL_KEYS.has(k);
-    if (!protocol) out.push(k);
+    if (!protocol) pushText(k, out, maxDigits);
     if (protocol && ENUM_FIELDS.has(k) && typeof v === "string" && ENUM_VALUES.has(v)) continue; // "type": "text"
     if (media && typeof v === "string" && isPayload(k, v)) continue; // base64 or a data: URL
     const below = !protocol || CALLER_CONTAINERS.has(k) || (k === "input" && isToolCall(node));
