@@ -97,6 +97,23 @@ ok("name: a lower-case single token is not a name", !hit("he will mark it").leng
   const body = { model: "m", messages: [{ role: "user", content: "Name Bdeqnsk called" }, { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input: { q: "x" } }] }] };
   const out = applyRedaction(body, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
   ok("egress: a name token that is also a field name does not refuse a redacted body", !JSON.stringify(out).includes("Bdeqnsk") && egressViolations(out, c).length === 0, JSON.stringify(out.messages[0].content));
+  ok("egress: a field-word name token spaced out in text is still caught", egressViolations({ messages: [{ role: "user", content: "N a m e" }] }, c).includes("SUBJECT1_NAME"));
+}
+{
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Lena Card"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a spaced-out surname that is also a field word is caught", leak("C a r d").includes("SUBJECT1_NAME") && leak("c-a-r-d").includes("SUBJECT1_NAME"));
+  ok("egress: a protocol key spelled like a name token is not a hit", egressViolations({ messages: [{ role: "user", content: [{ type: "text", text: "x", name: "y" }] }] }, compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k")).length === 0);
+  ok("egress: a key that is not a protocol key is read", egressViolations({ messages: [{ role: "user", content: "x", card: 1 }], metadata: { "c a r d": 1 } }, c).includes("SUBJECT1_NAME"));
+  ok("egress: an enum value is skipped only when it is the whole value", egressViolations({ messages: [{ role: "user", content: "card" }] }, c).includes("SUBJECT1_NAME"));
+}
+{
+  // Only the type word of a placeholder cordon mints is dropped; a look-alike is read as written.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Marisol Okafor"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a name written as a placeholder type is caught", leak("<MARISOL_1A2B3C_1>").includes("SUBJECT1_NAME") && leak("[MARISOL]").includes("SUBJECT1_NAME"));
+  ok("egress: a name inside a minted placeholder's suffix position is caught", leak("<EMAIL_1A2B3C_1>MARISOL").includes("SUBJECT1_NAME"));
+  ok("egress: minted placeholders alone are not a hit", leak("<SUBJECT1_NAME_1A2B3C_1> and <EMAIL_0F0F0F0F> and [SSN]").length === 0);
 }
 {
   const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Zoe"] }] })), "k");

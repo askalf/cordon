@@ -174,14 +174,43 @@ const COMMON = new Set(
     .split(" "),
 );
 
-// Request field names and placeholder kinds: words every request body carries as keys
-// ("name", "content") or inside the placeholders cordon writes ("SUBJECT1_NAME").
-const FIELD_WORDS = new Set(
-  ("name type role content text model input output tool tools user assistant system data image source " +
-    "media file url detail format items enum default string object number boolean array function arguments " +
-    "parameters properties required description messages metadata thinking signature subject email phone " +
-    "address dob handle other key secret card")
+// The provider APIs' own object keys, exactly as they are spelled. Every body carries them,
+// so at egress a key is read only when it is not one of these: a subject named "Name" would
+// otherwise refuse every request on its "name" key. Values are still read under every key.
+const PROTOCOL_KEYS = new Set(
+  ("model messages system role content type text name id input output instructions tools tool_choice " +
+    "tool_calls tool_call_id tool_use_id function arguments parameters properties required description " +
+    "items enum default format source media_type data url image_url input_image detail file file_id " +
+    "file_data filename result is_error metadata stream temperature top_p top_k max_tokens " +
+    "max_output_tokens max_completion_tokens stop stop_sequences thinking budget_tokens signature " +
+    "cache_control ephemeral reasoning effort summary store previous_response_id user response_format " +
+    "json_schema schema strict additionalProperties call_id status title")
     .split(" "),
+);
+
+// The APIs' own enum values ("type": "text", "role": "user"), skipped at egress only when a
+// string value is exactly one of them; any other value, under any key, is read.
+const ENUM_VALUES = new Set(
+  ("text image document tool_use tool_result thinking redacted_thinking input_text input_image input_file " +
+    "output_text refusal function function_call function_call_output message reasoning summary_text user " +
+    "assistant system developer tool base64 url file auto low medium high minimal none any required " +
+    "ephemeral object string number integer boolean array null json_schema json_object image_url " +
+    "image/png image/jpeg image/gif image/webp application/pdf text/plain completed in_progress enabled disabled")
+    .split(" "),
+);
+
+// The type word of a placeholder cordon itself mints, and only that: a subject kind or a
+// catalog type, inside the vault's exact shape (an 8-hex keyed token, a 6-hex nonce and a
+// counter, or the bare [TYPE] of strip mode). It is dropped before the egress read so
+// "<SUBJECT1_NAME_1A2B3C_1>" does not match a subject named "Name"; the suffix stays and is
+// read, and any other bracketed text is read as written.
+const MINTED_TYPES =
+  "SUBJECT\\d+_(?:NAME|EMAIL|PHONE|ADDRESS|DOB|ID|HANDLE|OTHER)|EMAIL|PHONE|SSN|CREDIT_CARD|IBAN|DATE|MAC|MRN|" +
+  "STREET_ADDRESS|US_ROUTING|JWT|BEARER_TOKEN|PRIVATE_KEY|AWS_ACCESS_KEY|ANTHROPIC_KEY|OPENAI_KEY|GITHUB_TOKEN|" +
+  "GITHUB_FINEGRAINED_PAT|GOOGLE_API_KEY|GOOGLE_OAUTH_REFRESH|NPM_TOKEN|SENDGRID_KEY|SLACK_TOKEN|SLACK_WEBHOOK|STRIPE_KEY";
+const MINTED_TYPE_WORD = new RegExp(
+  `(?<=<)(?:${MINTED_TYPES})(?=_(?:[0-9A-F]{6}_\\d{1,6}|[0-9A-F]{8})>)|(?<=\\[)(?:${MINTED_TYPES})(?=\\])`,
+  "g",
 );
 
 const STREET_SUFFIX: Record<string, string[]> = {
@@ -253,13 +282,9 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
   // or several: "Z o e" and "M a r i s o l" (from "Marisol Quintero-Vance") are caught, "zoes"
   // and "marisols" are not. A one-token name long enough to be a needle is read separator-blind
   // as well.
-  // A token that is also a request field name or a placeholder kind ("Name", "Content") is
-  // not read alone at egress: every body carries those words as keys and in placeholders, so
-  // it would refuse clean requests. The capitalised match above still redacts it in text.
-  const alone = (t: string) => !COMMON.has(t.toLowerCase()) && !FIELD_WORDS.has(t.toLowerCase());
   for (const t of tokens)
-    if (t.length >= 3 && alone(t)) for (const p of egressSpread(t, 3)) egress.add(p);
-  if (tokens.length === 1 && tokens[0].length >= 5 && alone(tokens[0])) folded.add(alnum(tokens[0]));
+    if (t.length >= 3 && !COMMON.has(t.toLowerCase())) for (const p of egressSpread(t, 3)) egress.add(p);
+  if (tokens.length === 1 && tokens[0].length >= 5 && !COMMON.has(tokens[0].toLowerCase())) folded.add(alnum(tokens[0]));
   return { patterns: [...patterns], exact: [...exact], folded: [...folded], egress: [...egress] };
 }
 
@@ -562,6 +587,7 @@ function numberLiterals(text: string): string[] {
 function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia = false): void {
   if (depth > 64) throw new Error("body nested deeper than 64 levels; refusing to forward unread fields");
   if (typeof node === "string") {
+    if (ENUM_VALUES.has(node)) return;
     out.push(node);
     // Tool arguments arrive as JSON text: a number written 4.045550187e9 or 4045550187.0 is
     // read again at its exact decimal value, the spelling the identifiers are matched in.
@@ -594,7 +620,7 @@ function leaves(node: any, out: string[], parts: Set<object>, depth = 0, inMedia
     return;
   }
   for (const [k, v] of Object.entries(node)) {
-    out.push(k);
+    if (!PROTOCOL_KEYS.has(k)) out.push(k);
     if (media && typeof v === "string" && isPayload(k, v)) continue; // base64 or a data: URL
     leaves(v, out, parts, depth + 1, media);
   }
@@ -610,8 +636,9 @@ export function egressViolations(deidBody: any, compiled: CompiledSubjects): str
   const found = new Set<string>();
   const texts: string[] = [];
   leaves(deidBody, texts, mediaPartsOf(deidBody));
-  for (const raw of texts) {
-    if (!raw) continue;
+  for (const leaf of texts) {
+    if (!leaf) continue;
+    const raw = leaf.replace(MINTED_TYPE_WORD, "");
     const folded = foldText(raw);
     const plain = unaccent(folded);
     const flat = plain.replace(/[^\p{L}\p{N}]+/gu, "");
