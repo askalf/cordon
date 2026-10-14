@@ -6,9 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 <!--
 Release convention: land changes under `## [Unreleased]`. At release
-
-### Added
-- Egress findings say where they are: when the egress check finds a declared identifier, the audit record carries `egressAt` (per kind, the first place it was found, as protocol keys and array indexes with caller-defined keys written `*`, and which reading caught it), and a report-only `X-Cordon-Report` lists the kinds. Never text: a would-refuse in report-only traffic can be traced to its place in the body without the value.
 time, rename that heading to `## [X.Y.Z] - YYYY-MM-DD`, bump package.json
 to match, push a tag `vX.Y.Z`, and release.yml builds + pushes the GHCR
 image and creates the GitHub release from this file.
@@ -21,6 +18,7 @@ image and creates the GitHub release from this file.
 - Known subjects (`X-Cordon-Subject`): a caller names the people a request is about, and their names, emails, phones, addresses, dates of birth, IDs and handles are matched in the forms people write them and replaced with `<SUBJECT<n>_<KIND>_…>` placeholders ahead of the pattern catalog. An egress check then reads the de-identified body again, separator-blind and Unicode-normalised, and refuses the request (422) if any identifier is still there. Media in a subject request is refused unless both the policy and the header allow it. The audit records a digest of the caller's ref and the egress verdict, `X-Cordon-Receipt` returns the record's hash, and `GET /admin/receipts?ref=` serves a ref's records after verifying the chain.
 - Tenant policy `requireSubject`, `subjectMedia` and `reportOnly` (forward unchanged and record what would have happened, for measuring a caller before enforcing).
 - Image masking for subject requests (`subjectMedia: "mask"`): each image is read on the server with an offline OCR engine, the words of any subject identifier or catalog entity are painted over, and the masked image is read again and sent only if nothing is found. Media that cannot be read (PDF, audio, files, images by URL or file id) is refused in mask mode. `sharp`, `tesseract.js` and `@tesseract.js-data/eng` are optional dependencies.
+- Egress findings say where they are: when the egress check finds a declared identifier, the audit record carries `egressAt` (per kind, the first place it was found, as protocol keys and array indexes with caller-defined keys written `*`, and which reading caught it), and a report-only `X-Cordon-Report` lists the kinds. Never text: a would-refuse in report-only traffic can be traced to its place in the body without the value.
 
 ### Fixed
 
