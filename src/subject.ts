@@ -62,6 +62,9 @@ interface Matcher {
   /** The digit sequences as regexes, compiled once per request, plus any egress-only
    *  forms (dates with spaced separators, IDs with any run of separators). */
   digitRes: RegExp[];
+  /** Name tokens read at egress with any separators: a match counts only when it is spread out
+   *  or starts with a capital (a lowercase ordinary word is not the name). */
+  spreadRes: RegExp[];
 }
 
 export interface CompiledSubjects {
@@ -233,13 +236,13 @@ const MONTHS = ["january", "february", "march", "april", "may", "june", "july", 
 
 // ---- per-kind matchers ----
 
-function nameForms(name: string): { patterns: string[]; exact: string[]; folded: string[]; egress: string[] } {
+function nameForms(name: string): { patterns: string[]; exact: string[]; folded: string[]; egress: string[]; spread: string[] } {
   const tokens = name.split(/[\s,]+/).map((t) => t.replace(/\.$/, "")).filter(Boolean);
   const patterns = new Set<string>();
   const exact = new Set<string>();
   const folded = new Set<string>();
   const egress = new Set<string>();
-  if (!tokens.length) return { patterns: [], exact: [], folded: [], egress: [] };
+  if (!tokens.length) return { patterns: [], exact: [], folded: [], egress: [], spread: [] };
   const first = tokens[0];
   const last = tokens[tokens.length - 1];
   const middle = tokens.slice(1, -1);
@@ -279,12 +282,13 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
   // At egress every token matched alone is also read word-bounded with any separators, down to
   // the three letters the capitalised match accepts, whether the name was declared as one token
   // or several: "Z o e" and "M a r i s o l" (from "Marisol Quintero-Vance") are caught, "zoes"
-  // and "marisols" are not. A one-token name long enough to be a needle is read separator-blind
-  // as well.
+  // and "marisols" are not. These are `spread` forms: a match counts only when it is spread out
+  // or starts with a capital, because a name token is often an ordinary word too, and "this is
+  // a test" or "grant access" written in lowercase is not the visitor named Test or Grant.
+  const spread = new Set<string>();
   for (const t of tokens)
-    if (t.length >= 3 && !COMMON.has(t.toLowerCase())) for (const p of egressSpread(t, 3)) egress.add(p);
-  if (tokens.length === 1 && tokens[0].length >= 5 && !COMMON.has(tokens[0].toLowerCase())) folded.add(alnum(tokens[0]));
-  return { patterns: [...patterns], exact: [...exact], folded: [...folded], egress: [...egress] };
+    if (t.length >= 3 && !COMMON.has(t.toLowerCase())) for (const p of egressSpread(t, 3)) spread.add(p);
+  return { patterns: [...patterns], exact: [...exact], folded: [...folded], egress: [...egress], spread: [...spread] };
 }
 
 function addressForms(addr: string): { patterns: string[]; folded: string[] } {
@@ -385,6 +389,7 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
         let folded: string[] = [];
         let digits: string[] = [];
         let egress: string[] = [];
+        let spread: string[] = [];
         switch (kind) {
           case "NAME": {
             const f = nameForms(value);
@@ -392,6 +397,7 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
             exact = f.exact;
             folded = f.folded;
             egress = f.egress;
+            spread = f.spread;
             break;
           }
           case "EMAIL": {
@@ -487,7 +493,8 @@ export function compileSubjects(spec: SubjectSpec, refKey: string): CompiledSubj
           ...digits.map((d) => new RegExp(`(?<!\\d)${egressDigitPattern(d)}(?!\\d)`, "u")),
           ...egress.map((p) => new RegExp(p, "u")),
         ];
-        matchers.push({ type: `SUBJECT${n}_${kind}`, res, folded, digits, digitRes });
+        const spreadRes = spread.map((p) => new RegExp(p, "giu"));
+        matchers.push({ type: `SUBJECT${n}_${kind}`, res, folded, digits, digitRes, spreadRes });
       }
     }
   });
@@ -699,6 +706,18 @@ function leaves(node: any, out: string[], parts: Set<object>, maxDigits: number,
   }
 }
 
+/** A name-token form matches when some occurrence is spread out (a separator between its
+ *  letters: "T e s t", "t.e.s.t") or starts with a capital ("Test", "TEST"). A plain lowercase
+ *  word ("this is a test") is ordinary text, not the name. */
+function spreadHit(re: RegExp, text: string): boolean {
+  re.lastIndex = 0;
+  for (const m of text.matchAll(re)) {
+    const s = m[0];
+    if (/[^\p{L}\p{N}]/u.test(s) || s[0] !== s[0].toLowerCase()) return true;
+  }
+  return false;
+}
+
 /** What this request's redaction minted (placeholder to entity type) and the body the
  *  caller sent, so the egress read can tell a minted placeholder from the caller's own text. */
 export interface Redaction {
@@ -743,6 +762,8 @@ export function egressViolations(deidBody: any, compiled: CompiledSubjects, reda
     const folded = foldText(raw);
     const plain = unaccent(folded);
     const flat = plain.replace(/[^\p{L}\p{N}]+/gu, "");
+    // Case kept, for the name-token forms: normalised like `plain` but not lower-cased.
+    const cased = unaccent(raw.normalize("NFKC").replace(ZERO_WIDTH, ""));
     for (const m of compiled.matchers) {
       if (found.has(m.type)) continue;
       if (m.res.some((re) => [raw, folded, plain].some((t) => { re.lastIndex = 0; const ok = re.test(t); re.lastIndex = 0; return ok; }))) {
@@ -751,6 +772,10 @@ export function egressViolations(deidBody: any, compiled: CompiledSubjects, reda
       }
       if (m.folded.some((needle) => needle && flat.includes(needle))) {
         hit(m.type, i, "folded");
+        continue;
+      }
+      if (m.spreadRes.some((re) => spreadHit(re, cased))) {
+        hit(m.type, i, "spread");
         continue;
       }
       if (m.digitRes.some((re) => re.test(folded) || re.test(plain))) hit(m.type, i, "digits");

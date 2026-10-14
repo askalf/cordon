@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 <!--
 Release convention: land changes under `## [Unreleased]`. At release
+
+### Fixed
+
+- Egress: a declared name's single words are no longer found in ordinary lowercase text. A word read alone counts only when it is capitalised, in capitals or spread out ("Test", "TEST", "t e s t"), so a visitor named Test User or Grant does not turn "this is a test" or "grant access" into a refusal. A one-word name is no longer a separator-blind needle either ("fragrant" held "grant"). Full names, email addresses, phone numbers and the other forms are read as before.
 time, rename that heading to `## [X.Y.Z] - YYYY-MM-DD`, bump package.json
 to match, push a tag `vX.Y.Z`, and release.yml builds + pushes the GHCR
 image and creates the GitHub release from this file.
