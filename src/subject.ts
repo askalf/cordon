@@ -170,6 +170,12 @@ const egressDigitPattern = (d: string) => d.split("").join("[^\\p{L}\\p{N}]*");
  *  Shorter than `min` characters gives no pattern. */
 const egressSpread = (s: string, min = 4) =>
   alnum(s).length >= min ? [`(?<![\\p{L}\\p{N}])${[...alnum(s)].map(esc).join("[^\\p{L}\\p{N}]*")}(?![\\p{L}\\p{N}])`] : [];
+/** A name joined like a username (marisolvance, mvance, vancem): letter-bounded, so digits may
+ *  follow ("mvance77") but another word may not start or end it ("advancement" holds vancem,
+ *  "the stone might" flattens to stonemight). For detection, contiguous; for egress, with any
+ *  separators between the letters. */
+const handleForm = (h: string) => `(?<!\\p{L})${esc(h.toLowerCase())}(?!\\p{L})`;
+const handleSpread = (h: string) => `(?<!\\p{L})${[...alnum(h)].map(esc).join("[^\\p{L}\\p{N}]*")}(?!\\p{L})`;
 
 // Common words that are also given names or surnames. Alone and capitalised they still
 // read as words often enough ("Will you", "Hope Street") that redacting them would corrupt
@@ -258,12 +264,15 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
     // A form too short to be a needle or a handle ("Will Ray" as wray, rayw; "Will Li" as wli)
     // is still read at egress word-bounded with any separators, however short, so "w . r a y"
     // and "W . L i" are caught and "wrays" is not.
-    for (const h of [first + last, last + first, first[0] + last, last + first[0]])
-      if (h.length >= 6) {
-        patterns.add(esc(h.toLowerCase()));
-        folded.add(alnum(h));
-      } else for (const p of egressSpread(h, 1)) egress.add(p);
+    // The full first-and-last joins are also separator-blind needles (long enough not to turn up
+    // by chance); the initial joins are read letter-bounded only, since a surname followed by
+    // any word starting with the initial would otherwise hold one.
+    for (const h of [first + last, last + first, first[0] + last, last + first[0]]) {
+      if (h.length >= 6) patterns.add(handleForm(h));
+      if (alnum(h)) egress.add(handleSpread(h));
+    }
     folded.add(alnum(first + last));
+    folded.add(alnum(last + first));
     // The whole name in order, middle names included: "w i l l h e n r y g r a c e".
     folded.add(alnum(tokens.join("")));
     // The middle-initial forms detection accepts, read separator-blind: "w . h . g r a c e",
@@ -278,7 +287,11 @@ function nameForms(name: string): { patterns: string[]; exact: string[]; folded:
   // Single tokens alone (word-bounded, capitalised): skipped for short and common words.
   // A one-token name is matched only this way, so "Will" never matches "we will" or "willing".
   for (const t of tokens)
-    if (t.length >= 3 && !COMMON.has(t.toLowerCase())) exact.add(`(?<![\\p{L}\\p{N}])${esc(t[0].toUpperCase())}${tok(t.slice(1))}(?![\\p{L}\\p{N}])`);
+    if (t.length >= 3 && !COMMON.has(t.toLowerCase())) {
+      exact.add(`(?<![\\p{L}\\p{N}])${esc(t[0].toUpperCase())}${tok(t.slice(1))}(?![\\p{L}\\p{N}])`);
+      // In capitals too ("GRANT"), which the capitalised form does not match.
+      exact.add(`(?<![\\p{L}\\p{N}])${tok(t.toUpperCase())}(?![\\p{L}\\p{N}])`);
+    }
   // At egress every token matched alone is also read word-bounded with any separators, down to
   // the three letters the capitalised match accepts, whether the name was declared as one token
   // or several: "Z o e" and "M a r i s o l" (from "Marisol Quintero-Vance") are caught, "zoes"
@@ -506,11 +519,15 @@ const SUBJECT_SETS: RedactSet[] = ["pii"];
 /** Spans for every subject identifier in one text field (local offsets, original text). */
 export function subjectSpans(text: string, compiled: CompiledSubjects): Span[] {
   const out: Span[] = [];
+  // JSON text (a tool result's content, say) writes a newline as \n, and that n glues to the
+  // name after it and defeats the word boundary. Escapes are read as separators of the same
+  // length, so every offset still points into the original text.
+  const probe = text.includes("\\") ? text.replace(/\\[nrtbf"\\/]/g, "  ") : text;
   for (const m of compiled.matchers)
     for (const re of m.res) {
       // matchAll starts at the regex's lastIndex, which the egress check's test() moves: reset it.
       re.lastIndex = 0;
-      for (const hit of text.matchAll(re)) {
+      for (const hit of probe.matchAll(re)) {
         const start = hit.index ?? 0;
         const end = start + hit[0].length;
         if (end > start) out.push({ start, end, type: m.type, value: text.slice(start, end), sets: SUBJECT_SETS });
