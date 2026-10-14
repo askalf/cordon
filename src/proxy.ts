@@ -90,7 +90,7 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
     }
     if (!egress) {
       try {
-        const hits = egressViolations(deidBody, subjects);
+        const hits = egressViolations(deidBody, subjects, { minted: vault.minted, raw: r.raw });
         egress = hits.length ? "egress" : "verified";
         if (hits.length) egressDetail = `identifiers still present after redaction: ${hits.join(", ")}`;
       } catch (e) {

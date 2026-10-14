@@ -204,20 +204,6 @@ const ENUM_VALUES = new Set(
     .split(" "),
 );
 
-// The type word of a placeholder cordon itself mints, and only that: a subject kind or a
-// catalog type, inside the vault's exact shape (an 8-hex keyed token, a 6-hex nonce and a
-// counter, or the bare [TYPE] of strip mode). It is dropped before the egress read so
-// "<SUBJECT1_NAME_1A2B3C_1>" does not match a subject named "Name"; the suffix stays and is
-// read, and any other bracketed text is read as written.
-const MINTED_TYPES =
-  "SUBJECT\\d+_(?:NAME|EMAIL|PHONE|ADDRESS|DOB|ID|HANDLE|OTHER)|EMAIL|PHONE|SSN|CREDIT_CARD|IBAN|DATE|MAC|MRN|" +
-  "STREET_ADDRESS|US_ROUTING|JWT|BEARER_TOKEN|PRIVATE_KEY|AWS_ACCESS_KEY|ANTHROPIC_KEY|OPENAI_KEY|GITHUB_TOKEN|" +
-  "GITHUB_FINEGRAINED_PAT|GOOGLE_API_KEY|GOOGLE_OAUTH_REFRESH|NPM_TOKEN|SENDGRID_KEY|SLACK_TOKEN|SLACK_WEBHOOK|STRIPE_KEY";
-const MINTED_TYPE_WORD = new RegExp(
-  `(?<=<)(?:${MINTED_TYPES})(?=_(?:[0-9A-F]{6}_\\d{1,6}|[0-9A-F]{8})>)|(?<=\\[)(?:${MINTED_TYPES})(?=\\])`,
-  "g",
-);
-
 const STREET_SUFFIX: Record<string, string[]> = {
   street: ["street", "st"], avenue: ["avenue", "ave", "av"], road: ["road", "rd"], drive: ["drive", "dr"],
   lane: ["lane", "ln"], court: ["court", "ct"], boulevard: ["boulevard", "blvd"], circle: ["circle", "cir"],
@@ -651,19 +637,40 @@ function leaves(node: any, out: string[], parts: Set<object>, maxDigits: number,
   }
 }
 
+/** What this request's redaction minted (placeholder to entity type) and the body the
+ *  caller sent, so the egress read can tell a minted placeholder from the caller's own text. */
+export interface Redaction {
+  minted: ReadonlyMap<string, string>;
+  raw: unknown;
+}
+
+/** The placeholders whose type word the egress read drops, so "<SUBJECT1_NAME_1A2B3C_1>"
+ *  does not match a subject named "Name": only those this request's redaction minted and the
+ *  caller's body never held anywhere. Any other placeholder-shaped text, including a minted
+ *  token the caller also wrote, is read as written. */
+function ownPlaceholders(redaction: Redaction | undefined, compiled: CompiledSubjects): Array<[string, string]> {
+  if (!redaction || !redaction.minted.size) return [];
+  const sent: string[] = [];
+  leaves(redaction.raw, sent, mediaPartsOf(redaction.raw), compiled.numberDigits);
+  const callerText = sent.join("\u0000");
+  return [...redaction.minted].filter(([token]) => !callerText.includes(token));
+}
+
 /**
  * Search the de-identified body for any subject identifier, read more loosely than detection:
  * the matchers again on folded text, every alphanumeric needle with separators ignored, and
  * every digit needle with up to 3 separators between digits. Returns the kinds found (never
  * the values); an empty array means the body may leave.
  */
-export function egressViolations(deidBody: any, compiled: CompiledSubjects): string[] {
+export function egressViolations(deidBody: any, compiled: CompiledSubjects, redaction?: Redaction): string[] {
   const found = new Set<string>();
   const texts: string[] = [];
   leaves(deidBody, texts, mediaPartsOf(deidBody), compiled.numberDigits);
+  const own = ownPlaceholders(redaction, compiled);
   for (const leaf of texts) {
     if (!leaf) continue;
-    const raw = leaf.replace(MINTED_TYPE_WORD, "");
+    let raw = leaf;
+    for (const [token, type] of own) if (raw.includes(token)) raw = raw.split(token).join(token.replace(type, ""));
     const folded = foldText(raw);
     const plain = unaccent(folded);
     const flat = plain.replace(/[^\p{L}\p{N}]+/gu, "");

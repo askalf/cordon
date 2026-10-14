@@ -213,6 +213,13 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   await reset();
   res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", instructions: "high" }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ other: ["high"] }] }) }, "sys-key");
   ok("egress: an enum-word literal in unredacted instructions is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
+  // A declared literal spelled like a placeholder type, inside placeholder-shaped text the
+  // caller wrote in unredacted instructions: read as written, not taken for a minted token.
+  for (const instructions of ["Client code: [EMAIL]", "Client code: <EMAIL_1A2B3C_1>"]) {
+    await reset();
+    res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", instructions }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ other: ["EMAIL"] }] }) }, "sys-key");
+    ok(`egress: a declared literal in caller placeholder text is refused, upstream never called: ${instructions}`, res.status === 422 && (await calls()).total === 0, String(res.status));
+  }
   await reset();
   res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { note: "high" } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ other: ["high"] }] }) });
   ok("egress: an enum-word literal in metadata is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));

@@ -24,6 +24,7 @@ import type { RedactMode } from "../types";
 export class Vault {
   private fwd = new Map<string, string>(); // value → placeholder
   private rev = new Map<string, string>(); // placeholder → value (reversible only)
+  private types = new Map<string, string>(); // placeholder → entity type (every mode)
   /** Per Messages document (by document_index), the caller's text and, ascending and
    *  non-overlapping, where each placeholder sits in the text sent upstream and which span
    *  of the caller's text it replaced: citations into that document are translated back to
@@ -60,8 +61,14 @@ export class Vault {
     }
 
     this.fwd.set(value, token);
+    this.types.set(token, type);
     if (this.mode === "reversible") this.rev.set(token, value);
     return token;
+  }
+
+  /** Every placeholder this vault minted, with its entity type (every mode). */
+  get minted(): ReadonlyMap<string, string> {
+    return this.types;
   }
 
   /** Look up the real value behind a placeholder (reversible mode only). */

@@ -95,8 +95,9 @@ ok("name: a lower-case single token is not a name", !hit("he will mark it").leng
   // body's own keys or the placeholder that replaced it.
   const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k");
   const body = { model: "m", messages: [{ role: "user", content: "Name Bdeqnsk called" }, { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input: { q: "x" } }] }] };
-  const out = applyRedaction(body, "anthropic", new Vault("reversible"), ["pii"], withSubjects(detector, c), true, "messages").deidBody;
-  ok("egress: a name token that is also a field name does not refuse a redacted body", !JSON.stringify(out).includes("Bdeqnsk") && egressViolations(out, c).length === 0, JSON.stringify(out.messages[0].content));
+  const v = new Vault("reversible");
+  const out = applyRedaction(body, "anthropic", v, ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+  ok("egress: a name token that is also a field name does not refuse a redacted body", !JSON.stringify(out).includes("Bdeqnsk") && egressViolations(out, c, { minted: v.minted, raw: body }).length === 0, JSON.stringify(out.messages[0].content));
   ok("egress: a field-word name token spaced out in text is still caught", egressViolations({ messages: [{ role: "user", content: "N a m e" }] }, c).includes("SUBJECT1_NAME"));
 }
 {
@@ -115,12 +116,34 @@ ok("name: a lower-case single token is not a name", !hit("he will mark it").leng
   ok("egress: an enum value is skipped only when it is the whole value", egressViolations({ messages: [{ role: "user", content: "card" }] }, c).includes("SUBJECT1_NAME"));
 }
 {
-  // Only the type word of a placeholder cordon mints is dropped; a look-alike is read as written.
+  // Only the type word of a placeholder this request's redaction minted is dropped; a look-alike is read as written.
   const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Marisol Okafor"] }] })), "k");
   const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
   ok("egress: a name written as a placeholder type is caught", leak("<MARISOL_1A2B3C_1>").includes("SUBJECT1_NAME") && leak("[MARISOL]").includes("SUBJECT1_NAME"));
   ok("egress: a name inside a minted placeholder's suffix position is caught", leak("<EMAIL_1A2B3C_1>MARISOL").includes("SUBJECT1_NAME"));
-  ok("egress: minted placeholders alone are not a hit", leak("<SUBJECT1_NAME_1A2B3C_1> and <EMAIL_0F0F0F0F> and [SSN]").length === 0);
+  ok("egress: placeholder-shaped text alone is not a hit", leak("<SUBJECT1_NAME_1A2B3C_1> and <EMAIL_0F0F0F0F> and [SSN]").length === 0);
+}
+{
+  // A declared literal spelled like a placeholder type: the caller's own placeholder-shaped
+  // text is read, only the tokens this request's redaction minted are exempt.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ other: ["EMAIL"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a declared literal in caller-written placeholder text is caught", leak("Client code: [EMAIL]").includes("SUBJECT1_OTHER") && leak("Client code: <EMAIL_1A2B3C_1>").includes("SUBJECT1_OTHER") && leak("<EMAIL_0F0F0F0F>").includes("SUBJECT1_OTHER"));
+  for (const [mode, system] of [["reversible", "Client code: [EMAIL]"], ["strip", "Client code: <EMAIL_1A2B3C_1>"]]) {
+    const body = { model: "m", system, messages: [{ role: "user", content: "write to someone@else.com" }] };
+    const v = new Vault(mode);
+    const out = applyRedaction(body, "anthropic", v, ["pii"], withSubjects(detector, c), false, "messages").deidBody;
+    const own = { minted: v.minted, raw: body };
+    ok(`egress (${mode}): a minted catalog placeholder is not a hit`, /EMAIL/.test(out.messages[0].content) && egressViolations({ messages: out.messages }, c, own).length === 0, out.messages[0].content);
+    ok(`egress (${mode}): caller placeholder text beside a minted one is caught`, egressViolations(out, c, own).includes("SUBJECT1_OTHER"));
+  }
+  {
+    // The caller wrote the exact token redaction then minted (strip mode's [EMAIL]): read as written.
+    const body = { model: "m", messages: [{ role: "user", content: "[EMAIL] or someone@else.com" }] };
+    const v = new Vault("strip");
+    const out = applyRedaction(body, "anthropic", v, ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+    ok("egress: a minted token the caller also wrote is not exempt", egressViolations(out, c, { minted: v.minted, raw: body }).includes("SUBJECT1_OTHER"), out.messages[0].content);
+  }
 }
 {
   const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Zoe"] }] })), "k");
@@ -188,8 +211,9 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
 // ---- the egress check ----
 {
   const body = { model: "m", messages: [{ role: "user", content: "Marisol Quintero-Vance, 1428 Elm St, 404-555-0187" }] };
-  const { deidBody } = applyRedaction(body, "anthropic", new Vault("reversible"), ["pii"], det, true, "messages");
-  ok("egress: a redacted body passes", egressViolations(deidBody, comp).length === 0);
+  const v = new Vault("reversible");
+  const { deidBody } = applyRedaction(body, "anthropic", v, ["pii"], det, true, "messages");
+  ok("egress: a redacted body passes", egressViolations(deidBody, comp, { minted: v.minted, raw: body }).length === 0);
   const leak = (s) => egressViolations({ model: "m", messages: [{ role: "user", content: s }] }, comp);
   ok("egress: a spaced-out name is caught", leak("m a r i s o l q u i n t e r o v a n c e").includes("SUBJECT1_NAME"));
   {
@@ -264,9 +288,10 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   }
   {
     const body = { model: "m", messages: [{ role: "user", content: "x" }, { role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: '{"phone":4.045550187e9,"n":3}' } }] }] };
-    const { deidBody } = applyRedaction(body, "openai", new Vault("reversible"), ["pii"], det, true, "chat");
+    const v = new Vault("reversible");
+    const { deidBody } = applyRedaction(body, "openai", v, ["pii"], det, true, "chat");
     const args = deidBody.messages[1].tool_calls[0].function.arguments;
-    ok("numeric: a subject phone sent as a JSON number is redacted whole", /SUBJECT1_PHONE/.test(args) && !/4\.045550187e9/.test(args) && egressViolations(deidBody, comp).length === 0, args);
+    ok("numeric: a subject phone sent as a JSON number is redacted whole", /SUBJECT1_PHONE/.test(args) && !/4\.045550187e9/.test(args) && egressViolations(deidBody, comp, { minted: v.minted, raw: body }).length === 0, args);
   }
   ok("egress: placeholder text is not a hit", leak("<SUBJECT1_NAME_ABC123_1> at <SUBJECT1_ADDRESS_ABC123_1>").length === 0);
   ok("egress: unrelated digits are not a hit", leak("order 4045 shipped 5550 units, 187 left").length === 0);

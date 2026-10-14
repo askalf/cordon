@@ -85,17 +85,18 @@ const place = (texts) => ({
 
 const redactWith = (p, body) => {
   const comp = compileSubjects(parseSubjectHeader(Buffer.from(JSON.stringify(specOf(p))).toString("base64url")), "fuzz-key");
-  const { deidBody } = applyRedaction(body, "anthropic", new Vault("reversible"), ["pii", "pci", "secrets"], withSubjects(detector, comp), true, "messages");
-  return { comp, deidBody };
+  const v = new Vault("reversible");
+  const { deidBody } = applyRedaction(body, "anthropic", v, ["pii", "pci", "secrets"], withSubjects(detector, comp), true, "messages");
+  return { comp, deidBody, own: { minted: v.minted, raw: body } };
 };
 
 prop("no identifier survives redaction, in any form or field, and egress agrees", fc.property(
   person.chain((p) => fc.tuple(fc.constant(p), fc.array(fc.tuple(filler, renderings(p), filler).map(([a, r, b]) => a + pad(r) + b), { minLength: 1, maxLength: 9 }))),
   ([p, texts]) => {
-    const { comp, deidBody } = redactWith(p, place(texts));
+    const { comp, deidBody, own } = redactWith(p, place(texts));
     const out = flat(JSON.stringify(deidBody));
     const left = needles(p).filter((n) => out.includes(n));
-    const eg = egressViolations(deidBody, comp);
+    const eg = egressViolations(deidBody, comp, own);
     if (left.length || eg.length) throw new Error(`left=${left} egress=${eg} texts=${JSON.stringify(texts)} out=${JSON.stringify(deidBody).slice(0, 800)}`);
     return true;
   },
@@ -114,9 +115,9 @@ prop("an identifier slipped back in after redaction is caught, however it is dis
   person, fc.integer({ min: 0, max: 5 }), fc.constantFrom(" ", "-", ".", " / ", "_", ""), fc.integer({ min: 0, max: 3 }), filler,
   (p, which, seps, mode, noise) => {
     const raw = [`${cap(p.first)} ${cap(p.last)}`, p.phone, `${p.local}@${p.domain}.com`, `${p.ssn[0]}${p.ssn[1]}${p.ssn[2]}`, `${p.y}${p2(p.m)}${p2(p.d)}`, `${p.num} ${cap(p.street)} ${p.suffix[0]}`][which];
-    const { comp, deidBody } = redactWith(p, place([noise]));
+    const { comp, deidBody, own } = redactWith(p, place([noise]));
     deidBody.messages[0].content += pad(obfuscate(raw, seps, mode));
-    const eg = egressViolations(deidBody, comp);
+    const eg = egressViolations(deidBody, comp, own);
     if (!eg.length) throw new Error(`missed ${JSON.stringify(obfuscate(raw, seps, mode))}`);
     return true;
   },
@@ -124,10 +125,10 @@ prop("an identifier slipped back in after redaction is caught, however it is dis
 
 prop("text without the identifiers is never refused", fc.property(person, fc.array(filler, { minLength: 1, maxLength: 6 }), (p, texts) => {
   const body = place(texts);
-  const { comp, deidBody } = redactWith(p, body);
+  const { comp, deidBody, own } = redactWith(p, body);
   const hay = flat(JSON.stringify(body));
   if (needles(p).some((n) => hay.includes(n))) return true; // the noise happened to spell one
-  const eg = egressViolations(deidBody, comp);
+  const eg = egressViolations(deidBody, comp, own);
   if (eg.length) throw new Error(`false block ${eg} on ${JSON.stringify(texts)}`);
   return true;
 }));
