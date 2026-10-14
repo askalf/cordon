@@ -598,8 +598,13 @@ function leaves(node: any, out: string[], parts: Set<object>, maxDigits: number,
   if (typeof node === "string") {
     out.push(node);
     // Tool arguments arrive as JSON text: a number written 4.045550187e9 or 4045550187.0 is
-    // read again at its exact decimal value, the spelling the identifiers are matched in.
-    for (const lit of numberLiterals(node)) {
+    // read again at its exact decimal value, the spelling the identifiers are matched in. The
+    // literals are also taken from the folded text, so full-width or zero-width-split digits
+    // ("１ｅ４０") are expanded the same as their ASCII spelling.
+    const folded = foldText(node);
+    const lits = new Set(numberLiterals(node));
+    if (folded !== node) for (const lit of numberLiterals(folded)) lits.add(lit);
+    for (const lit of lits) {
       const exact = exactDecimal(lit, maxDigits);
       if (exact !== lit) out.push(exact);
     }
