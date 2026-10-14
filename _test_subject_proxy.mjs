@@ -373,6 +373,12 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
     ok(`egress: a spaced spelled-out date of birth is refused, upstream never called: ${dob}`, res.status === 422 && (await calls()).total === 0 && /SUBJECT1_DOB/.test(spelledRefusal.detail ?? ""), `${res.status} ${JSON.stringify(spelledRefusal)}`);
   }
 
+  // A date of birth declared spelled out, spaced out in Responses metadata, which redaction leaves.
+  await reset();
+  res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { note: "J u l y 1 4 1 9 8 6" } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ dates: ["July 14, 1986"] }] }) });
+  const declaredRefusal = await res.json().catch(() => ({}));
+  ok("egress: a spelled-out declared date spaced out in metadata is refused, upstream never called", res.status === 422 && (await calls()).total === 0 && /SUBJECT1_DOB/.test(declaredRefusal.detail ?? ""), `${res.status} ${JSON.stringify(declaredRefusal)}`);
+
   // :8811 has no TENANT_SECRET, so a consistent-pseudonym tenant fails at the secret guard; with
   // failMode open that would forward the raw body, but never for a request that names subjects.
   await fetch("http://localhost:8811/admin/tenant", { method: "POST", headers: { "content-type": "application/json", "x-admin-token": ADMIN }, body: JSON.stringify({ tenant: keyTenant("open-key"), consistentPseudonyms: true, failMode: "open" }) });

@@ -300,14 +300,28 @@ function addressForms(addr: string): { patterns: string[]; folded: string[] } {
   return { patterns, folded: [...new Set([alnum(street), ...spellings.map(alnum)])] };
 }
 
+/** A month written as a word ("July", "Jul.", "Sept"), as its number, or 0. */
+const monthOf = (w: string) => {
+  const x = w.toLowerCase().replace(/\.$/, "");
+  return MONTHS.findIndex((mo) => x === mo || x === mo.slice(0, 3) || (mo === "september" && x === "sept")) + 1;
+};
+
 function dateForms(date: string): { patterns: string[]; digits: string[]; egress: string[] } {
+  // A date in a form not parsed below is matched as written, and read at egress word-bounded
+  // with any separators between its letters and digits, like any other literal.
+  const literal = () => ({ patterns: [loose(date)], digits: [], egress: egressSpread(date, 1) });
   let y: number, m: number, d: number;
   const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(date);
   const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(date);
+  // Spelled-out months: "July 14, 1986", "Jul 14th 1986", "14 July 1986", "14th of July, 1986".
+  const mdy = /^(\p{L}+\.?)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$/iu.exec(date);
+  const dmy = /^(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(\p{L}+\.?),?\s+(\d{4})$/iu.exec(date);
   if (iso) [y, m, d] = [Number(iso[1]), Number(iso[2]), Number(iso[3])];
   else if (us) [y, m, d] = [Number(us[3]), Number(us[1]), Number(us[2])];
-  else return { patterns: [loose(date)], digits: [], egress: [] };
-  if (m < 1 || m > 12 || d < 1 || d > 31) return { patterns: [loose(date)], digits: [], egress: [] };
+  else if (mdy && monthOf(mdy[1])) [y, m, d] = [Number(mdy[3]), monthOf(mdy[1]), Number(mdy[2])];
+  else if (dmy && monthOf(dmy[2])) [y, m, d] = [Number(dmy[3]), monthOf(dmy[2]), Number(dmy[1])];
+  else return literal();
+  if (m < 1 || m > 12 || d < 1 || d > 31) return literal();
   const mm = String(m).padStart(2, "0");
   const dd = String(d).padStart(2, "0");
   const yy = String(y).slice(2);
