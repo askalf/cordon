@@ -244,7 +244,7 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { detail: "high" } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ other: ["high"] }] }) });
   ok("egress: an enum-word literal under an enum-named metadata key is refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
   await reset();
-  res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { name: "x" } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ names: ["Name Bdeqnsk"] }] }) });
+  res = await post("/v1/responses", { model: "gpt-4o-mini", input: "hello", metadata: { name: "x" } }, { "x-cordon-subject": enc({ ref: "case-int-1", subjects: [{ other: ["name"] }] }) });
   ok("egress: a caller metadata key named like a protocol key is read and refused, upstream never called", res.status === 422 && (await calls()).total === 0, String(res.status));
   // A stored prompt's variables carry input parts: an image there is media like any other.
   const promptImage = { model: "gpt-4o-mini", input: "describe it", prompt: { id: "pmpt_1", variables: { photo: { type: "input_image", image_url: "https://example.com/p.jpg" } } } };

@@ -91,6 +91,22 @@ ok("name: a lower-case single token is not a name", !hit("he will mark it").leng
   ok("egress: a short single-token name inside a longer word is not a hit", egressViolations({ messages: [{ role: "user", content: "zoras, azora and zorathustra" }] }, c).length === 0);
 }
 {
+  // A name made of ordinary words: the words in lowercase are ordinary text, not the name.
+  const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Test User"], emails: ["test@example.com"] }] })), "k");
+  const leak = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, c);
+  ok("egress: a lowercase ordinary word that is also a name token is not a hit", leak("this is a test of the form, as a new user").length === 0);
+  ok("egress: the token capitalised, in capitals or spread out is still a hit", leak("ask Test about it").includes("SUBJECT1_NAME") && leak("TEST wrote in").includes("SUBJECT1_NAME") && leak("t e s t").includes("SUBJECT1_NAME") && leak("u.s.e.r").includes("SUBJECT1_NAME"));
+  const g = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Grant"] }] })), "k");
+  const gl = (s) => egressViolations({ messages: [{ role: "user", content: s }] }, g);
+  ok("egress: a one-token name is not found in ordinary lowercase words", gl("please grant access; the fragrant grants were vagrant").length === 0);
+  ok("egress: a one-token name capitalised or spread out is a hit", gl("Grant called").includes("SUBJECT1_NAME") && gl("g r a n t").includes("SUBJECT1_NAME"));
+  // The Unscathed Desk's context turn for a visitor who called themself "Test User".
+  const body = { model: "m", messages: [{ role: "user", content: "woken for T1" }, { role: "assistant", content: [{ type: "tool_use", id: "a", name: "unscathed_reply", input: { action: "context" } }] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "a", content: JSON.stringify({ message: "Name they gave: Test User\n\nName:           Test User\nEmail:          test@example.com\n\nMessage:\nHi, this is a test of the contact form." }, null, 2) }] }] };
+  const vault = new Vault("reversible");
+  const out = applyRedaction(body, "anthropic", vault, ["pii"], withSubjects(detector, c), true, "messages").deidBody;
+  ok("egress: the desk's context turn for a test visitor is verified once redacted", egressViolations(out, c, { minted: vault.minted, raw: body }).length === 0 && !JSON.stringify(out).includes("test@example.com"));
+}
+{
   // A name token that is also a field name: redacted in text, never matched against the
   // body's own keys or the placeholder that replaced it.
   const c = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k");
@@ -106,14 +122,15 @@ ok("name: a lower-case single token is not a name", !hit("he will mark it").leng
   ok("egress: a spaced-out surname that is also a field word is caught", leak("C a r d").includes("SUBJECT1_NAME") && leak("c-a-r-d").includes("SUBJECT1_NAME"));
   ok("egress: a protocol key spelled like a name token is not a hit", egressViolations({ messages: [{ role: "user", content: [{ type: "text", text: "x", name: "y" }] }] }, compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k")).length === 0);
   {
-    const n = compileSubjects(parseSubjectHeader(enc({ subjects: [{ names: ["Name Bdeqnsk"] }] })), "k");
+    // A declared literal spelled like a protocol key: a caller key of that name must be read.
+    const n = compileSubjects(parseSubjectHeader(enc({ subjects: [{ other: ["name"] }] })), "k");
     const call = (input) => ({ messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input }] }] });
-    ok("egress: a tool call's own input key named like a protocol key is read", egressViolations(call({ name: "x" }), n).includes("SUBJECT1_NAME"));
-    ok("egress: decoded tool arguments are caller data", egressViolations({ messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: '{"name":"x"}' } }] }] }, n).includes("SUBJECT1_NAME"));
+    ok("egress: a tool call's own input key named like a protocol key is read", egressViolations(call({ name: "x" }), n).includes("SUBJECT1_OTHER"));
+    ok("egress: decoded tool arguments are caller data", egressViolations({ messages: [{ role: "assistant", tool_calls: [{ type: "function", function: { name: "f", arguments: '{"name":"x"}' } }] }] }, n).includes("SUBJECT1_OTHER"));
     ok("egress: the tool call's protocol keys are not a hit", egressViolations(call({ q: "x" }), n).length === 0);
   }
   ok("egress: a key that is not a protocol key is read",egressViolations({ messages: [{ role: "user", content: "x", card: 1 }], metadata: { "c a r d": 1 } }, c).includes("SUBJECT1_NAME"));
-  ok("egress: an enum value is skipped only when it is the whole value", egressViolations({ messages: [{ role: "user", content: "card" }] }, c).includes("SUBJECT1_NAME"));
+  ok("egress: an enum value is skipped only when it is the whole value", egressViolations({ messages: [{ role: "user", content: "Card" }] }, c).includes("SUBJECT1_NAME"));
 }
 {
   // Only the type word of a placeholder this request's redaction minted is dropped; a look-alike is read as written.
