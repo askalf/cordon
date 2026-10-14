@@ -74,6 +74,7 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   // ---- known subjects: media, then the egress check on what would actually leave ----
   let egress: string | undefined;
   let egressDetail = "";
+  const egressWhere = new Map<string, string>();
   const media = subjects ? countMedia(r.raw) : undefined;
   if (subjects) {
     const mediaMode = strictestMedia(pol.subjectMedia, subjects.media);
@@ -90,7 +91,7 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
     }
     if (!egress) {
       try {
-        const hits = egressViolations(deidBody, subjects, { minted: vault.minted, raw: r.raw });
+        const hits = egressViolations(deidBody, subjects, { minted: vault.minted, raw: r.raw }, egressWhere);
         egress = hits.length ? "egress" : "verified";
         if (hits.length) egressDetail = `identifiers still present after redaction: ${hits.join(", ")}`;
       } catch (e) {
@@ -113,6 +114,9 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
       total: spans.length,
       ...(subjects ? { subject: subjects.refDigest ?? "", egress, media } : {}),
       ...(reportOnly ? { report: true } : {}),
+      // Where each kind the egress read found sits (protocol keys and indexes, never text),
+      // so a would-refuse in report-only numbers can be traced to its place in the body.
+      ...(egressWhere.size ? { egressAt: Object.fromEntries(egressWhere) } : {}),
     });
     receipt = rec.hash;
   } catch (e) {
@@ -125,7 +129,7 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
   // Report only: the verdict is recorded and returned as headers; the request goes out as
   // the caller sent it (this tenant is being measured, not protected).
   if (reportOnly) {
-    res.setHeader("X-Cordon-Report", `redact=${spans.length}${egress ? `; egress=${egress}` : ""}`);
+    res.setHeader("X-Cordon-Report", `redact=${spans.length}${egress ? `; egress=${egress}` : ""}${egressWhere.size ? `; kinds=${[...egressWhere.keys()].join(",")}` : ""}`);
     metrics.bypass("report-only");
     try {
       const up = await forwardUpstream(r);

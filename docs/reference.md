@@ -83,7 +83,7 @@ curl localhost:8080/admin/tenant -H 'x-admin-token: …' -H 'content-type: appli
 
 - `requireSubject`: refuse any generation request without the header (400).
 - `subjectMedia`: `"block"` (default), `"mask"` or `"allow"`; the stricter of this and the header's `media` applies. In `mask` mode each image (PNG, JPEG, WebP, GIF; up to 10 per request and 30 megapixels each, 30 seconds per read) is read, masked, re-read and sent as PNG; mask counts are added to the record as `IMAGE_<TYPE>`.
-- `reportOnly`: forward unchanged and record the verdict (`X-Cordon-Report: redact=<n>; egress=<verdict>`, audit `report: true`).
+- `reportOnly`: forward unchanged and record the verdict (`X-Cordon-Report: redact=<n>; egress=<verdict>[; kinds=<SUBJECTn_KIND,...>]`, audit `report: true`). On any egress hit the audit record also carries `egressAt`: per kind, the first place it was found and the reading that caught it (`pattern`, `folded` or `digits`), as a path of protocol keys and array indexes in which a caller-defined key is `*`.
 
 All three take part in the X-Tenant strictness rule: a looser setting cannot be selected by header.
 

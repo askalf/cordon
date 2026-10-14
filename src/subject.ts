@@ -651,20 +651,25 @@ function pushText(text: string, out: string[], maxDigits: number): void {
 /** Every string leaf and object key, with media payloads skipped (they are counted, not read).
  *  `inMedia` is true below a recognised media part, the only place a payload is skipped.
  *  `caller` is true below caller-defined data (a caller container, a key the protocol does not
- *  define, decoded JSON text), where protocol keys and enum values are read like any other. */
-function leaves(node: any, out: string[], parts: Set<object>, maxDigits: number, depth = 0, inMedia = false, caller = false): void {
+ *  define, decoded JSON text), where protocol keys and enum values are read like any other.
+ *  When `paths` is given, it gets one entry per entry pushed to `out`: where that text sits,
+ *  spelled with the protocol's own keys and array indexes only. A caller-defined key is
+ *  written `*`, so a path never carries the caller's text. */
+function leaves(node: any, out: string[], parts: Set<object>, maxDigits: number, depth = 0, inMedia = false, caller = false, paths?: string[], at = "$"): void {
   if (depth > 64) throw new Error("body nested deeper than 64 levels; refusing to forward unread fields");
+  const mark = (where: string) => { if (paths) while (paths.length < out.length) paths.push(where); };
   if (typeof node === "string") {
     // Tool arguments arrive as JSON text: a number written 4.045550187e9 or 4045550187.0 is
     // read again at its exact decimal value.
     pushText(node, out, maxDigits);
+    mark(at);
     // A JSON-string field (tool-call arguments) is decoded by the provider: its keys and
     // values are read again as decoded, so \u0057-style escapes cannot hide the letters.
     const lead = node.trimStart()[0];
     if (lead === "{" || lead === "[") {
       let decoded: unknown;
       try { decoded = JSON.parse(node); } catch { decoded = undefined; }
-      if (decoded && typeof decoded === "object") leaves(decoded, out, parts, maxDigits, depth + 1, false, true);
+      if (decoded && typeof decoded === "object") leaves(decoded, out, parts, maxDigits, depth + 1, false, true, paths, `${at}<json>`);
     }
     return;
   }
@@ -674,21 +679,23 @@ function leaves(node: any, out: string[], parts: Set<object>, maxDigits: number,
     out.push(written);
     const exact = exactDecimal(written, maxDigits);
     if (exact !== written) out.push(exact);
+    mark(at);
     return;
   }
   if (!node || typeof node !== "object") return;
   const media = inMedia || parts.has(node);
   if (Array.isArray(node)) {
-    for (const v of node) leaves(v, out, parts, maxDigits, depth + 1, media, caller);
+    node.forEach((v, i) => leaves(v, out, parts, maxDigits, depth + 1, media, caller, paths, `${at}[${i}]`));
     return;
   }
   for (const [k, v] of Object.entries(node)) {
     const protocol = !caller && PROTOCOL_KEYS.has(k);
-    if (!protocol) pushText(k, out, maxDigits);
+    const here = `${at}.${protocol ? k : "*"}`;
+    if (!protocol) { pushText(k, out, maxDigits); mark(`${here}<key>`); }
     if (protocol && ENUM_FIELDS.has(k) && typeof v === "string" && ENUM_VALUES.has(v)) continue; // "type": "text"
     if (media && typeof v === "string" && isPayload(k, v)) continue; // base64 or a data: URL
     const below = !protocol || CALLER_CONTAINERS.has(k) || (k === "input" && isToolCall(node));
-    leaves(v, out, parts, maxDigits, depth + 1, media, below);
+    leaves(v, out, parts, maxDigits, depth + 1, media, below, paths, here);
   }
 }
 
@@ -715,14 +722,21 @@ function ownPlaceholders(redaction: Redaction | undefined, compiled: CompiledSub
  * Search the de-identified body for any subject identifier, read more loosely than detection:
  * the matchers again on folded text, every alphanumeric needle with separators ignored, and
  * every digit needle with up to 3 separators between digits. Returns the kinds found (never
- * the values); an empty array means the body may leave.
+ * the values); an empty array means the body may leave. With `where`, each kind found also
+ * gets where it was first seen and which reading caught it ("pattern", "folded" or "digits"),
+ * e.g. `$.messages[2].content[0].content (folded)`: protocol keys and indexes, never text.
  */
-export function egressViolations(deidBody: any, compiled: CompiledSubjects, redaction?: Redaction): string[] {
+export function egressViolations(deidBody: any, compiled: CompiledSubjects, redaction?: Redaction, where?: Map<string, string>): string[] {
   const found = new Set<string>();
   const texts: string[] = [];
-  leaves(deidBody, texts, mediaPartsOf(deidBody), compiled.numberDigits);
+  const paths: string[] | undefined = where ? [] : undefined;
+  leaves(deidBody, texts, mediaPartsOf(deidBody), compiled.numberDigits, 0, false, false, paths);
   const own = ownPlaceholders(redaction, compiled);
-  for (const leaf of texts) {
+  const hit = (type: string, i: number, by: string) => {
+    found.add(type);
+    if (where && paths && !where.has(type)) where.set(type, `${paths[i] ?? "$"} (${by})`);
+  };
+  for (const [i, leaf] of texts.entries()) {
     if (!leaf) continue;
     let raw = leaf;
     for (const [token, type] of own) if (raw.includes(token)) raw = raw.split(token).join(token.replace(type, ""));
@@ -731,15 +745,15 @@ export function egressViolations(deidBody: any, compiled: CompiledSubjects, reda
     const flat = plain.replace(/[^\p{L}\p{N}]+/gu, "");
     for (const m of compiled.matchers) {
       if (found.has(m.type)) continue;
-      if (m.res.some((re) => [raw, folded, plain].some((t) => { re.lastIndex = 0; const hit = re.test(t); re.lastIndex = 0; return hit; }))) {
-        found.add(m.type);
+      if (m.res.some((re) => [raw, folded, plain].some((t) => { re.lastIndex = 0; const ok = re.test(t); re.lastIndex = 0; return ok; }))) {
+        hit(m.type, i, "pattern");
         continue;
       }
       if (m.folded.some((needle) => needle && flat.includes(needle))) {
-        found.add(m.type);
+        hit(m.type, i, "folded");
         continue;
       }
-      if (m.digitRes.some((re) => re.test(folded) || re.test(plain))) found.add(m.type);
+      if (m.digitRes.some((re) => re.test(folded) || re.test(plain))) hit(m.type, i, "digits");
     }
   }
   return [...found];

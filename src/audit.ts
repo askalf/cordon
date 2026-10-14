@@ -21,6 +21,7 @@ export interface AuditInput {
   egress?: string;
   media?: number;
   report?: boolean;
+  egressAt?: Record<string, string>;
 }
 
 /** The exact payload that gets hashed (record minus its own hash). */
@@ -40,6 +41,7 @@ const hashable = (r: Omit<AuditRecord, "hash">) =>
     ...(r.egress !== undefined ? { egress: r.egress } : {}),
     ...(r.media !== undefined ? { media: r.media } : {}),
     ...(r.report !== undefined ? { report: r.report } : {}),
+    ...(r.egressAt !== undefined ? { egressAt: r.egressAt } : {}),
     prevHash: r.prevHash,
   });
 
@@ -81,6 +83,7 @@ class AuditLog {
         ...(input.egress !== undefined ? { egress: input.egress } : {}),
         ...(input.media !== undefined ? { media: input.media } : {}),
         ...(input.report !== undefined ? { report: input.report } : {}),
+        ...(input.egressAt !== undefined ? { egressAt: input.egressAt } : {}),
         prevHash: this.prevHash as string,
       };
       const record: AuditRecord = { ...base, hash: linkHash(base) };

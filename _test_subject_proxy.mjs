@@ -453,6 +453,17 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   ok("report only: 200", res.status === 200, String(res.status));
   ok("report only: the request went out unchanged", up.includes("Marisol Quintero-Vance"));
   ok("report only: the verdict is in X-Cordon-Report", /redact=\d+; egress=verified/.test(res.headers.get("x-cordon-report") ?? ""), res.headers.get("x-cordon-report"));
+  // A would-refuse in report-only names the kind and where it sits, never the value.
+  await setTenant({ tenant: keyTenant("report-sys-key"), reportOnly: true, redactSystem: false });
+  await reset();
+  res = await post("/v1/messages", aBody("hello", { system: "You are helping Marisol Quintero-Vance.", metadata: { "Marisol Quintero-Vance": "x" } }), { "x-cordon-subject": SUBJECT() }, "report-sys-key");
+  ok("report only: a would-refuse names its kinds in X-Cordon-Report", /egress=egress; kinds=SUBJECT1_NAME/.test(res.headers.get("x-cordon-report") ?? ""), res.headers.get("x-cordon-report"));
+  {
+    const last = readFileSync("./_audit_test.jsonl", "utf8").trim().split("\n").map((l) => JSON.parse(l)).at(-1);
+    const at = last.egressAt?.SUBJECT1_NAME ?? "";
+    ok("audit: a would-refuse records where it sits and which reading caught it", /^\$\.system \((pattern|folded|digits)\)$/.test(at) || /^\$\.metadata\.\*<key> \(/.test(at), at);
+    ok("audit: the location never holds the caller's text", !JSON.stringify(last.egressAt).includes("Marisol") && !JSON.stringify(last.egressAt).includes("Quintero"));
+  }
 
   // ---- receipts and the audit log ----
   res = await fetch(BASE + "/admin/receipts?ref=case-int-1", { headers: { "x-admin-token": ADMIN } });

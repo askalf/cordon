@@ -292,6 +292,14 @@ ok("handle: with and without @", clean("IG @mari.q.vance and mari.q.vance", "mar
   ok("egress: a phone with odd separators is caught", leak("4 0 4 / 5 5 5 / 0 1 8 7").includes("SUBJECT1_PHONE"));
   ok("egress: full-width digits are caught", leak("４０４５５５０１８７").includes("SUBJECT1_PHONE"));
   ok("egress: zero-width characters do not hide a name", leak("Mari​sol Quin‌tero-Vance").includes("SUBJECT1_NAME"));
+  {
+    const where = new Map();
+    egressViolations({ messages: [{ role: "user", content: "x" }], metadata: { "Marisol Quintero-Vance": 1 } }, comp, undefined, where);
+    ok("egress where: a caller key is located as * and never written out", where.get("SUBJECT1_NAME") === "$.metadata.*<key> (pattern)", where.get("SUBJECT1_NAME"));
+    const w2 = new Map();
+    egressViolations({ messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t", name: "f", input: { q: "x" } }] }, { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: JSON.stringify({ note: "for Marisol Quintero-Vance" }) }] }] }, comp, undefined, w2);
+    ok("egress where: a tool result is located at its content field", w2.get("SUBJECT1_NAME") === "$.messages[1].content[0].content (pattern)", w2.get("SUBJECT1_NAME"));
+  }
   ok("egress: an object key is read too", egressViolations({ messages: [{ role: "user", content: [{ type: "text", text: "x", "Marisol Quintero-Vance": 1 }] }] }, comp).includes("SUBJECT1_NAME"));
   ok("egress: any run of separators between digits is caught", leak("4    0    4    5    5    5    0    1    8    7").includes("SUBJECT1_PHONE") && leak("4\n\n\n\n\n0 4 - - - - 555 . . . 0187").includes("SUBJECT1_PHONE"));
   ok("egress: digits split by a word are not joined", leak("room 404 and then 5550187 later").length === 0);
