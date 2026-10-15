@@ -63,6 +63,6 @@ body:
     id: version
     attributes:
       label: cordon version
-      placeholder: '0.3.0'
+      placeholder: '0.4.0'
     validations:
       required: false
