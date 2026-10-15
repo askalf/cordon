@@ -1,8 +1,10 @@
 // Request shapes: the structure of a request with none of its text, so real traffic can be
 // replayed with invented people (src/tools/replay-shapes.ts). A shape keeps the provider's own
-// keys, array lengths, string lengths and line counts, the API's enum values and the names of
-// tools; its markers start with `$`, which no provider key does. It never keeps text, a caller-defined key (written `*0`, `*1`, ...) or anything under
-// one, a participant name, or a number's value.
+// keys, array lengths, string size classes and line counts, and the API's listed enum values; a
+// tool's name becomes a stable digest. Markers start with a dollar sign, which no provider key
+// does. It never keeps text, a value a caller chose (an unlisted enum value, a tool name), a
+// caller-defined key (written `*0`, `*1`, ...) or anything under one, a participant name, or a
+// number's value.
 import { appendFile, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { PROTOCOL_KEYS, ENUM_FIELDS, ENUM_VALUES, CALLER_CONTAINERS, isToolCall } from "./subject";
@@ -11,7 +13,16 @@ import { canonicalJSON } from "./util";
 /** A string's size class: exact up to 16, then the next power of two (capped at 2^20). */
 export const sizeClass = (n: number) => (n <= 16 ? n : 2 ** Math.min(20, Math.ceil(Math.log2(n))));
 const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/;
-const ENUM_TOKEN = /^[a-z][a-z0-9_./+-]{0,39}$/;
+// A tool's name is the caller's choice too: kept as a short digest, so shapes still group by
+// tool and a replay still gives each call the same name, without the name itself.
+const toolDigest = (name: string) => createHash("sha256").update(`tool:${name}`).digest("hex").slice(0, 8);
+// Documented values kept besides ENUM_VALUES: a document's "content" source, block types the egress
+// list does not need, and the media types a request carries. Nothing outside the two lists is kept.
+const SHAPE_ENUMS = new Set([
+  "content", "search_result", "server_tool_use", "web_search_tool_result", "mcp_tool_use", "mcp_tool_result",
+  "container_upload", "persistent", "input_audio", "output_audio", "computer_call", "computer_call_output",
+  "image/svg+xml", "audio/wav", "audio/mpeg", "text/csv", "text/html", "text/markdown",
+]);
 const MAX_ITEMS = 12;
 const MAX_DEPTH = 32;
 
@@ -53,10 +64,10 @@ export function skeleton(node: unknown, depth = 0, caller = false, tool = false)
   for (const [k, v] of Object.entries(node)) {
     const protocol = !caller && PROTOCOL_KEYS.has(k);
     const key = protocol ? k : `*${anon++}`;
-    // An enum field's value is the API's own vocabulary ("content", "image/png"), kept when it is
-    // a short lowercase token; anything else there is treated as text.
-    if (protocol && ENUM_FIELDS.has(k) && typeof v === "string" && (ENUM_VALUES.has(v) || ENUM_TOKEN.test(v))) { out[key] = v; continue; }
-    if (protocol && k === "name" && typeof v === "string" && (tool || isToolCall(node)) && TOOL_NAME.test(v)) { out[key] = { $tool: v }; continue; }
+    // An enum field's value is kept only when it is a listed value of the API's own vocabulary;
+    // any other value there (a caller can write anything) is recorded as text, by size only.
+    if (protocol && ENUM_FIELDS.has(k) && typeof v === "string" && (ENUM_VALUES.has(v) || SHAPE_ENUMS.has(v))) { out[key] = v; continue; }
+    if (protocol && k === "name" && typeof v === "string" && (tool || isToolCall(node)) && TOOL_NAME.test(v)) { out[key] = { $tool: toolDigest(v) }; continue; }
     if (protocol && k === "model" && typeof v === "string") { out[key] = { $model: 1 }; continue; }
     const below = !protocol || CALLER_CONTAINERS.has(k) || (k === "input" && isToolCall(node));
     const toolHere = protocol && (k === "tools" || k === "function" || k === "tool_choice");

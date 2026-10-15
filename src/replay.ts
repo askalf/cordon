@@ -2,7 +2,7 @@
 // twice per person, once with the person's identifiers written into its text and once with only
 // ordinary words (their name's plain words among them, lowercase), and run through redaction and
 // the egress check. The first must leak nothing once redacted; the second must not be refused.
-import { compileSubjects, egressViolations, parseSubjectHeader, withSubjects } from "./subject";
+import { ENUM_FIELDS, compileSubjects, egressViolations, parseSubjectHeader, withSubjects } from "./subject";
 import { detector } from "./detect";
 import { Vault } from "./redact/vault";
 import { applyRedaction } from "./redact/apply";
@@ -96,7 +96,7 @@ export function instantiate(shape: unknown, p: Person, mode: Mode, pick: (n: num
     return out;
   }
   const o = shape as Record<string, unknown>;
-  if ("$tool" in o) return o.$tool;
+  if ("$tool" in o) return `tool_${o.$tool}`;
   if ("$model" in o) return "m";
   if ("$n" in o) return 7;
   if ("$b" in o) return true;
@@ -109,7 +109,9 @@ export function instantiate(shape: unknown, p: Person, mode: Mode, pick: (n: num
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(o)) {
     const caller = k.startsWith("*");
-    const neutral = k === "metadata" || PAYLOAD_KEYS.has(k) || (caller && !data);
+    // An enum field whose value was not kept (recorded as text) gets neutral words: it is the
+    // API's vocabulary slot, not prose.
+    const neutral = k === "metadata" || PAYLOAD_KEYS.has(k) || ENUM_FIELDS.has(k) || (caller && !data);
     const below = data || (k === "input" && toolCall);
     out[caller ? `field${k.slice(1)}` : k] = instantiate(v, p, neutral ? "neutral" : mode, pick, below);
   }

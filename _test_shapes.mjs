@@ -53,12 +53,18 @@ for (const [label, body] of [["messages", agentBody], ["chat", chatBody], ["resp
 }
 {
   const s = skeleton(agentBody);
-  ok("shape: tool names, enum values and protocol keys are kept", s.tools[0].name.$tool === "lookup_request" && s.messages[1].content[0].type === "tool_use" && s.messages[1].content[0].name.$tool === "lookup_request" && s.model.$model === 1);
+  ok("shape: listed enum values and protocol keys are kept; a tool name is a stable digest", /^[0-9a-f]{8}$/.test(s.tools[0].name.$tool) && s.tools[0].name.$tool === s.messages[1].content[0].name.$tool && s.messages[1].content[0].type === "tool_use" && s.model.$model === 1 && !JSON.stringify(s).includes("lookup_request"));
+  {
+    const odd = skeleton({ messages: [{ role: "user", content: [{ type: "marisolquinterovance", text: "x" }, { type: "image", source: { type: "base64", media_type: "image/marisol", data: "AAAA" } }] }], tools: [{ name: "marisol_lookup" }] });
+    const t = JSON.stringify(odd);
+    ok("shape: a caller-chosen value in an enum field or a tool name is never kept", !/marisol|quintero|vance/i.test(t), t.slice(0, 200));
+    ok("shape: an unlisted enum value is recorded by size", typeof odd.messages[0].content[0].type.$s === "number" && typeof odd.messages[0].content[1].source.media_type.$s === "number");
+  }
   ok("shape: a JSON string's own shape is kept, pretty or not", s.messages[2].content[0].content.$json !== undefined && s.messages[2].content[0].content.$pretty === 1);
   ok("shape: line counts and size classes, not lengths", s.messages[2].content[0].content.$json["*0"]["*0"].$nl === 4 && [16, 32, 64, 128].includes(s.messages[2].content[0].content.$json["*0"]["*0"].$s));
   const c = skeleton(chatBody);
   ok("shape: a chat participant name is text, not a tool name", c.messages[0].name.$tool === undefined && typeof c.messages[0].name.$s === "number");
-  ok("shape: a chat function name is kept", c.messages[1].tool_calls[0].function.name.$tool === "search");
+  ok("shape: a chat function name is a digest", /^[0-9a-f]{8}$/.test(c.messages[1].tool_calls[0].function.name.$tool));
   ok("shape: long arrays are cut with a count", JSON.stringify(skeleton({ messages: Array.from({ length: 30 }, () => ({ role: "user", content: "x" })) })).includes('"$more":18'));
 }
 
@@ -90,7 +96,7 @@ for (const [label, body] of [["messages", agentBody], ["chat", chatBody], ["resp
     return { ts: 0, h: shapeDigest(provider, dialect, shape), provider, dialect, shape };
   });
   const filled = instantiate(records[0].shape, REPLAY_PEOPLE[0], "identifiers", () => 0);
-  ok("replay: a filled shape has the original structure", filled.messages[1].content[0].name === "lookup_request" && typeof filled.messages[2].content[0].content === "string" && JSON.parse(filled.messages[2].content[0].content).field0 !== undefined);
+  ok("replay: a filled shape has the original structure", /^tool_[0-9a-f]{8}$/.test(filled.messages[1].content[0].name) && filled.messages[1].content[0].name === filled.tools[0].name && typeof filled.messages[2].content[0].content === "string" && JSON.parse(filled.messages[2].content[0].content).field0 !== undefined);
   const { runs, failures } = replayShapes(records);
   ok(`replay: real shapes with invented people neither leak nor refuse (${runs} runs)`, failures.length === 0, failures.slice(0, 4).map((f) => `${f.check} ${f.dialect} p${f.person} ${f.where}`).join(" ;; "));
 }
