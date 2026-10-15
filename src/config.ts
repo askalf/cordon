@@ -52,6 +52,12 @@ export const config = {
 
   auditLog: env.AUDIT_LOG || "./audit.jsonl",
 
+  // Optional: record the SHAPE of each request that names its subjects (keys, lengths, line
+  // counts, enum values and tool names; never text) to this file, deduplicated, so real traffic
+  // can be replayed with invented people (`npm run replay:shapes`). Empty (default) = off.
+  shapeLog: env.SHAPE_LOG || "",
+  shapeLogMax: Math.max(1, Number(env.SHAPE_LOG_MAX) || 2000),
+
   // Optional file-backed persistence for per-tenant policy. Empty (default) = in-memory
   // only, exactly as before — no datastore, still a single self-contained container. When
   // set, policy is loaded at startup and re-written on every admin change so a restart

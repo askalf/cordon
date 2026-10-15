@@ -12,6 +12,9 @@ import { audit } from "./audit";
 import { nowMs } from "./util";
 import { compileSubjects, countMedia, egressViolations, strictestMedia, withSubjects, type CompiledSubjects } from "./subject";
 import { maskMedia } from "./media/mask";
+import { ShapeLog } from "./shapes";
+
+const shapeLog = new ShapeLog(config.shapeLog, config.shapeLogMax);
 import type { CanonicalRequest, HttpRes } from "./types";
 
 /**
@@ -100,6 +103,10 @@ export async function handle(r: CanonicalRequest, res: HttpRes) {
       }
     }
   }
+
+  // The request's shape, for replaying real traffic with invented people: no text, deduplicated,
+  // off unless SHAPE_LOG is set, and never in the request's path (not awaited, never throws).
+  if (subjects) void shapeLog.record(r.provider, r.dialect ?? "", r.raw);
 
   // ---- audit BEFORE forwarding — counts/types only, never values ----
   let receipt: string | undefined;

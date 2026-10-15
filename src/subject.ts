@@ -192,7 +192,7 @@ const COMMON = new Set(
 // The provider APIs' own object keys, exactly as they are spelled. Every body carries them,
 // so at egress a key is read only when it is not one of these: a subject named "Name" would
 // otherwise refuse every request on its "name" key. Values are still read under every key.
-const PROTOCOL_KEYS = new Set(
+export const PROTOCOL_KEYS = new Set(
   ("model messages system role content type text name id input output instructions tools tool_choice " +
     "tool_calls tool_call_id tool_use_id function arguments parameters properties required description " +
     "items enum default format source media_type data url image_url input_image detail file file_id " +
@@ -206,8 +206,8 @@ const PROTOCOL_KEYS = new Set(
 // The APIs' own enum fields and values ("type": "text", "role": "user"). A value is skipped at
 // egress only under one of these fields and only when it is exactly one of these words; the
 // same word in instructions, metadata or any other field is read.
-const ENUM_FIELDS = new Set(["type", "role", "media_type", "detail", "status", "effort", "tool_choice", "stop_reason", "finish_reason", "object"]);
-const ENUM_VALUES = new Set(
+export const ENUM_FIELDS = new Set(["type", "role", "media_type", "detail", "status", "effort", "tool_choice", "stop_reason", "finish_reason", "object"]);
+export const ENUM_VALUES = new Set(
   ("text image document tool_use tool_result thinking redacted_thinking input_text input_image input_file " +
     "output_text refusal function function_call function_call_output message reasoning summary_text user " +
     "assistant system developer tool base64 url file auto low medium high minimal none any required " +
@@ -655,8 +655,8 @@ function numberLiterals(text: string): string[] {
 
 // Protocol fields whose contents the caller defines: metadata, a stored prompt's variables,
 // tool schemas and a tool call's input. Below them every key and value is read.
-const CALLER_CONTAINERS = new Set(["metadata", "variables", "parameters", "properties", "schema", "input_schema", "json_schema", "additionalProperties", "arguments"]);
-const isToolCall = (node: any) => typeof node?.type === "string" && /tool_use$|_call$/.test(node.type);
+export const CALLER_CONTAINERS = new Set(["metadata", "variables", "parameters", "properties", "schema", "input_schema", "json_schema", "additionalProperties", "arguments"]);
+export const isToolCall = (node: any) => typeof node?.type === "string" && /tool_use$|_call$/.test(node.type);
 
 /** A text as written, then each number literal in it (a fraction or an exponent, in the
  *  text or its folded spelling, so "１ｅ４０" counts as "1e40") at its exact decimal value,
