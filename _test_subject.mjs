@@ -29,7 +29,8 @@ const redact = (text) => {
   const { deidBody } = applyRedaction(body, "anthropic", new Vault("reversible"), ["pii", "pci", "secrets"], det, true, "messages");
   return deidBody.messages[0].content;
 };
-const clean = (text, raw) => !redact(text).includes(raw);
+// Placeholders are dropped before looking: their random hex tag can hold the digits looked for.
+const clean = (text, raw) => !redact(text).replace(/<[A-Z][A-Z0-9_]*>/g, "").includes(raw);
 
 // ---- the header ----
 ok("header: a valid list parses; media is left to the policy when unset", spec.subjects.length === 2 && spec.media === undefined && spec.ref === "case-1");

@@ -29,6 +29,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "audit": "tsx src/tools/audit.ts",
+    "replay:shapes": "tsx src/tools/replay-shapes.ts",
     "test": "node _run_tests.mjs",
     "fuzz": "node --import tsx _test_fuzz.js",
     "typecheck": "tsc --noEmit"

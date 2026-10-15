@@ -480,6 +480,13 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
   ok("receipts: admin token required", res.status === 403);
   const log = readFileSync("./_audit_test.jsonl", "utf8");
   ok("audit: no subject value is ever written", leaked(log).length === 0 && !log.includes("case-int-1"), leaked(log).join(","));
+  // SHAPE_LOG is set on this instance: subject requests leave their shape, and never their text.
+  await new Promise((r) => setTimeout(r, 200));
+  let shapes = "";
+  try { shapes = readFileSync("./_shapes_test.jsonl", "utf8"); } catch {}
+  const shapeLines = shapes.trim().split("\n").filter(Boolean);
+  ok("shapes: subject requests are recorded, one line per distinct shape", shapeLines.length >= 3 && new Set(shapeLines.map((l) => JSON.parse(l).h)).size === shapeLines.length, String(shapeLines.length));
+  ok("shapes: no subject value is ever written", leaked(shapes).length === 0 && !shapes.includes("case-int-1"), leaked(shapes).join(","));
   res = await fetch(BASE + "/admin/audit/verify", { headers: { "x-admin-token": ADMIN } });
   ok("audit: the chain still verifies with the new fields", (await res.json()).ok === true);
 

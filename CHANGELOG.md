@@ -13,6 +13,14 @@ image and creates the GitHub release from this file.
 
 ## [Unreleased]
 
+### Added
+
+- Request shapes (`SHAPE_LOG`): the shape of each request that names its subjects, with none of its text (keys, size classes, line counts, enum values, tool names; caller-defined keys anonymised), recorded once per distinct shape. `npm run replay:shapes` replays them with invented people and fails on a leak or a refusal of ordinary text, so real traffic shapes are tested without keeping any of it. The test battery records its own traffic's shapes and replays them (`_test_shapes.mjs`, `_test_replay_recorded.mjs`).
+
+### Fixed
+
+- A test that looked for an identifier's digits in redacted text could fail when a placeholder's random tag held the same digits; placeholders are dropped before looking.
+
 ## [0.4.0] - 2026-10-15
 
 ### Added
