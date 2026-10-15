@@ -97,6 +97,11 @@ for (const [label, body] of [["messages", agentBody], ["chat", chatBody], ["resp
   });
   const filled = instantiate(records[0].shape, REPLAY_PEOPLE[0], "identifiers", () => 0);
   ok("replay: a filled shape has the original structure", /^tool_[0-9a-f]{8}$/.test(filled.messages[1].content[0].name) && filled.messages[1].content[0].name === filled.tools[0].name && typeof filled.messages[2].content[0].content === "string" && JSON.parse(filled.messages[2].content[0].content).field0 !== undefined);
+  for (const n of [13, 33, 140]) {
+    const long = skeleton({ messages: Array.from({ length: n }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `turn ${i}` })) });
+    const back = instantiate(long, REPLAY_PEOPLE[1], "ordinary", () => 0);
+    ok(`replay: a ${n}-item array is replayed at its recorded length`, back.messages.length === n, String(back.messages.length));
+  }
   const { runs, failures } = replayShapes(records);
   ok(`replay: real shapes with invented people neither leak nor refuse (${runs} runs)`, failures.length === 0, failures.slice(0, 4).map((f) => `${f.check} ${f.dialect} p${f.person} ${f.where}`).join(" ;; "));
 }

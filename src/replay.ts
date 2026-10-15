@@ -90,7 +90,8 @@ export function instantiate(shape: unknown, p: Person, mode: Mode, pick: (n: num
       const more = item && typeof item === "object" && !Array.isArray(item) && "$more" in item ? Number((item as { $more: unknown }).$more) : 0;
       if (more) {
         const last = shape[shape.length - 2];
-        for (let k = 0; k < Math.min(more, 20); k++) out.push(instantiate(last, p, mode, pick, data));
+        // Every recorded item: a long history is replayed at its real length.
+        for (let k = 0; k < more; k++) out.push(instantiate(last, p, mode, pick, data));
       } else out.push(instantiate(item, p, mode, pick, data));
     }
     return out;
