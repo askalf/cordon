@@ -13,6 +13,8 @@ image and creates the GitHub release from this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-15
+
 ### Added
 
 - A replay suite (`_test_replay.mjs`, in `npm test`): invented people, hard names on purpose (ordinary-word names, one-word names, hyphens, apostrophes, accents), through five request shapes (a chat turn, an agent tool loop with a form submission in a JSON tool result, MCP-named tools, Chat Completions tool calls, Responses function calls). Every combination must leak nothing once redacted, ordinary lowercase use of a name's words must not be refused, and a reply's text and an allowed tool's arguments must get the real values back while an unlisted tool keeps placeholders. Generated people run through every shape as fast-check properties (`CORDON_FUZZ_RUNS` deepens them).
