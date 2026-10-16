@@ -104,6 +104,35 @@ for (const [label, body] of [["messages", agentBody], ["chat", chatBody], ["resp
   }
   const { runs, failures } = replayShapes(records);
   ok(`replay: real shapes with invented people neither leak nor refuse (${runs} runs)`, failures.length === 0, failures.slice(0, 4).map((f) => `${f.check} ${f.dialect} p${f.person} ${f.where}`).join(" ;; "));
+
+  // An agent turn with extended thinking: the thinking text, its signature, the tool_use id and
+  // the tool_result's tool_use_id are opaque values the upstream mints and verifies; redaction
+  // leaves them alone, so the fill must not write identifiers into them (every live shape with a
+  // thinking block failed before).
+  const thinkingBody = {
+    model: "claude-sonnet-4-5", max_tokens: 1024, thinking: { type: "enabled", budget_tokens: 2048 },
+    tools: [{ name: "lookup_case", description: "Finds a case", input_schema: { type: "object", properties: { q: { type: "string" } } } }],
+    messages: [
+      { role: "user", content: "Please look up the case for Grant and tell me what happens next." },
+      { role: "assistant", content: [
+        { type: "thinking", thinking: "The user wants the case looked up; I will call the tool.", signature: "ErUBCkYIBBgCIkDh3x5Wz2zqkz0m5m2n1aVdqmRTzpDqsP3I7jYtm1HlQ8Y0QZ2sJqcNfz1xVmQ7jS6b0mPBk6HGy8tFwJdG0wIaDN1X2T4" },
+        { type: "tool_use", id: "toolu_01A09q90qw90lq917835lq9", name: "lookup_case", input: { q: "Grant" } },
+      ] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_01A09q90qw90lq917835lq9", content: "{\"owner\":\"Grant\",\"status\":\"open\"}" }] },
+    ],
+  };
+  const tshape = skeleton(thinkingBody);
+  const tfilled = instantiate(tshape, REPLAY_PEOPLE[0], "identifiers", () => 2);
+  const sig = tfilled.messages[1].content[0].signature;
+  const id = tfilled.messages[1].content[1].id;
+  const think = tfilled.messages[1].content[0].thinking;
+  const idents = [REPLAY_PEOPLE[0].name, REPLAY_PEOPLE[0].email, REPLAY_PEOPLE[0].phone];
+  const clean = (v) => typeof v === "string" && !idents.some((x) => v.includes(x));
+  ok("replay: thinking text, its signature and tool ids are filled with neutral words, never identifiers", clean(think) && clean(sig) && clean(id), `${String(think).slice(0, 30)} | ${sig.slice(0, 30)} | ${id.slice(0, 30)}`);
+  const prose = `${tfilled.messages[0].content} ${JSON.stringify(tfilled.messages[1].content[1].input)} ${tfilled.messages[2].content[0].content}`;
+  ok("replay: the identifiers still go into the message text, the tool input or the tool result", idents.some((x) => prose.includes(x)), prose.slice(0, 80));
+  const tr = replayShapes([{ ts: 0, h: shapeDigest("anthropic", "messages", tshape), provider: "anthropic", dialect: "messages", shape: tshape }]);
+  ok(`replay: a thinking-block agent turn neither leaks nor refuses (${tr.runs} runs)`, tr.failures.length === 0, tr.failures.slice(0, 3).map((f) => `${f.check} p${f.person} ${f.where}`).join(" ;; "));
 }
 
 console.log(`\nshapes: ${pass} passed, ${fail} failed`);
