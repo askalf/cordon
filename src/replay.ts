@@ -77,8 +77,7 @@ const PAYLOAD_KEYS = new Set(["data", "url", "image_url", "file_data", "file_id"
 // signature covers the thinking text), so redaction leaves them as they are and the restore never
 // writes identifiers into them (src/streaming.ts): a thinking block echoed back carries
 // placeholders at most. The egress check still reads them, so an identifier written there by a
-// fill would count as a leak that no real request can carry (every live anthropic/messages shape
-// with a thinking block failed the replay from 2026-10-15, once forge's agents started sending them).
+// fill would count as a leak that no real request can carry; they get neutral words only.
 const OPAQUE_KEYS = new Set(["thinking", "signature", "id", "tool_use_id", "tool_call_id", "call_id", "encrypted_content", "previous_response_id"]);
 
 /**
