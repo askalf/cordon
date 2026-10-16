@@ -18,7 +18,7 @@ image and creates the GitHub release from this file.
 - Request shapes (`SHAPE_LOG`): the shape of each request that names its subjects, with none of its text (keys, size classes, line counts and listed enum values; tool names as digests; caller-defined keys anonymised; no caller-chosen value kept), recorded once per distinct shape. `npm run replay:shapes` replays them with invented people and fails on a leak or a refusal of ordinary text, so real traffic shapes are tested without keeping any of it. The test battery records its own traffic's shapes and replays them (`_test_shapes.mjs`, `_test_replay_recorded.mjs`).
 
 ### Fixed
-- Replay: a thinking block's text and signature, tool-call ids and other opaque protocol values are filled with neutral words, not identifiers. Redaction leaves them as sent and the restore never writes identifiers into them, so the replay counted a leak no real request can carry; every live shape with a thinking block had failed since 2026-10-15.
+- Replay: a thinking block's text and signature, tool-call ids and other opaque protocol values are filled with neutral words, not identifiers. Redaction leaves them as sent and the restore never writes identifiers into them, so the replay counted a leak no real request can carry and every recorded shape with a thinking block failed.
 
 - A test that looked for an identifier's digits in redacted text could fail when a placeholder's random tag held the same digits; placeholders are dropped before looking.
 
