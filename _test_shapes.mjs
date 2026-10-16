@@ -133,6 +133,12 @@ for (const [label, body] of [["messages", agentBody], ["chat", chatBody], ["resp
   ok("replay: the identifiers still go into the message text, the tool input or the tool result", idents.some((x) => prose.includes(x)), prose.slice(0, 80));
   const tr = replayShapes([{ ts: 0, h: shapeDigest("anthropic", "messages", tshape), provider: "anthropic", dialect: "messages", shape: tshape }]);
   ok(`replay: a thinking-block agent turn neither leaks nor refuses (${tr.runs} runs)`, tr.failures.length === 0, tr.failures.slice(0, 3).map((f) => `${f.check} p${f.person} ${f.where}`).join(" ;; "));
+
+  // The opaque names are protocol positions only: below a tool call's arguments an `id` is the
+  // caller's own field and carries identifiers like any other argument.
+  const argShape = { type: "tool_use", id: { $s: 32 }, name: { $tool: "0badc0de" }, input: { id: { $s: 64 }, signature: { $s: 64 } } };
+  const argFilled = instantiate(argShape, REPLAY_PEOPLE[0], "identifiers", () => 2);
+  ok("replay: a tool argument named id gets identifiers, the call's own id does not", !clean(argFilled.input.id) && !clean(argFilled.input.signature) && clean(argFilled.id), `${argFilled.input.id.slice(0, 40)} | ${argFilled.id.slice(0, 30)}`);
 }
 
 console.log(`\nshapes: ${pass} passed, ${fail} failed`);

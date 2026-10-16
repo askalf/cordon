@@ -77,7 +77,8 @@ const PAYLOAD_KEYS = new Set(["data", "url", "image_url", "file_data", "file_id"
 // signature covers the thinking text), so redaction leaves them as they are and the restore never
 // writes identifiers into them (src/streaming.ts): a thinking block echoed back carries
 // placeholders at most. The egress check still reads them, so an identifier written there by a
-// fill would count as a leak that no real request can carry; they get neutral words only.
+// fill would count as a leak that no real request can carry; they get neutral words only. Below
+// tool-call arguments (`data`) the same names are the caller's own fields and get identifiers.
 const OPAQUE_KEYS = new Set(["thinking", "signature", "id", "tool_use_id", "tool_call_id", "call_id", "encrypted_content", "previous_response_id"]);
 
 /**
@@ -120,7 +121,7 @@ export function instantiate(shape: unknown, p: Person, mode: Mode, pick: (n: num
     const caller = k.startsWith("*");
     // An enum field whose value was not kept (recorded as text) gets neutral words: it is the
     // API's vocabulary slot, not prose.
-    const neutral = k === "metadata" || PAYLOAD_KEYS.has(k) || OPAQUE_KEYS.has(k) || ENUM_FIELDS.has(k) || (caller && !data);
+    const neutral = k === "metadata" || PAYLOAD_KEYS.has(k) || (OPAQUE_KEYS.has(k) && !data) || ENUM_FIELDS.has(k) || (caller && !data);
     const below = data || (k === "input" && toolCall);
     out[caller ? `field${k.slice(1)}` : k] = instantiate(v, p, neutral ? "neutral" : mode, pick, below);
   }
