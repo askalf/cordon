@@ -107,8 +107,7 @@ for (const [label, body] of [["messages", agentBody], ["chat", chatBody], ["resp
 
   // An agent turn with extended thinking: the thinking text, its signature, the tool_use id and
   // the tool_result's tool_use_id are opaque values the upstream mints and verifies; redaction
-  // leaves them alone, so the fill must not write identifiers into them (every recorded shape
-  // with a thinking block failed before).
+  // leaves them alone, so the fill must not write identifiers into them.
   const thinkingBody = {
     model: "claude-sonnet-4-5", max_tokens: 1024, thinking: { type: "enabled", budget_tokens: 2048 },
     tools: [{ name: "lookup_case", description: "Finds a case", input_schema: { type: "object", properties: { q: { type: "string" } } } }],
