@@ -61,7 +61,13 @@ function text(size: number, lines: number, p: Person, mode: Mode, pick: (n: numb
     len += w.length + 1;
     i++;
   }
-  let s = out.join(" ").slice(0, Math.max(target, 1));
+  // Cut at a word boundary: a word cut short ("t" of "thanks") can spell a declared form with the
+  // word before it ("user t" reads as the handle usert for "Test User"), which no filler means.
+  let s = out.join(" ");
+  if (s.length > target) {
+    const cut = s.lastIndexOf(" ", target);
+    s = s.slice(0, cut > 0 ? cut : Math.max(target, 1));
+  }
   // Spread the line breaks through the text; a JSON escape before a name is the point.
   for (let n = 0; n < Math.min(lines, 40); n++) {
     const at = s.indexOf(" ", Math.floor(((n + 1) * s.length) / (Math.min(lines, 40) + 1)));
