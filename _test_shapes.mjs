@@ -104,6 +104,17 @@ for (const [label, body] of [["messages", agentBody], ["chat", chatBody], ["resp
   }
   const { runs, failures } = replayShapes(records);
   ok(`replay: real shapes with invented people neither leak nor refuse (${runs} runs)`, failures.length === 0, failures.slice(0, 4).map((f) => `${f.check} ${f.dialect} p${f.person} ${f.where}`).join(" ;; "));
+  // A word cut short at the recorded length ("user t") spells the handle usert for "Test User",
+  // so an ordinary fill would be refused. Every word of a fill is whole once the size
+  // holds a word (the longest is 7 letters); a lone fragment cannot meet a neighbour.
+  const seq = () => { let x = 1; return (n) => (x = (x * 48271) % 2147483647) % n; };
+  const vocab = new Set(instantiate({ $s: 2000 }, REPLAY_PEOPLE[1], "ordinary", seq()).split(/\s+/));
+  const cut = [];
+  for (let size = 8; size <= 300; size++) {
+    const words = instantiate({ $s: size }, REPLAY_PEOPLE[1], "ordinary", seq()).split(/\s+/);
+    if (words.some((w) => !vocab.has(w)) || words.join(" ").length > size) cut.push(size);
+  }
+  ok("replay: a filled text holds whole words only and stays within its recorded length", cut.length === 0, cut.slice(0, 8).join(","));
 
   // An agent turn with extended thinking: the thinking text, its signature, the tool_use id and
   // the tool_result's tool_use_id are opaque values the upstream mints and verifies; redaction
