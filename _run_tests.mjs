@@ -2,17 +2,15 @@
 // suite (under tsx) and the integration suites, then tears everything down.
 //
 //   npm test
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { parsePorts, portsEnv, url } from "./_test_ports.mjs";
 
 /**
- * A port the kernel reports free right now. Six are taken this way for one run, so two batteries
- * on one host (two CI jobs of this repository on one self-hosted machine) never share a stub or
- * an instance: the first symptom of that was one battery's stub counting the other's requests,
- * and the old "free the port" step killed whatever listened there, the other job's processes
- * included. CORDON_TEST_PORTS set by hand pins the ports instead.
+ * A loopback port the kernel reports free right now. Each run takes its six ports this way, so
+ * concurrent batteries on one host get distinct stubs and instances. CORDON_TEST_PORTS set by
+ * hand pins the ports instead.
  */
 const freePort = () =>
   new Promise((resolve, reject) => {

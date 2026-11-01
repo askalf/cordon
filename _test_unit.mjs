@@ -950,6 +950,17 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   ok("resolveTenant: no credential is the public tenant", resolveTenant({}) === "public");
 }
 
+// ---- test battery ports: CORDON_TEST_PORTS ----
+{
+  const { parsePorts } = await import("./_test_ports.mjs");
+  const throws = (v) => { try { parsePorts(v); return false; } catch { return true; } };
+  ok("parsePorts: six distinct ports are taken in order", JSON.stringify(parsePorts("10000,10001,10002,10003,10004,10005")) === JSON.stringify({ stub: 10000, dead: 10001, main: 10002, nosecret: 10003, noadmin: 10004, restore: 10005 }));
+  ok("parsePorts: unset falls back to the fixed ports", parsePorts("").main === 8810 && parsePorts(undefined).stub === 8900);
+  ok("parsePorts: a port named twice is refused", throws("10000,10001,10002,10002,10004,10005"));
+  ok("parsePorts: the wrong count is refused", throws("10000,10001,10002"));
+  ok("parsePorts: an out-of-range port is refused", throws("10000,10001,10002,10003,10004,70000"));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
 
