@@ -20,7 +20,7 @@ npm run audit        # verify the hash-chained audit log → tamper report (src/
 docker compose up -d --build   # single self-contained container, 127.0.0.1:8080
 ```
 
-**Running one suite** (the runner `_run_tests.mjs` picks free ports for each run and passes them in `CORDON_TEST_PORTS`; run by hand, a suite falls back to the stub on :8900 and a cordon instance on :8810, which must already be up — easiest is to keep `npm test` as the entry point, but to iterate on a single suite, launch them by hand):
+**Running one suite** (the runner `_run_tests.mjs` picks free ports for each run and passes them in `CORDON_TEST_PORTS`; run by hand, a suite falls back to the stub on :8900 and a cordon instance on :8810, which must already be up; the easiest path is to keep `npm test` as the entry point, but to iterate on a single suite, launch them by hand):
 
 ```bash
 node _stub-upstream.mjs &                                                   # :8900
