@@ -961,6 +961,30 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   ok("parsePorts: an out-of-range port is refused", throws("10000,10001,10002,10003,10004,70000"));
 }
 
+// ---- test battery ports: host-wide reservation ----
+{
+  const { reservePorts } = await import("./_test_ports.mjs");
+  const { mkdtempSync, readdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "cordon-ports-"));
+  // Two batteries can be handed the same free port before either binds it: this probe returns
+  // every port twice, to whichever reservation asks next.
+  let n = 0;
+  const probe = async () => { await new Promise((r) => setImmediate(r)); return 20000 + Math.floor(n++ / 2); };
+  const [a, b] = await Promise.all([reservePorts({ dir, probe }), reservePorts({ dir, probe })]);
+  const pa = Object.values(a.ports), pb = Object.values(b.ports);
+  ok("reservePorts: two simultaneous reservations never share a port", pa.length === 6 && pb.length === 6 && new Set([...pa, ...pb]).size === 12);
+  ok("reservePorts: every reserved port stays locked until released", readdirSync(dir).length === 12);
+  a.release();
+  const seq = (from) => { let i = from; return async () => i++; };
+  const c = await reservePorts({ dir, probe: seq(Math.min(...pb)) });
+  ok("reservePorts: a port another run still holds is skipped", Object.values(c.ports).every((p) => !pb.includes(p)));
+  b.release(); c.release();
+  ok("reservePorts: release frees the locks", readdirSync(dir).length === 0);
+  rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
 

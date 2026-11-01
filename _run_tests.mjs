@@ -4,33 +4,19 @@
 //   npm test
 import { spawn, execSync } from "node:child_process";
 import { rmSync } from "node:fs";
-import { createServer } from "node:net";
-import { parsePorts, portsEnv, url } from "./_test_ports.mjs";
+import { parsePorts, portsEnv, reservePorts, url } from "./_test_ports.mjs";
 
 /**
- * A loopback port the kernel reports free right now. Each run takes its six ports this way, so
- * concurrent batteries on one host get distinct stubs and instances. CORDON_TEST_PORTS set by
- * hand pins the ports instead.
+ * Each run reserves its six ports host-wide (see reservePorts), so concurrent batteries on one
+ * host get distinct stubs and instances even when the kernel hands both the same free port.
+ * The reservation is held until this process exits. CORDON_TEST_PORTS set by hand pins the
+ * ports instead.
  */
-const freePort = () =>
-  new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
-
 async function pickPorts() {
   if (process.env.CORDON_TEST_PORTS) return parsePorts(process.env.CORDON_TEST_PORTS);
-  const names = ["stub", "dead", "main", "nosecret", "noadmin", "restore"];
-  const ports = {};
-  for (const n of names) {
-    let p;
-    do p = await freePort(); while (Object.values(ports).includes(p));
-    ports[n] = p;
-  }
+  const { ports, release } = await reservePorts();
+  process.on("exit", release);
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => process.exit(1));
   return ports;
 }
 
