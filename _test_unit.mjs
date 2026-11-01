@@ -943,6 +943,8 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   ok("credentialOf: the scheme is case-insensitive and tolerates extra spaces", credentialOf({ authorization: "  bearer   " + key + " " }) === key);
   ok("credentialOf: Authorization wins over x-api-key when both are sent", credentialOf({ authorization: "Bearer a", "x-api-key": "b" }) === "a");
   ok("credentialOf: a non-bearer Authorization value is taken verbatim", credentialOf({ authorization: "Basic abc" }) === "Basic abc");
+  ok("credentialOf: a non-bearer Authorization value keeps its surrounding spaces", credentialOf({ authorization: "  Basic abc  " }) === "  Basic abc  ");
+  ok("credentialOf: an x-api-key value keeps its surrounding spaces", credentialOf({ "x-api-key": " " + key + " " }) === " " + key + " ");
   ok("credentialOf: no credential is the empty string", credentialOf({}) === "");
   ok("resolveTenant: one key is one tenant as x-api-key and as a bearer token", resolveTenant({ "x-api-key": key }) === hashed && resolveTenant({ authorization: "Bearer " + key }) === hashed);
   ok("resolveTenant: no credential is the public tenant", resolveTenant({}) === "public");
