@@ -418,4 +418,4 @@ http
       res.end("nope");
     });
   })
-  .listen(8900, () => console.log("stub upstream (echo) on :8900"));
+  .listen(Number(process.env.STUB_PORT || 8900), () => console.log(`stub upstream (echo) on :${process.env.STUB_PORT || 8900}`));

@@ -1,4 +1,4 @@
-// Integration: cordon (:8810) in front of the echo stub (:8900). Proves the model
+// Integration: the main cordon instance in front of the echo stub (ports from _test_ports.mjs). Proves the model
 // never sees raw PII, reversible restores it, strip/off behave, fail-closed blocks,
 // and the audit log verifies and holds no values. Run with: node _test_proxy.mjs
 import { createHash } from "node:crypto";
@@ -6,10 +6,11 @@ import { readFileSync } from "node:fs";
 import http from "node:http";
 import { createServer } from "node:net";
 
-const BASE = "http://localhost:8810";
-const BASE2 = "http://localhost:8811"; // secret-less instance (pseudonym-without-secret must fail closed)
-const BASE3 = "http://localhost:8812"; // no ADMIN_TOKEN, Anthropic upstream that never answers, 500ms timeout
-const STUB = "http://localhost:8900";
+import { PORTS, url } from "./_test_ports.mjs";
+const BASE = url(PORTS.main);
+const BASE2 = url(PORTS.nosecret); // secret-less instance (pseudonym-without-secret must fail closed)
+const BASE3 = url(PORTS.noadmin); // no ADMIN_TOKEN, Anthropic upstream that never answers, 500ms timeout
+const STUB = url(PORTS.stub);
 const ADMIN = "secret";
 const PII = "email john@acme.com about card 4012888888881881";
 
@@ -42,7 +43,7 @@ const asKey = (key) => ({ "x-api-key": key });
 const rawPost = (path, body) =>
   new Promise((resolve, reject) => {
     const req = http.request(
-      { host: "localhost", port: 8810, path, method: "POST", headers: { "content-type": "application/json", "x-api-key": "test-key" } },
+      { host: "localhost", port: PORTS.main, path, method: "POST", headers: { "content-type": "application/json", "x-api-key": "test-key" } },
       (res) => {
         let b = "";
         res.on("data", (c) => (b += c));
@@ -364,7 +365,7 @@ const rawPost = (path, body) =>
   // ---- upstream that accepts but never answers: 504 after UPSTREAM_TIMEOUT_MS ----
   {
     const sockets = [];
-    const hang = createServer((sock) => sockets.push(sock)).listen(8901);
+    const hang = createServer((sock) => sockets.push(sock)).listen(PORTS.dead);
     await new Promise((r) => hang.once("listening", r));
     const t0 = Date.now();
     res = await postTo(BASE3)("/v1/messages", aBody("hi"));
@@ -532,7 +533,7 @@ const rawPost = (path, body) =>
   ok("tool/unresolved: a foreign placeholder in prose does not fail the reply", res.status === 200);
 
   // CORDON_RESTORE_TOOLS=echo.text on :8813: only echo's `text` comes back real.
-  const post4 = postTo("http://localhost:8813");
+  const post4 = postTo(url(PORTS.restore));
   await reset();
   res = await post4("/v1/responses", rBody("TOOLCALL " + PII, { tools: TOOL }));
   {

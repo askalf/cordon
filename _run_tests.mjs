@@ -2,31 +2,63 @@
 // suite (under tsx) and the integration suites, then tears everything down.
 //
 //   npm test
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
+import { createServer } from "node:net";
+import { parsePorts, portsEnv, url } from "./_test_ports.mjs";
 
-const STUB_PORT = 8900;
-const STUB = `http://localhost:${STUB_PORT}`;
+/**
+ * A port the kernel reports free right now. Six are taken this way for one run, so two batteries
+ * on one host (two CI jobs of this repository on one self-hosted machine) never share a stub or
+ * an instance: the first symptom of that was one battery's stub counting the other's requests,
+ * and the old "free the port" step killed whatever listened there, the other job's processes
+ * included. CORDON_TEST_PORTS set by hand pins the ports instead.
+ */
+const freePort = () =>
+  new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+
+async function pickPorts() {
+  if (process.env.CORDON_TEST_PORTS) return parsePorts(process.env.CORDON_TEST_PORTS);
+  const names = ["stub", "dead", "main", "nosecret", "noadmin", "restore"];
+  const ports = {};
+  for (const n of names) {
+    let p;
+    do p = await freePort(); while (Object.values(ports).includes(p));
+    ports[n] = p;
+  }
+  return ports;
+}
+
+const PORTS = await pickPorts();
+process.env.CORDON_TEST_PORTS = portsEnv(PORTS);
+const STUB = url(PORTS.stub);
 const base = { OPENAI_BASE: STUB, ANTHROPIC_BASE: STUB };
 
 // port → instance env
 const instances = {
   // Primary instance: has a strong TENANT_SECRET, so consistent-pseudonym requests work, and
   // opts in to X-Tenant (TRUST_TENANT_HEADER) so the tenant-selection rule is exercised.
-  8810: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test.jsonl", SHAPE_LOG: "./_shapes_test.jsonl", CORDON_RESTORE_TOOLS: "*", CORDON_TEST_HOOKS: "1", TENANT_SECRET: "test-secret-0123456789abcdef", TRUST_TENANT_HEADER: "true" },
+  [PORTS.main]: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test.jsonl", SHAPE_LOG: "./_shapes_test.jsonl", CORDON_RESTORE_TOOLS: "*", CORDON_TEST_HOOKS: "1", TENANT_SECRET: "test-secret-0123456789abcdef", TRUST_TENANT_HEADER: "true" },
   // Secret-less instance: consistent pseudonyms enabled per-tenant here must FAIL CLOSED
   // (no ALLOW_WEAK_PSEUDONYM_SECRET) — exercises the per-request pseudonym-secret guard.
   // TRUST_TENANT_HEADER is left at its default, so X-Tenant is ignored here.
-  8811: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test_nosecret.jsonl", CORDON_RESTORE_TOOLS: "*" },
+  [PORTS.nosecret]: { ADMIN_TOKEN: "secret", AUDIT_LOG: "./_audit_test_nosecret.jsonl", CORDON_RESTORE_TOOLS: "*" },
   // No ADMIN_TOKEN; an Anthropic upstream accepts connections but never answers.
-  // The proxy suite opens it on :8901 with a short timeout for the 504 path.
-  8812: {
+  // The proxy suite opens it on the dead port with a short timeout for the 504 path.
+  [PORTS.noadmin]: {
     AUDIT_LOG: "./_audit_test_noadmin.jsonl",
-    ANTHROPIC_BASE: "http://127.0.0.1:8901",
+    ANTHROPIC_BASE: `http://127.0.0.1:${PORTS.dead}`,
     UPSTREAM_TIMEOUT_MS: "500",
   },
   // A restore allowlist: only the `text` argument of the `echo` tool gets real values back.
-  8813: { AUDIT_LOG: "./_audit_test_restore.jsonl", CORDON_RESTORE_TOOLS: "echo.text,send" },
+  [PORTS.restore]: { AUDIT_LOG: "./_audit_test_restore.jsonl", CORDON_RESTORE_TOOLS: "echo.text,send" },
 };
 
 // Suites importing TS modules directly run under the tsx loader.
@@ -36,33 +68,6 @@ const suites = ["_test_unit.mjs", "_test_subject.mjs", "_test_fuzz.js", "_test_f
 // Fresh audit chains + scratch files each run.
 for (const f of ["./_audit_test.jsonl", "./_shapes_test.jsonl", "./_audit_test_nosecret.jsonl", "./_audit_test_noadmin.jsonl", "./_audit_test_restore.jsonl", "./_policy_unit.json", "./_policy_bad.json"])
   try { rmSync(f, { force: true }); } catch {}
-
-/**
- * Kill whatever is already LISTENING on `port`. Prior runs can leave an orphaned stub
- * or cordon instance behind — most often on Windows, where a parent's .kill() doesn't
- * always reap the spawned node process — which would then EADDRINUSE this run.
- */
-const freePort = (port) => {
-  try {
-    if (process.platform === "win32") {
-      const out = execSync("netstat -ano -p tcp", { encoding: "utf8" });
-      const pids = new Set();
-      for (const line of out.split("\n")) {
-        const t = line.trim().split(/\s+/); // [proto, local, foreign, state, pid]
-        if (t.length >= 5 && t[3] === "LISTENING" && t[1].endsWith(":" + port)) pids.add(t[4]);
-      }
-      for (const pid of pids) try { execSync(`taskkill /PID ${pid} /F /T`, { stdio: "ignore" }); } catch {}
-    } else {
-      try { execSync(`fuser -k ${port}/tcp`, { stdio: "ignore" }); }
-      catch {
-        try {
-          for (const pid of execSync(`lsof -ti tcp:${port}`, { encoding: "utf8" }).trim().split(/\s+/).filter(Boolean))
-            try { process.kill(Number(pid), "SIGKILL"); } catch {}
-        } catch {}
-      }
-    }
-  } catch {}
-};
 
 const children = [];
 const launch = (args, env = {}) => {
@@ -95,10 +100,8 @@ async function waitUp(url, label, tries = 50) {
 }
 
 (async () => {
-  // Reclaim any port a prior run left occupied before we try to bind it.
-  for (const port of [STUB_PORT, 8901, ...Object.keys(instances).map(Number)]) freePort(port);
-
-  launch(["_stub-upstream.mjs"]);
+  console.log(`ports: ${process.env.CORDON_TEST_PORTS} (stub,dead,main,nosecret,noadmin,restore)`);
+  launch(["_stub-upstream.mjs"], { STUB_PORT: String(PORTS.stub) });
   await waitUp(`${STUB}/__calls`, "stub");
 
   for (const [port, env] of Object.entries(instances)) {

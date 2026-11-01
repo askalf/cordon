@@ -1,8 +1,9 @@
 // Integration: streaming re-identification. The stub chunks its echoed reply into
 // 3-char SSE frames, so placeholders like <EMAIL_1> are SPLIT across frame
 // boundaries — the critical hold-back-buffer case. Run with: node _test_stream.mjs
-const BASE = "http://localhost:8810";
-const STUB = "http://localhost:8900";
+import { PORTS, url } from "./_test_ports.mjs";
+const BASE = url(PORTS.main);
+const STUB = url(PORTS.stub);
 const PII = "email john@acme.com about card 4012888888881881";
 
 let pass = 0, fail = 0;
@@ -476,7 +477,7 @@ function validateSSE(sse) {
   // CORDON_RESTORE_TOOLS=echo.text on :8813, streamed: same per-field decision as whole.
   {
     const post4 = (path, body) =>
-      fetch("http://localhost:8813" + path, { method: "POST", headers: { "content-type": "application/json", "x-api-key": "test-key", "anthropic-version": "2023-06-01" }, body: JSON.stringify(body) });
+      fetch(url(PORTS.restore) + path, { method: "POST", headers: { "content-type": "application/json", "x-api-key": "test-key", "anthropic-version": "2023-06-01" }, body: JSON.stringify(body) });
     await reset();
     txt = await (await post4("/v1/responses", respTool())).text();
     const f = frames(txt);
