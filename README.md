@@ -6,6 +6,7 @@
 [![CI on pitlane](https://img.shields.io/endpoint?url=https%3A%2F%2Fpitlane.askalf.org%2Fbadge.json)](https://pitlane.askalf.org/)
 [![codeql](https://github.com/askalf/cordon/actions/workflows/codeql.yml/badge.svg)](https://github.com/askalf/cordon/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/askalf/cordon/badge)](https://scorecard.dev/viewer/?uri=github.com/askalf/cordon)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16165/badge)](https://www.bestpractices.dev/projects/16165)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **A PII-redacting proxy for the OpenAI and Anthropic APIs.** Point your client at cordon instead of the provider. Emails, phone numbers, card numbers, SSNs, API keys and the rest are replaced with placeholders before the request leaves your network, and put back in the reply so your app never notices. One container, no database, no ML model, no client code changes beyond the base URL.
