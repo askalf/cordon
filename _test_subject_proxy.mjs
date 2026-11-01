@@ -1,4 +1,4 @@
-// Integration for known subjects: cordon (:8810) in front of the echo stub (:8900). Proves the
+// Integration for known subjects: the main cordon instance in front of the echo stub (ports from _test_ports.mjs). Proves the
 // model never sees a subject's identifiers, the reply comes back real, a request the egress
 // check or the media rule refuses never reaches the stub, report-only forwards unchanged and
 // says so, and receipts are served per ref with no values. Every person here is invented.
@@ -6,8 +6,9 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-const BASE = "http://localhost:8810";
-const STUB = "http://localhost:8900";
+import { PORTS, url } from "./_test_ports.mjs";
+const BASE = url(PORTS.main);
+const STUB = url(PORTS.stub);
 const ADMIN = "secret";
 let pass = 0, fail = 0;
 const ok = (n, c, e = "") => { c ? pass++ : fail++; console.log(`${c ? "PASS" : "FAIL"}  ${n}${e ? "   (" + e + ")" : ""}`); };
@@ -426,9 +427,9 @@ const leaked = (s) => RAW.filter((r) => s.includes(r));
 
   // :8811 has no TENANT_SECRET, so a consistent-pseudonym tenant fails at the secret guard; with
   // failMode open that would forward the raw body, but never for a request that names subjects.
-  await fetch("http://localhost:8811/admin/tenant", { method: "POST", headers: { "content-type": "application/json", "x-admin-token": ADMIN }, body: JSON.stringify({ tenant: keyTenant("open-key"), consistentPseudonyms: true, failMode: "open" }) });
+  await fetch(url(PORTS.nosecret) + "/admin/tenant", { method: "POST", headers: { "content-type": "application/json", "x-admin-token": ADMIN }, body: JSON.stringify({ tenant: keyTenant("open-key"), consistentPseudonyms: true, failMode: "open" }) });
   await reset();
-  res = await fetch("http://localhost:8811/v1/messages", {
+  res = await fetch(url(PORTS.nosecret) + "/v1/messages", {
     method: "POST",
     headers: { "content-type": "application/json", "x-api-key": "open-key", "anthropic-version": "2023-06-01", "x-cordon-subject": SUBJECT() },
     body: JSON.stringify(aBody(TEXT)),
