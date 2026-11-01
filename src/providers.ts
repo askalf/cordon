@@ -309,12 +309,22 @@ export function authHeaders(headers: Record<string, string>): Record<string, str
   return fwd;
 }
 
+/** The credential a request carries, whichever header carries it: the Authorization value
+ *  with any "Bearer " scheme (and the spaces around it) removed, else the x-api-key value.
+ *  The scheme is framing, not credential, so one key is one tenant whether it is sent as
+ *  x-api-key or as a bearer token. Any other value is taken verbatim. */
+export function credentialOf(headers: Record<string, string>): string {
+  const auth = headers["authorization"] || headers["x-api-key"] || "";
+  const bearer = /^\s*bearer\s+(.*?)\s*$/is.exec(auth);
+  return bearer ? bearer[1] : auth;
+}
+
 /** The tenant a request's credentials alone give it: derived from the API key
  *  (TENANT_FROM_AUTH), else "public". */
 function credentialTenant(headers: Record<string, string>): string {
   if (config.tenantFromAuth) {
-    const auth = headers["authorization"] || headers["x-api-key"] || "";
-    if (auth) return "auth:" + sha256(auth).slice(0, 16);
+    const cred = credentialOf(headers);
+    if (cred) return "auth:" + sha256(cred).slice(0, 16);
   }
   return "public";
 }
