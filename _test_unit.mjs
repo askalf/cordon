@@ -4,6 +4,8 @@ import { runAll, detector } from "./src/detect/index.ts";
 import { luhn, ibanMod97, abaRouting, ssnValid } from "./src/detect/validators.ts";
 import { Vault } from "./src/redact/vault.ts";
 import { applyRedaction, tally, exactDecimal } from "./src/redact/apply.ts";
+import { createHash } from "node:crypto";
+import { credentialOf, resolveTenant } from "./src/providers.ts";
 import { restoreCitation, reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, restoreArgsWhole, hasDuplicateKeys, restoreArgObject, DeferredArgs, MAX_ARG_DEPTH, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
 import { parseRestoreTools } from "./src/redact/restorePolicy.ts";
 import { pseudonymSecretGuard, adequatePseudonymSecret, MIN_PSEUDONYM_SECRET_LEN, parseTimeoutMs, DEFAULT_UPSTREAM_TIMEOUT_MS, MAX_TIMEOUT_MS } from "./src/config.ts";
@@ -930,6 +932,20 @@ ok("timeout: empty, zero, negative and Infinity -> default",
       ok(`args tail parity: \`${text}\` ${bad ? "refused" : "delivered"} whole and streamed`, !!ws.rejected === bad && !!st.rejected === bad && (bad || o === text), JSON.stringify({ ws, st, o }));
     }
   }
+}
+
+// ---- tenant from the credential, whichever header carries it ----
+{
+  const key = "sk-ant-test-" + "0123456789abcdef";
+  const hashed = "auth:" + createHash("sha256").update(key).digest("hex").slice(0, 16);
+  ok("credentialOf: x-api-key is the key itself", credentialOf({ "x-api-key": key }) === key);
+  ok("credentialOf: Authorization: Bearer strips the scheme", credentialOf({ authorization: "Bearer " + key }) === key);
+  ok("credentialOf: the scheme is case-insensitive and tolerates extra spaces", credentialOf({ authorization: "  bearer   " + key + " " }) === key);
+  ok("credentialOf: Authorization wins over x-api-key when both are sent", credentialOf({ authorization: "Bearer a", "x-api-key": "b" }) === "a");
+  ok("credentialOf: a non-bearer Authorization value is taken verbatim", credentialOf({ authorization: "Basic abc" }) === "Basic abc");
+  ok("credentialOf: no credential is the empty string", credentialOf({}) === "");
+  ok("resolveTenant: one key is one tenant as x-api-key and as a bearer token", resolveTenant({ "x-api-key": key }) === hashed && resolveTenant({ authorization: "Bearer " + key }) === hashed);
+  ok("resolveTenant: no credential is the public tenant", resolveTenant({}) === "public");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

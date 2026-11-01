@@ -309,12 +309,21 @@ export function authHeaders(headers: Record<string, string>): Record<string, str
   return fwd;
 }
 
+/** The credential a request carries, whichever header carries it: the Authorization value
+ *  with any "Bearer " scheme removed, else the x-api-key value. The scheme is framing, not
+ *  credential, so one key is one tenant whether a client sends it as x-api-key or as a bearer
+ *  token (the Anthropic SDK moved from the first to the second at 1.0). */
+export function credentialOf(headers: Record<string, string>): string {
+  const auth = headers["authorization"] || headers["x-api-key"] || "";
+  return auth.replace(/^\s*bearer\s+/i, "").trim();
+}
+
 /** The tenant a request's credentials alone give it: derived from the API key
  *  (TENANT_FROM_AUTH), else "public". */
 function credentialTenant(headers: Record<string, string>): string {
   if (config.tenantFromAuth) {
-    const auth = headers["authorization"] || headers["x-api-key"] || "";
-    if (auth) return "auth:" + sha256(auth).slice(0, 16);
+    const cred = credentialOf(headers);
+    if (cred) return "auth:" + sha256(cred).slice(0, 16);
   }
   return "public";
 }
