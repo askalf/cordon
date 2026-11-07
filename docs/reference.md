@@ -103,6 +103,22 @@ The chain is verified before receipts are served; a broken chain is a 409 with n
 
 Upstream failures return a fixed message and a `requestId` (also in `X-Request-Id`); the detail is logged server-side. A provider that sends no response headers within `UPSTREAM_TIMEOUT_MS` (default 600000) gets a 504; a stream that has started is never cut off.
 
+## Redacting text outside a request
+
+`POST /redact` cleans text that is not on its way to a model, such as a copy being kept. It runs the same detectors over the deployment's `ACTIVE_SETS`, always in `strip` mode, and sends nothing upstream.
+
+```bash
+curl localhost:8080/redact -H 'x-redact-token: …' -H 'content-type: application/json' \
+  -d '{"texts":["write to john@acme.com"]}'
+# {"texts":["write to [EMAIL]"],"total":1,"types":{"EMAIL":1}}
+```
+
+- It needs `REDACT_TOKEN`, sent as `x-redact-token`, and is off (403) without one. The token is separate from `ADMIN_TOKEN`, so a caller that only cleans text cannot change a tenant's policy.
+- A body is limited to 4 MiB.
+- A detection or audit failure refuses the whole call with 422 and returns no text.
+- Each call is one audit record with `provider: "none"`: counts and types, never values.
+- It finds what has a shape. It takes no subject list, so a name in free text passes through.
+
 ## Configuration
 
 See [`.env.example`](../.env.example). The knobs that matter: `FAIL_MODE` (default `closed`), `DEFAULT_MODE`, `ACTIVE_SETS`, `CONSISTENT_PSEUDONYMS` with `TENANT_SECRET`, `AUDIT_LOG`, `ADMIN_TOKEN`, `POLICY_STORE`, `OPENAI_BASE` / `ANTHROPIC_BASE`, `ALLOW_HEADER_OVERRIDE`, `TRUST_TENANT_HEADER`, `UPSTREAM_TIMEOUT_MS`, `CORDON_RESTORE_TOOLS`, `SHAPE_LOG`.

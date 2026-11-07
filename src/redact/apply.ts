@@ -1,6 +1,6 @@
 import { clone } from "../util";
 import type { Detector, Dialect, Provider, RedactSet, Span } from "../types";
-import type { Vault } from "./vault";
+import { Vault } from "./vault";
 
 // `doc`: the slot is a Messages document's plain-text source, at this document_index.
 type Slot = { get(): string; set(v: string): void; numeric?: boolean; doc?: number };
@@ -480,6 +480,20 @@ const NUMERIC_PII = new Set(["CREDIT_CARD", "IBAN", "US_ROUTING"]);
 // A declared subject identifier (subject.ts) is exact, not a format guess, so a numeric leaf
 // that is wholly one (a phone sent as a JSON number) is redacted like a checksum match.
 const isSubjectType = (t: string) => /^SUBJECT\d+_/.test(t);
+
+/**
+ * De-identify text that is not part of a provider request, irreversibly: every entity becomes
+ * its `[TYPE]` label and nothing is kept to restore it. Throws if the detector throws, so the
+ * caller can refuse rather than hand back text it could not read.
+ */
+export function stripText(
+  text: string,
+  activeSets: RedactSet[],
+  detector: Detector,
+): { text: string; spans: Span[] } {
+  const spans = detector.detect(text, activeSets);
+  return { text: spans.length ? replaceSpans(text, spans, new Vault("strip")) : text, spans };
+}
 
 /** Tally spans into { TYPE: count } for the audit record and X-Redacted-Types header. */
 export function tally(spans: Span[]): Record<string, number> {
