@@ -375,6 +375,46 @@ const rawPost = (path, body) =>
     hang.close();
   }
 
+  // ---- /redact: text on its way to no provider ----
+  {
+    const redact = (base, body, token = "redact-secret", extra = {}) =>
+      fetch(base + "/redact", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(token ? { "x-redact-token": token } : {}), ...extra },
+        body: JSON.stringify(body),
+      });
+    await reset();
+    let r = await redact(BASE, { texts: ["write to kept.copy@acme.com about card 4012888888881881", "nothing to see here", ""] });
+    ok("redact: 200 with the token", r.status === 200, String(r.status));
+    const j = await r.json();
+    ok("redact: entities become labels", j.texts?.[0] === "write to [EMAIL] about card [CREDIT_CARD]", j.texts?.[0]);
+    ok("redact: clean text comes back as it went in", j.texts?.[1] === "nothing to see here");
+    ok("redact: every text has its place in the answer", j.texts?.length === 3 && j.texts?.[2] === "");
+    ok("redact: says what it found", j.total === 2 && j.types?.EMAIL === 1 && j.types?.CREDIT_CARD === 1, JSON.stringify(j));
+    ok("redact: nothing went upstream", (await calls()).total === 0);
+
+    r = await redact(BASE, { texts: ["same value twice: a@acme.com and a@acme.com"] });
+    ok("redact: strip keeps nothing to restore a value by", (await r.json()).texts?.[0] === "same value twice: [EMAIL] and [EMAIL]");
+
+    ok("redact: 403 with no token", (await redact(BASE, { texts: ["x"] }, null)).status === 403);
+    ok("redact: 403 with a wrong token", (await redact(BASE, { texts: ["x"] }, "nope")).status === 403);
+    ok("redact: the admin token does not open it", (await redact(BASE, { texts: ["x"] }, ADMIN)).status === 403);
+    ok("redact: disabled (403) when REDACT_TOKEN is unset", (await redact(BASE3, { texts: ["x"] })).status === 403);
+    ok("redact: 400 with no texts", (await redact(BASE, {})).status === 400);
+    ok("redact: 400 with a text that is not a string", (await redact(BASE, { texts: ["x", 1] })).status === 400);
+    r = await redact(BASE, { texts: ["x".repeat(5 * 1024 * 1024)] });
+    ok("redact: a body past the limit is refused", r.status === 413, String(r.status));
+
+    r = await redact(BASE, { texts: ["write to refused@acme.com"] }, "redact-secret", { "x-cordon-fail": "1" });
+    ok("redact: a detection failure is 422", r.status === 422, String(r.status));
+    const refused = await r.text();
+    ok("redact: and returns no text", !refused.includes("refused@acme.com") && !refused.includes("texts"), refused);
+
+    const log = readFileSync("./_audit_test.jsonl", "utf8");
+    ok("redact: audited as text on its way to no provider", log.includes('"provider":"none"') && log.includes('"tenant":"redact"'));
+    ok("redact: the audit holds no value", !log.includes("kept.copy@acme.com"));
+  }
+
   // ---- audit chain + no values ----
   const v = await (await fetch(BASE + "/admin/audit/verify", { headers: { "x-admin-token": ADMIN } })).json();
   ok("audit: chain verifies", v.ok === true && v.records > 0, JSON.stringify(v));

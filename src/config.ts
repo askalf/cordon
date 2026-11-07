@@ -72,6 +72,11 @@ export const config = {
     allowOpen: env.ALLOW_OPEN_ADMIN === "1",
   },
 
+  // The token for POST /redact, separate from ADMIN_TOKEN: a caller that only needs text
+  // cleaned must not also hold the power to change a tenant's policy. Empty = the route is
+  // DISABLED (403), for the same reason the admin API is.
+  redactToken: env.REDACT_TOKEN || "",
+
   // Caller headers (X-Redact-Mode, X-Redact-Sets) may only make redaction STRICTER than
   // the tenant/global policy: a header can't turn redaction off or drop a set. true
   // restores the old "header always wins" behaviour globally; a tenant can opt in with

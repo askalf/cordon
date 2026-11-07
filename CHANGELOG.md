@@ -13,6 +13,8 @@ image and creates the GitHub release from this file.
 
 ## [Unreleased]
 
+- **`POST /redact` cleans text that is not on its way to a model.** cordon could only redact a request it was forwarding, so a copy of text being kept had no way through it. The route runs the same detectors in `strip` mode and sends nothing upstream. It has its own `REDACT_TOKEN`, off without one, and a detection or audit failure refuses the call and returns no text.
+
 ### Added
 
 - Request shapes (`SHAPE_LOG`): the shape of each request that names its subjects, with none of its text (keys, size classes, line counts and listed enum values; tool names as digests; caller-defined keys anonymised; no caller-chosen value kept), recorded once per distinct shape. `npm run replay:shapes` replays them with invented people and fails on a leak or a refusal of ordinary text, so real traffic shapes are tested without keeping any of it. The test battery records its own traffic's shapes and replays them (`_test_shapes.mjs`, `_test_replay_recorded.mjs`).

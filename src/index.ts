@@ -14,6 +14,8 @@ import { metrics } from "./metrics";
 import { setPolicy, getPolicy, allPolicies, load as loadPolicies } from "./policy";
 import { refDigest } from "./subject";
 import { audit } from "./audit";
+import { detector } from "./detect";
+import { stripText, tally } from "./redact/apply";
 import { dashboardHtml } from "./dashboard";
 import type { RedactMode, RedactSet } from "./types";
 
@@ -130,6 +132,58 @@ app.get("/admin/receipts", async (req, reply) => {
   }
   const subject = refDigest(ref, config.tenantSecret);
   return { subject, chain, receipts: await audit.forSubject(subject) };
+});
+
+// ---- text on its way to no provider ----
+function redactOk(req: any, reply: any): boolean {
+  if (!config.redactToken) {
+    reply.code(403).send({ error: `${config.brand}: redact route disabled, set REDACT_TOKEN to enable it` });
+    return false;
+  }
+  if (!tokenMatches(req.headers["x-redact-token"], config.redactToken)) {
+    reply.code(403).send({ error: `${config.brand}: invalid redact token` });
+    return false;
+  }
+  return true;
+}
+
+// A copy of text being kept, not a request being forwarded: the same detectors over the same
+// active sets, always strip, so nothing here can be restored. Nothing goes upstream. The sets
+// are the deployment's, never the caller's. A detection or audit failure refuses the whole
+// call, because a caller must never be handed text it would take for clean. Body: { texts: [] }.
+app.post("/redact", { bodyLimit: 4 * 1024 * 1024 }, async (req, reply) => {
+  if (!redactOk(req, reply)) return reply;
+  const texts = (req.body as any)?.texts;
+  if (!Array.isArray(texts) || texts.some((t) => typeof t !== "string")) {
+    reply.code(400);
+    return { error: `${config.brand}: \`texts\` must be an array of strings` };
+  }
+  const t0 = Date.now();
+  metrics.request("strip");
+  try {
+    if (config.testHooks && req.headers["x-cordon-fail"] === "1") throw new Error("forced detection failure (test hook)");
+    const results = texts.map((t: string) => stripText(t, config.activeSets, detector));
+    const spans = results.flatMap((r) => r.spans);
+    const counts = tally(spans);
+    metrics.redactions(counts, config.activeSets);
+    await audit.append({
+      tenant: "redact",
+      provider: "none",
+      model: "",
+      mode: "strip",
+      entityCounts: counts,
+      sets: config.activeSets,
+      total: spans.length,
+    });
+    metrics.timing("redact", t0);
+    return { texts: results.map((r) => r.text), total: spans.length, types: counts };
+  } catch (e) {
+    metrics.failedClosed();
+    metrics.timing("fail-closed", t0);
+    console.error(`[redact] refused: ${String((e as any)?.message ?? e)}`);
+    reply.code(422);
+    return { error: `${config.brand}: redaction failed, no text returned (fail-closed)` };
+  }
 });
 
 // ---- the proxy: OpenAI + Anthropic ----

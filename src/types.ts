@@ -104,7 +104,8 @@ export interface HttpRes {
 export interface AuditRecord {
   ts: number;
   tenant: string;
-  provider: Provider;
+  /** "none": text cleaned at /redact, on its way to no provider. */
+  provider: Provider | "none";
   model: string;
   mode: RedactMode;
   /** entity type → count (e.g. { EMAIL: 2, SSN: 1 }). */

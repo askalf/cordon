@@ -3,7 +3,7 @@ import { rmSync, writeFileSync, readFileSync } from "node:fs";
 import { runAll, detector } from "./src/detect/index.ts";
 import { luhn, ibanMod97, abaRouting, ssnValid } from "./src/detect/validators.ts";
 import { Vault } from "./src/redact/vault.ts";
-import { applyRedaction, tally, exactDecimal } from "./src/redact/apply.ts";
+import { applyRedaction, stripText, tally, exactDecimal } from "./src/redact/apply.ts";
 import { createHash } from "node:crypto";
 import { credentialOf, resolveTenant } from "./src/providers.ts";
 import { restoreCitation, reidentifyBody, StreamReidentifier, ArgStream, argContext, restoreArgs, restoreArgsWhole, hasDuplicateKeys, restoreArgObject, DeferredArgs, MAX_ARG_DEPTH, TopKeyTracker, isMintedPlaceholder } from "./src/redact/reidentify.ts";
@@ -983,6 +983,17 @@ ok("timeout: empty, zero, negative and Infinity -> default",
   b.release(); c.release();
   ok("reservePorts: release frees the locks", readdirSync(dir).length === 0);
   rmSync(dir, { recursive: true, force: true });
+}
+
+{
+  const out = stripText("mail me at a.person@acme.com", ["pii"], detector);
+  ok("stripText: an entity becomes its label", out.text === "mail me at [EMAIL]" && out.spans.length === 1, out.text);
+  const clean = stripText("nothing here", ["pii"], detector);
+  ok("stripText: clean text is unchanged", clean.text === "nothing here" && clean.spans.length === 0);
+  ok("stripText: only the sets asked for", stripText("mail a.person@acme.com", ["secrets"], detector).text === "mail a.person@acme.com");
+  let threw = false;
+  try { stripText("x", ["pii"], { name: "broken", detect() { throw new Error("boom"); } }); } catch { threw = true; }
+  ok("stripText: a detector failure reaches the caller", threw);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

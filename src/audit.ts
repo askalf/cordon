@@ -11,7 +11,7 @@ const GENESIS = "0";
 
 export interface AuditInput {
   tenant: string;
-  provider: Provider;
+  provider: Provider | "none";
   model: string;
   mode: RedactMode;
   entityCounts: Record<string, number>;
