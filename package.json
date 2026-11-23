@@ -41,7 +41,7 @@
     "@jazzer.js/core": "4.0.0",
     "@types/node": "^26.6.6",
     "esbuild": "0.28.2",
-    "fast-check": "^4.10.2",
+    "fast-check": "^4.10.3",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3"
   },
